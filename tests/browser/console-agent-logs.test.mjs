@@ -460,6 +460,11 @@ test("a log reader without operate reads log text in the Logs tab without runtim
   // Without status the console names no Pod; OCC reads the source's current Pod.
   const [first] = logRequests(requests, revisionId);
   assert.equal(new URL(first.path, fixture.origin).searchParams.has("pod"), false);
+  // The download is named after the Pod the page read, as with a Pod picker.
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download" }).click();
+  const saved = await downloadEvent;
+  assert.equal(saved.suggestedFilename(), `${agent.id}-${revisionId}-gateway-${pod}.log`);
 
   // The page's stream reports the restart, so the previous instance is readable.
   await page.getByLabel("Previous instance").check();

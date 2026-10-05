@@ -640,7 +640,15 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
       const link = element("a", {
         href: url,
-        download: downloadFileName(agent.id, revisionId, source.id, pod?.name ?? source.id),
+        // Without runtime status there is no Pod picker; name the Pod the last page read.
+        download: downloadFileName(
+          agent.id,
+          revisionId,
+          source.id,
+          pod?.name ??
+            (statusDenied && lastStream?.source === source.id ? lastStream.pod : null) ??
+            source.id,
+        ),
         hidden: true,
       });
       section.append(link);
