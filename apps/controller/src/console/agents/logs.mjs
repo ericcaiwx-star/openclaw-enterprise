@@ -617,6 +617,21 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     }
   }
 
+  // Without runtime status there is no Pod picker and OCC reads the source's current
+  // Pod: prefer the Pod the download's header names, then the last page's Pod.
+  function downloadPodName(text, source, pod) {
+    if (pod) {
+      return pod.name;
+    }
+    const header = text.slice(0, Math.max(0, text.indexOf("\n")));
+    const served = header.startsWith("# ") ? / pod=(\S+)/.exec(header)?.[1] : undefined;
+    return (
+      served ??
+      (statusDenied && lastStream?.source === source.id ? lastStream.pod : null) ??
+      source.id
+    );
+  }
+
   // A download is its own audited read of the last 1000 lines through the session.
   async function download() {
     const source = selectedSource();
@@ -640,14 +655,11 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
       const link = element("a", {
         href: url,
-        // Without runtime status there is no Pod picker; name the Pod the last page read.
         download: downloadFileName(
           agent.id,
           revisionId,
           source.id,
-          pod?.name ??
-            (statusDenied && lastStream?.source === source.id ? lastStream.pod : null) ??
-            source.id,
+          downloadPodName(text, source, pod),
         ),
         hidden: true,
       });
@@ -731,7 +743,8 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       showLogError(null);
       cursor = page.cursor;
       appendRecords(page.records);
-      if (statusDenied && page.stream) {
+      if (statusDenied) {
+        // A page with no running Pod clears the last Pod, so nothing names it.
         lastStream = page.stream;
         renderPickers();
       }
