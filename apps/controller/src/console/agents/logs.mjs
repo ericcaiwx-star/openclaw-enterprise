@@ -1,6 +1,6 @@
 import { element, button } from "../dom.mjs";
 import { displayDate, namespacePath } from "./list.mjs";
-import { SOURCE_LABELS, podCard, recordRow } from "./logs-view.mjs";
+import { SOURCE_LABELS, podCard, recordRow, visibleText } from "./logs-view.mjs";
 
 const STATUS_POLL_MS = 10_000;
 const FOLLOW_POLL_MS = 2_000;
@@ -364,7 +364,8 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     if (row.dataset.level === undefined) {
       return true;
     }
-    const text = filterInput.value.trim().toLowerCase();
+    // Rows hold escaped text, so a pasted line with an invisible character still matches.
+    const text = visibleText(filterInput.value.trim()).toLowerCase();
     return (
       !hiddenLevels.has(row.dataset.level) && (text === "" || row.dataset.search.includes(text))
     );

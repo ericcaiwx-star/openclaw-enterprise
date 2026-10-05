@@ -138,7 +138,9 @@ audited.
 
 Text output prints `TIME LEVEL KIND [SUBSYSTEM] MESSAGE key=value` per line.
 Gap and withheld records are printed to stderr as `notice:` lines; in JSON mode
-they are also records on stdout. With `--follow`, the CLI waits for
+they are also records on stdout. Text lines and notices show an invisible or
+control character, such as a bidirectional override, as an escape like
+`\u202e`; a field value holding one is quoted. JSON records are unchanged. With `--follow`, the CLI waits for
 `Retry-After` after a `429`, retries after a `504`, starts a new audited view
 when the cursor is rejected, and exits cleanly on Ctrl-C. `501`, `503` and
 permission errors end the command with a nonzero exit. `--follow` cannot be
@@ -184,3 +186,6 @@ printed by startup so it selects the same profile and state directory.
 The explicitly selected Kubernetes-only profile rejects Compose options. Use
 `scripts/dev-up` and `scripts/dev-down` as the common entry points for every
 profile; the Compute and Sandbox Driver settings select the implementation.
+When `scripts/dev-up` fails on the Docker profile, `occ dev up` exits with the
+script's status (`2` for a usage or configuration error) and prints nothing
+beyond the script's own message.
