@@ -923,7 +923,9 @@ export function createPluginFields({
               ? "No plugins configured. Choose Available plugins to add one."
               : catalog?.status === "ready"
                 ? "No plugins were returned."
-                : "Load plugins to browse available choices.",
+                : !catalog?.canLoad
+                  ? "To add a plugin by ID, close this dialog and edit Plugin selections JSON."
+                  : "Load plugins to browse available choices.",
         ),
       );
     }
