@@ -252,6 +252,39 @@ test("offline codex seccomp generator rejects invalid arguments before writing o
   }
 });
 
+// The helper sleeps 750 ms between Pod reads and measures its deadline with
+// Date.now(). A mocked clock fires each armed poll delay at once and moves
+// Date.now() forward by the same 750 ms, so every deadline and read count below
+// is the one a real wait would produce, without the wall time.
+async function withMockedPollClock(t, operation) {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    let settled = false;
+    const result = operation();
+    result.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    // performance.now() is not mocked. A helper that polls without arming its
+    // delay never advances the mocked clock, so fail fast instead of spinning;
+    // each run settles within milliseconds otherwise.
+    const started = performance.now();
+    while (!settled) {
+      assert.ok(
+        performance.now() - started < 5_000,
+        "the helper made no progress on the mocked clock within 5 s",
+      );
+      // setImmediate is not mocked: let file and injected-command work run, then
+      // fire whichever poll delay the helper armed meanwhile.
+      await new Promise((resolve) => setImmediate(resolve));
+      t.mock.timers.runAll();
+    }
+    return await result;
+  } finally {
+    t.mock.timers.reset();
+  }
+}
+
 // Exercise the real preparation/cleanup path with injected command responses.
 // These ordered API observations are synthetic, not a claimed live Pod transition.
 async function missingProfileFixture(t, observations, options = {}) {
@@ -269,6 +302,10 @@ async function missingProfileFixture(t, observations, options = {}) {
   let missingReads = 0;
   let cleanupCalls = 0;
   const execFile = async (command, args) => {
+    // Like a real child process, every injected command completes on a later turn.
+    // This also lets withMockedPollClock's guard run between polls: a poll loop
+    // that stayed on the microtask queue would starve it.
+    await new Promise((resolve) => setImmediate(resolve));
     if (command === "kubectl") {
       if (args.includes("create")) {
         return { stdout: "", stderr: "" };
@@ -299,7 +336,8 @@ async function missingProfileFixture(t, observations, options = {}) {
         const profile =
           applied.get(name).spec.containers[0].securityContext.seccompProfile?.localhostProfile;
         if (profile?.includes("missing-")) {
-          const observation = observations[Math.min(missingReads, observations.length - 1)];
+          const entry = observations[Math.min(missingReads, observations.length - 1)];
+          const observation = typeof entry === "function" ? entry(profile) : entry;
           missingReads += 1;
           if (observation instanceof Error) {
             throw observation;
@@ -364,12 +402,14 @@ async function missingProfileFixture(t, observations, options = {}) {
   };
   return {
     run: () =>
-      prepareCodexSeccompProfile({
-        cluster,
-        image: `registry.invalid/runtime@sha256:${"a".repeat(64)}`,
-        execFile,
-        timeoutMs: options.timeoutMs ?? 2_000,
-      }),
+      withMockedPollClock(t, () =>
+        prepareCodexSeccompProfile({
+          cluster,
+          image: `registry.invalid/runtime@sha256:${"a".repeat(64)}`,
+          execFile,
+          timeoutMs: options.timeoutMs ?? 2_000,
+        }),
+      ),
     reads: () => missingReads,
     async assertCleanup() {
       assert.equal(cleanupCalls, 1);
@@ -381,10 +421,18 @@ async function missingProfileFixture(t, observations, options = {}) {
   };
 }
 
-const missingProfileWaiting = {
-  name: "probe",
-  state: { waiting: { reason: "CreateContainerError", message: "seccomp profile is not found" } },
+// k3s v1.35.8+k3s1 selects containerd v2.2.7-k3s1. Its WithProfile
+// error names the quoted profile path and os.ReadFile cause; CreateContainer wraps it.
+const missingProfileMessage = (profile) => {
+  const path = `/var/lib/kubelet/seccomp/${profile}`;
+  return `cannot load seccomp profile ${JSON.stringify(path)}: open ${path}: no such file or directory`;
 };
+const profileWaiting = (message) => ({
+  name: "probe",
+  state: { waiting: { reason: "CreateContainerError", message } },
+});
+const missingProfileWaiting = (profile) =>
+  profileWaiting(`failed to create containerd container: ${missingProfileMessage(profile)}`);
 const reportedContainer = { name: "probe", containerID: "containerd://reported-probe" };
 
 test("missing-profile preparation cannot forget a reported container before a later valid observation", async (t) => {
@@ -434,3 +482,66 @@ test("missing-profile terminal failure remains primary when cleanup also fails",
   assert.equal(control.reads(), 1);
   await control.assertCleanup();
 });
+
+for (const wrapped of [false, true]) {
+  test(`missing-profile proof accepts the exact generated path (${wrapped ? "CRI wrapped" : "direct"})`, async (t) => {
+    const control = await missingProfileFixture(t, [
+      (profile) => {
+        assert.match(profile, /^openclaw\/missing-[a-f0-9]+-codex-bwrap\.json$/);
+        const message = missingProfileMessage(profile);
+        return profileWaiting(
+          wrapped ? `failed to create containerd container: ${message}` : message,
+        );
+      },
+    ]);
+    await control.run();
+    assert.equal(control.reads(), 1);
+    await control.assertCleanup();
+  });
+}
+
+// All messages describe CreateContainerError, but none proves this generated file is missing.
+for (const [label, message] of [
+  [
+    "AppArmor profile",
+    (profile) =>
+      `cannot load AppArmor profile "/var/lib/kubelet/seccomp/${profile}": no such file or directory`,
+  ],
+  ["another seccomp profile", () => missingProfileMessage("openclaw/wrong.json")],
+  ["profile path prefix", (profile) => missingProfileMessage(`prefix/${profile}`)],
+  ["profile path suffix", (profile) => missingProfileMessage(`${profile}.other`)],
+  [
+    "incidental expected path",
+    (profile) =>
+      `${missingProfileMessage("openclaw/wrong.json")} (expected /var/lib/kubelet/seccomp/${profile})`,
+  ],
+  ["generic profile text", () => "seccomp profile is not found"],
+  [
+    "permission denied",
+    (profile) =>
+      missingProfileMessage(profile).replace("no such file or directory", "permission denied"),
+  ],
+  [
+    "malformed profile",
+    (profile) =>
+      `decoding seccomp profile failed "/var/lib/kubelet/seccomp/${profile}": invalid character`,
+  ],
+  [
+    "unexpected diagnostic prefix",
+    (profile) => `AppArmor failure: ${missingProfileMessage(profile)}`,
+  ],
+  ["unexpected diagnostic suffix", (profile) => `${missingProfileMessage(profile)}; another error`],
+]) {
+  test(`missing-profile proof rejects ${label} and cleans up`, async (t) => {
+    const control = await missingProfileFixture(
+      t,
+      [(profile) => profileWaiting(message(profile))],
+      {
+        timeoutMs: 5,
+      },
+    );
+    await assert.rejects(control.run, /Timed out waiting for Pod .* to fail closed/);
+    assert.equal(control.reads(), 1);
+    await control.assertCleanup();
+  });
+}
