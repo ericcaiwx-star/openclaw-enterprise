@@ -512,7 +512,9 @@ test("Create Agent discovers hosted plugins with a transient PAT through the sel
   await dialog.getByRole("status").filter({ hasText: "Searching plugins…" }).waitFor();
   assert.equal(
     await dialog
-      .getByText(/^(No plugins were returned\.|Load plugins to browse available choices\.)$/)
+      .getByText(
+        /^(No plugins were returned\.|Load plugins to browse available choices\.|To add a plugin by ID, choose Done and edit Plugin selections JSON\.)$/,
+      )
       .count(),
     0,
   );
@@ -548,7 +550,9 @@ test("Create Agent discovers hosted plugins with a transient PAT through the sel
   await dialog.getByRole("status").filter({ hasText: "Searching plugins…" }).waitFor();
   assert.equal(
     await dialog
-      .getByText(/^(No plugins were returned\.|Load plugins to browse available choices\.)$/)
+      .getByText(
+        /^(No plugins were returned\.|Load plugins to browse available choices\.|To add a plugin by ID, choose Done and edit Plugin selections JSON\.)$/,
+      )
       .count(),
     0,
   );

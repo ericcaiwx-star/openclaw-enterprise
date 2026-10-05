@@ -1285,7 +1285,7 @@ test("Agent draft plugin picker warns that API-key Codex Agents cannot use plugi
   assert.equal(await dialog.getByRole("button", { name: "Load plugins" }).isDisabled(), true);
   // The empty list must not tell the user to load a catalog they cannot load.
   await dialog
-    .getByText("To add a plugin by ID, close this dialog and edit Plugin selections JSON.")
+    .getByText("To add a plugin by ID, choose Done and edit Plugin selections JSON.")
     .waitFor();
   assert.equal(await dialog.getByText("Load plugins to browse available choices.").count(), 0);
   assert.equal(
