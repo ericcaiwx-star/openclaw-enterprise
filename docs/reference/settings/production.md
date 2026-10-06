@@ -241,10 +241,13 @@ before another attempt.
 | `OCC_BOOTSTRAP_INSTALLATION_NAME` | Nonempty display name used when creating the Installation.                                              |
 | `OCC_BOOTSTRAP_SERVICE_KEY_FILE`  | New private absolute JSON path; on fresh production bootstrap, a distinct sibling of the password file. |
 
-Repeated bootstrap preserves the existing Installation only when the exact
-administrator account and IAM identity still match; a mismatch fails closed.
-Existing Namespaces and their configuration remain unchanged; no initial
-Namespace is backfilled or recreated.
+Bootstrap requires HTTPS except for HTTP loopback verification
+(`127.0.0.1`, `localhost`, `[::1]`).
+
+Repeated bootstrap preserves an existing Installation only when its administrator
+account and IAM identity match exactly. A mismatch fails closed. Existing
+Namespaces and configuration remain unchanged; it does not recreate or backfill
+the initial Namespace.
 On fresh bootstrap, both files are created exclusively with mode `0600`; their
 parent directory must be private and neither destination may already exist.
 Helm sets the key path from `bootstrap.password.mountPath` and
