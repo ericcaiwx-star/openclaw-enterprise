@@ -53,6 +53,8 @@ import {
   normalizePluginDesiredState,
   normalizePluginApprovers,
   normalizeHarnessAuthBinding,
+  isSecretHarnessAuth,
+  isServiceAccountHarnessAuth,
   harnessAuthBindingFromSnapshot,
   normalizeSecretBindings,
   validPluginRevisionState,
@@ -479,27 +481,18 @@ export function validHarnessAuthSnapshot(value: HarnessAuthSnapshot, namespaceId
         value.loginMode === "api_key"
       );
     }
-    const binding =
-      value.method === "api_key" || value.method === "codex_pat" || value.method === "oauth"
-        ? normalizeHarnessAuthBinding({ method: value.method, source: value.source })
-        : normalizeHarnessAuthBinding({
-            method: value.method,
-            serviceAccountId: value.serviceAccountId,
-          });
-    if (
-      binding?.method === "api_key" ||
-      binding?.method === "codex_pat" ||
-      binding?.method === "oauth"
-    ) {
+    const binding = normalizeHarnessAuthBinding({ method: value.method, source: value.source });
+    if (isSecretHarnessAuth(binding)) {
       return (
         Object.keys(value).length === 3 &&
         binding.source.namespaceId === namespaceId &&
-        (value.method === "api_key" || value.method === "codex_pat" || value.method === "oauth") &&
+        isSecretHarnessAuth(value) &&
         isNonEmptyString(value.secretDriverId)
       );
     }
     if (
-      value.method !== "chatgpt_service_account" ||
+      !isServiceAccountHarnessAuth(value) ||
+      value.source.namespaceId !== namespaceId ||
       Object.keys(value).length !== 4 ||
       !validCredential(value.credential) ||
       value.credential.kind !== "access_token"
@@ -532,19 +525,16 @@ export function harnessAuthMatches(
   if (binding.method === "runtime") {
     return true;
   }
-  return (binding.method === "api_key" ||
-    binding.method === "codex_pat" ||
-    binding.method === "oauth") &&
-    (snapshot.method === "api_key" ||
-      snapshot.method === "codex_pat" ||
-      snapshot.method === "oauth")
-    ? binding.source.namespaceId === snapshot.source.namespaceId &&
-        binding.source.id === snapshot.source.id
-    : binding.method === "credential_source" && snapshot.method === "credential_source"
-      ? binding.sourceId === snapshot.sourceId
-      : binding.method === "chatgpt_service_account" &&
-        snapshot.method === "chatgpt_service_account" &&
-        binding.serviceAccountId === snapshot.serviceAccountId;
+  if (binding.method === "credential_source" && snapshot.method === "credential_source") {
+    return binding.sourceId === snapshot.sourceId;
+  }
+  return (
+    "source" in binding &&
+    "source" in snapshot &&
+    binding.source.kind === snapshot.source.kind &&
+    binding.source.namespaceId === snapshot.source.namespaceId &&
+    binding.source.id === snapshot.source.id
+  );
 }
 
 function harnessSecretReference(
@@ -553,9 +543,7 @@ function harnessSecretReference(
   secretId: string,
 ): boolean {
   return (
-    (binding?.method === "api_key" ||
-      binding?.method === "codex_pat" ||
-      binding?.method === "oauth") &&
+    isSecretHarnessAuth(binding) &&
     binding.source.namespaceId === namespaceId &&
     binding.source.id === secretId
   );
@@ -572,9 +560,7 @@ function harnessAccountReference(
   binding: HarnessAuthBinding | undefined | null,
   serviceAccountId: string,
 ): boolean {
-  return (
-    binding?.method === "chatgpt_service_account" && binding.serviceAccountId === serviceAccountId
-  );
+  return isServiceAccountHarnessAuth(binding) && binding.source.id === serviceAccountId;
 }
 
 export async function assertHarnessAuthAvailable(
@@ -591,11 +577,7 @@ export async function assertHarnessAuthAvailable(
   if (binding === null || binding.method === "runtime") {
     return;
   }
-  if (
-    binding.method === "api_key" ||
-    binding.method === "codex_pat" ||
-    binding.method === "oauth"
-  ) {
+  if (isSecretHarnessAuth(binding)) {
     if (
       binding.source.namespaceId !== namespaceId ||
       (await state.secrets.findSecret(namespaceId, binding.source.id)) === undefined
@@ -615,8 +597,8 @@ export async function assertHarnessAuthAvailable(
       );
     }
   } else if (
-    (await state.serviceAccounts.findServiceAccount(namespaceId, binding.serviceAccountId)) ===
-    undefined
+    binding.source.namespaceId !== namespaceId ||
+    (await state.serviceAccounts.findServiceAccount(namespaceId, binding.source.id)) === undefined
   ) {
     throw new ScopeViolationError(
       "The Agent harness authentication references an unavailable ServiceAccount.",
@@ -2790,6 +2772,106 @@ function repositories(
   };
 }
 
+/**
+ * The memory counterpart of `occ.finalize_agent_deletion` (migrations/0035), applied to the
+ * records this adapter keeps. Returns false unless the Agent's deletion was admitted: it is
+ * `deleting`, stopped, and its `deleted` lifecycle work is recorded.
+ */
+function finalizeAgentDeletion(
+  snapshot: PlatformSnapshot,
+  namespaceId: string,
+  agentId: string,
+): boolean {
+  const work = snapshot.operations.find(
+    (operation) =>
+      operation.kind === "agent" &&
+      operation.target === "deleted" &&
+      operation.namespaceId === namespaceId &&
+      operation.resourceId === agentId,
+  );
+  const key = agentKey(namespaceId, agentId);
+  const agent = snapshot.agents.get(key);
+  if (
+    work === undefined ||
+    snapshot.namespaces.get(namespaceId) === undefined ||
+    agent === undefined ||
+    agent.status !== "deleting" ||
+    agent.desiredRuntimeState !== "stopped"
+  ) {
+    return false;
+  }
+  const installation = snapshot.installation;
+  if (installation === undefined) {
+    throw new ScopeViolationError("The server-owned Installation has not been initialized.");
+  }
+  const revisionIds = new Set((snapshot.revisions.get(key) ?? []).map((revision) => revision.id));
+
+  // Attempts outlive their revision as evidence (migrations/0035): completion detaches every
+  // attempt's live revision without waiting for repository cleanup, whatever its phase.
+  for (const [admissionId, attempt] of snapshot.repositorySessions) {
+    if (
+      attempt.namespaceId === namespaceId &&
+      attempt.agentId === agentId &&
+      attempt.liveRevisionId !== null
+    ) {
+      snapshot.repositorySessions.set(
+        admissionId,
+        immutableCopy({ ...attempt, liveRevisionId: null }),
+      );
+    }
+  }
+
+  // The finalizer's three AccessBinding groups: the Agent's ServicePrincipal as subject, the
+  // Agent as target, and the Agent's AgentRevisions as target. Like the SQL, the first two are
+  // not Namespace-scoped. Restrictions live in the IAM driver's seed here, not in this state.
+  for (const [bindingKey, binding] of snapshot.bindings) {
+    if (
+      (binding.subjectKind === "identity" && binding.subjectId === agent.servicePrincipalId) ||
+      (binding.resourceKind === "agent" && binding.resourceId === agentId) ||
+      (binding.resourceKind === "agent_revision" &&
+        binding.resourceId !== undefined &&
+        revisionIds.has(binding.resourceId))
+    ) {
+      snapshot.bindings.delete(bindingKey);
+    }
+  }
+
+  // The setup cascades with its Agent. Credential withdrawals already end with their revision
+  // here (liveWithdrawal), as the database cascade does.
+  snapshot.workspaceSetups.delete(key);
+  snapshot.revisions.delete(key);
+  snapshot.agents.delete(key);
+
+  snapshot.audit.push(
+    immutableCopy({
+      id: `aud_${crypto.randomUUID()}`,
+      installationId: installation.id,
+      namespaceId,
+      occurredAt: new Date().toISOString(),
+      kind: "mutation" as const,
+      actorId: work.actorId,
+      source: "occ" as const,
+      action: "openclaw.agents.lifecycle.delete",
+      resource: { kind: "agent" as const, id: agentId, namespaceId },
+      outcome: "success" as const,
+      // Memory work is never claimed or retried, so its completion is the first attempt.
+      details: { reasonCode: "AGENT_DELETED", attemptCount: 1 },
+    }),
+  );
+
+  // The Agent's own lifecycle work and its revisions' work end with it.
+  const remaining = snapshot.operations.filter(
+    (operation) =>
+      operation.namespaceId !== namespaceId ||
+      !(
+        (operation.kind === "agent" && operation.resourceId === agentId) ||
+        (operation.kind === "agent_revision" && revisionIds.has(operation.resourceId))
+      ),
+  );
+  snapshot.operations.splice(0, snapshot.operations.length, ...remaining);
+  return true;
+}
+
 /** Process-local, single-writer state. No restart or multi-process durability. */
 export class InMemoryPlatformState implements PlatformStateStore {
   private snapshot: PlatformSnapshot = {
@@ -2844,6 +2926,25 @@ export class InMemoryPlatformState implements PlatformStateStore {
   }
 
   async transact<T>(work: (state: PlatformUnitOfWork) => Promise<T>): Promise<T> {
+    return this.commit((working, lifetime) =>
+      work(bindPlatformUnitOfWork(repositories(working, this.iamSubjects), lifetime)),
+    );
+  }
+
+  /**
+   * Completes an admitted Agent deletion the way the PostgreSQL worker's finalizer does
+   * (`PostgresWorkQueue.completeAgentDeletion`). Memory records lifecycle work but never
+   * executes it, so dev and test callers complete it here. Removes the Agent, its
+   * AgentRevisions and every AccessBinding the deletion audit listed, and records the
+   * `openclaw.agents.lifecycle.delete` success. Returns false when no deletion was admitted.
+   */
+  async completeAgentDeletion(namespaceId: string, agentId: string): Promise<boolean> {
+    return this.commit(async (working) => finalizeAgentDeletion(working, namespaceId, agentId));
+  }
+
+  private async commit<T>(
+    work: (working: PlatformSnapshot, lifetime: RepositoryTransactionLifetime) => Promise<T>,
+  ): Promise<T> {
     const previous = this.pending;
     let release: (() => void) | undefined;
     this.pending = new Promise<void>((resolve) => {
@@ -2854,9 +2955,7 @@ export class InMemoryPlatformState implements PlatformStateStore {
       await previous;
       const working = cloneSnapshot(this.snapshot);
       const committedAuditCount = working.audit.length;
-      const result = await work(
-        bindPlatformUnitOfWork(repositories(working, this.iamSubjects), lifetime),
-      );
+      const result = await work(working, lifetime);
       await lifetime.finish();
       await this.publishAudit(working.audit.slice(committedAuditCount));
       this.snapshot = working;
