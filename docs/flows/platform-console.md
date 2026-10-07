@@ -146,7 +146,8 @@ their pinned `x-occ-session-key`, so a replaced cookie yields login.
 `authError=<provider>` shows a generic, one-time error; with `authError=github`, an
 `authReason` of `membership` or `membership-unavailable` explains a GitHub
 [allowlist](../reference/authentication/external-sign-in.md#organization-and-team-allowlist)
-refusal instead. The
+refusal instead. With any provider, `account-disabled` says the account is disabled and to ask
+an administrator to enable it. The
 [authentication flow](local-password-authentication.md#3-construct-session-authentication)
 owns the server side.
 
@@ -345,6 +346,8 @@ refresh and inspection.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-07 12:30: Explain a disabled account's provider sign-in (`authReason=account-disabled`). (fix-member-1007/d534)
 
 - 2026-10-03 22:38: Trace switching between listed and manual model entry, preserving listed models and one submitted model. (01a10328-9de5-7081-ada2-d88ff80161e4 - 340feea42)
 - 2026-10-03 20:00: Rebuild a view retained without a Namespace selection once one is readable, so the header selector shows the default.
