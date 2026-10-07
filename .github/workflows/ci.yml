@@ -352,8 +352,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           artifact-prefix: ci-results
 
-  # Real Keycloak OIDC proof (RFC-0059) on every PR and merge. Deliberately not a
-  # CI Required dependency until it has soaked on main.
+  # Real Keycloak OIDC proof in full-mode PR CI and on pushes to main.
+  # Deliberately not a CI Required dependency until it has soaked on main.
   keycloak-oidc:
     name: Keycloak OIDC
     needs: impact
