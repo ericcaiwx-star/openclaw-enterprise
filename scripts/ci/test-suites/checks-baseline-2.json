@@ -96,6 +96,9 @@
   },
   "files": [
     {
+      "path": "tests/integration/tls-peer-certificate.test.mjs"
+    },
+    {
       "path": "tests/integration/dev-codex-seccomp-failure.test.mjs"
     },
     {

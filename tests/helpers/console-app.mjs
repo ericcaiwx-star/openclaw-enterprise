@@ -85,7 +85,13 @@ export function chromiumTrustArg(certs) {
  * leaf to serve; without it a one-day self-signed leaf for `originHost` is made with openssl.
  * Returns the leaf, the Chromium flag that trusts it, and close().
  */
-export async function startHttpsIngress({ port, upstreamPort, originHost = "127.0.0.1", tls, reusePort = false }) {
+export async function startHttpsIngress({
+  port,
+  upstreamPort,
+  originHost = "127.0.0.1",
+  tls,
+  reusePort = false,
+}) {
   let key = tls?.key;
   let cert = tls?.cert;
   if (tls === undefined) {
@@ -391,7 +397,10 @@ export async function createConsoleAppFixture(t, options = {}) {
   if (options.https === true) {
     // Exercise browser Secure/Domain cookies through a real TLS ingress to the HTTP API.
     const ingress = await startHttpsIngress({
-      port: browserPort, upstreamPort: port, originHost, reusePort: browserReservation.reusePort,
+      port: browserPort,
+      upstreamPort: port,
+      originHost,
+      reusePort: browserReservation.reusePort,
     });
     await browserReservation.release();
     cleanupBeforeAppClose.push(ingress.close);

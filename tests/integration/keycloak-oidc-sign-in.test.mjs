@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { connect } from "node:tls";
 import test, { after } from "node:test";
+import { tlsPeerCertificate } from "../helpers/tls-peer-certificate.mjs";
 import pg from "pg";
 import { chromium } from "playwright";
 import { oidcLoginConfiguration } from "../../apps/controller/src/auth/oidc.ts";
@@ -118,21 +118,12 @@ after(async () => {
 /** The Keycloak leaf as served on 127.0.0.1:443, verified against the lane CA. */
 async function keycloakLeaf() {
   const ca = await readFile(process.env.OCC_TEST_KEYCLOAK_CA_CERT);
-  const socket = connect({
+  return tlsPeerCertificate({
     host: "127.0.0.1",
     port: 443,
     servername: new URL(issuer).hostname,
     ca,
   });
-  try {
-    await new Promise((resolve, reject) => {
-      socket.once("secureConnect", resolve);
-      socket.once("error", reject);
-    });
-    return socket.getPeerX509Certificate().toString();
-  } finally {
-    socket.destroy();
-  }
 }
 
 /**
