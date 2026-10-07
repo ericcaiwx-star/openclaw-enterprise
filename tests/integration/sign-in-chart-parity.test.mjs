@@ -1421,10 +1421,11 @@ test(
         "HTTP://console.oce.example.internal",
         "http://192.0.2.10:8080",
         "http://127.0.0.2",
-        "http://[::1]:8080",
         "http://localhost.",
         "http://localhost.oce.example.internal",
       ].map((baseUrl) => ({ baseUrl, chart: plainHttp, api: true, job: false })),
+      // Helm reads http://[::1] as hostname ::1, which the bootstrap Job admits.
+      { baseUrl: "http://[::1]:8080", chart: undefined, api: true, job: true },
       // Deliberately stricter: Node repairs these degenerate spellings into an origin, or
       // reads another IPv4 spelling (shorthand, octal, hex, trailing dot) as 127.0.0.1.
       ...[
