@@ -21,7 +21,7 @@ import { authenticatedHeaders, signInWithEmailPassword } from "./auth-session.mj
 import { createTestConfigurationDriver } from "./configuration-driver.mjs";
 import { createTestSecretDriver } from "./secret-driver.mjs";
 import { createTestKubernetesComputeDriver } from "./kubernetes-compute.mjs";
-import { availablePort } from "./available-port.mjs";
+import { reservePort } from "./available-port.mjs";
 
 export const backendFixtures = Object.freeze([
   Object.freeze({
@@ -85,7 +85,7 @@ export function chromiumTrustArg(certs) {
  * leaf to serve; without it a one-day self-signed leaf for `originHost` is made with openssl.
  * Returns the leaf, the Chromium flag that trusts it, and close().
  */
-export async function startHttpsIngress({ port, upstreamPort, originHost = "127.0.0.1", tls }) {
+export async function startHttpsIngress({ port, upstreamPort, originHost = "127.0.0.1", tls, reusePort = false }) {
   let key = tls?.key;
   let cert = tls?.cert;
   if (tls === undefined) {
@@ -138,7 +138,7 @@ export async function startHttpsIngress({ port, upstreamPort, originHost = "127.
     upstream.on("error", () => outgoing.writeHead(502).end());
     incoming.pipe(upstream);
   });
-  ingress.listen(port, "127.0.0.1");
+  ingress.listen({ port, host: "127.0.0.1", reusePort });
   await once(ingress, "listening");
   return {
     cert,
@@ -154,15 +154,17 @@ export async function startHttpsIngress({ port, upstreamPort, originHost = "127.
 
 export async function createConsoleAppFixture(t, options = {}) {
   const installationId = `ins_${randomUUID()}`;
-  const port =
-    options.https !== true && options.browserPort !== undefined
-      ? options.browserPort
-      : await availablePort();
+  // The ports are part of the origins the app is configured with, so hold them until the
+  // listeners bind them; a released probe port can be taken by another listener meanwhile.
+  const appPort = await reservePort();
+  t.after(appPort.release);
+  const port = appPort.port;
   const originHost = options.originHost ?? "127.0.0.1";
-  // `browserPort` binds the browser-facing origin (the HTTPS ingress, or the API itself)
-  // to a port the caller reserved, for example one an IdP's redirect URI names.
-  const browserPort =
-    options.https === true ? (options.browserPort ?? (await availablePort())) : port;
+  const browserReservation = options.https === true ? await reservePort() : null;
+  if (browserReservation !== null) {
+    t.after(browserReservation.release);
+  }
+  const browserPort = browserReservation?.port ?? port;
   const origin = `${options.https === true ? "https" : "http"}://${originHost}:${browserPort}`;
   const browserArgs = [];
   const transportOrigin = `http://127.0.0.1:${port}`;
@@ -316,6 +318,8 @@ export async function createConsoleAppFixture(t, options = {}) {
         recordOperations: options.recordOperations ?? false,
         backends,
         defaultPresets: options.defaultPresets ?? [],
+        bundledPresetVersions: options.bundledPresetVersions ?? [],
+        refreshBundledDefaultPresets: options.refreshBundledDefaultPresets === true,
         ...(options.nativeWorkerSupport === undefined
           ? {}
           : { nativeWorkerSupport: options.nativeWorkerSupport }),
@@ -347,7 +351,8 @@ export async function createConsoleAppFixture(t, options = {}) {
   if (options.onSend) {
     app.addHook("onSend", options.onSend);
   }
-  await app.listen({ host: "127.0.0.1", port });
+  await app.listen({ host: "127.0.0.1", port, reusePort: appPort.reusePort });
+  await appPort.release();
   const cleanupBeforeAppClose = [];
   let appClosed = false;
 
@@ -385,7 +390,10 @@ export async function createConsoleAppFixture(t, options = {}) {
 
   if (options.https === true) {
     // Exercise browser Secure/Domain cookies through a real TLS ingress to the HTTP API.
-    const ingress = await startHttpsIngress({ port: browserPort, upstreamPort: port, originHost });
+    const ingress = await startHttpsIngress({
+      port: browserPort, upstreamPort: port, originHost, reusePort: browserReservation.reusePort,
+    });
+    await browserReservation.release();
     cleanupBeforeAppClose.push(ingress.close);
     browserArgs.push(ingress.browserArg);
   }
@@ -624,6 +632,8 @@ export async function createConsoleAppFixture(t, options = {}) {
     memoryDatabase,
     provisionedAccounts,
     policy,
+    // The real Native IAM Driver, for tests that simulate an IAM outage at its boundary.
+    iamDriver,
     rawRequest,
     request,
     signIn,
