@@ -19,7 +19,7 @@ async function fixture(t, sandboxDriver) {
   await Promise.all([
     writeFile(
       join(tools, "docker"),
-      '#!/bin/sh\nprintf "%s\\n" "$*" > "$FIRST_AGENT_TEST_ENGINE_LOG"\nexit 23\n',
+      '#!/bin/sh\nprintf "%s\\n" "$*" > "$FIRST_AGENT_TEST_ENGINE_LOG"\nprintf "controller container is unavailable\\033[31m\\n" >&2\nprintf "%9000s" "" >&2\nexit 23\n',
       { mode: 0o700 },
     ),
     writeFile(join(directory, ".openclaw-development"), "openclaw-enterprise-development-v3\n", {
@@ -82,7 +82,18 @@ test("first-Agent accepts current Compose-backed Kubernetes development state", 
 
   // Reaching the engine proves state admission succeeded without replacing the
   // external Compose behavior that this focused test does not exercise.
-  assert.match(runFirstAgent(env), /docker did not complete successfully/);
+  const output = runFirstAgent(env);
+  assert.match(
+    output,
+    /docker did not complete successfully.*controller container is unavailable/s,
+  );
+  assert.match(output, /\[stderr truncated\]/);
+  assert.ok(output.length < 9_000, "first-Agent should not echo unbounded subprocess stderr");
+  assert.equal(
+    output.includes(String.fromCharCode(27)),
+    false,
+    "stderr must not inject terminal controls",
+  );
   assert.match(await readFile(engineLog, "utf8"), /compose .* port controller 3000/);
 });
 
