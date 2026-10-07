@@ -11,13 +11,16 @@ test(
   { timeout: 15_000 },
   async () => {
     const sockets = new Set();
-    let peerClosed = false;
+    let recordPeerClose;
+    const peerClosed = new Promise((resolve) => {
+      recordPeerClose = resolve;
+    });
     const server = createServer((socket) => {
       sockets.add(socket);
       socket.resume();
       socket.on("close", () => {
         sockets.delete(socket);
-        peerClosed = true;
+        recordPeerClose();
       });
     });
     server.listen(0, "127.0.0.1");
@@ -40,12 +43,13 @@ test(
         /TLS certificate handshake timed out after 10000 ms/,
       );
       // Observe the remote close before fixture cleanup can hide a leaked socket.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      assert.equal(peerClosed, true, "timed-out TLS socket must be destroyed");
+      await Promise.race([peerClosed, limit]);
       assert.equal(sockets.size, 0);
     } finally {
       clearTimeout(watchdog);
-      for (const socket of sockets) socket.destroy();
+      for (const socket of sockets) {
+        socket.destroy();
+      }
       await new Promise((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
