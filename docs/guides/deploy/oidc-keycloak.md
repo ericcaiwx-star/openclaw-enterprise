@@ -124,7 +124,9 @@ The `keycloak-oidc` CI lane signs in through the pinned Keycloak, the realm file
 real browser, with the production API and its unmodified HTTPS transport. Each row is
 one named test in
 [`keycloak-oidc-sign-in.test.mjs`](../../../tests/integration/keycloak-oidc-sign-in.test.mjs).
-The lane runs on every pull request but is not yet a required check.
+The lane runs in full-mode pull request CI and on pushes to `main`. It is not
+yet a dependency of `CI Required`; documentation-only and test-only CI modes
+do not run it.
 
 | Test                                                                                                                                                                        | What it shows for operators                                                                                                |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
