@@ -1348,6 +1348,8 @@ test(
         "https://bücher.oce.example.internal",
         "https://console.例え.テスト",
       ].map((baseUrl) => ({ baseUrl, chart: undefined, api: true, job: true })),
+      // Helm reads http://[::1] as hostname ::1, which the bootstrap Job admits.
+      { baseUrl: "http://[::1]:8080", chart: undefined, api: true, job: true },
       // URL parsing strips only C0 controls and spaces from the ends, so other Unicode spaces
       // and invisible characters there reach the parser, which refuses them in the scheme or a
       // host. The chart refuses them all; it is deliberately stricter for U+FEFF and U+200B at
@@ -1424,8 +1426,6 @@ test(
         "http://localhost.",
         "http://localhost.oce.example.internal",
       ].map((baseUrl) => ({ baseUrl, chart: plainHttp, api: true, job: false })),
-      // Helm reads http://[::1] as hostname ::1, which the bootstrap Job admits.
-      { baseUrl: "http://[::1]:8080", chart: undefined, api: true, job: true },
       // Deliberately stricter: Node repairs these degenerate spellings into an origin, or
       // reads another IPv4 spelling (shorthand, octal, hex, trailing dot) as 127.0.0.1.
       ...[
