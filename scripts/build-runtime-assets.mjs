@@ -297,7 +297,7 @@ if (command === "inputs") {
         openclawConnectPatchSha256:
           "c57722da9a88ec4295577ab9a9ba6e2ca37fceda11ce8b51b08ee1425e00851f",
         codexDependencyPinPatchSha256:
-          "82ce5903b9e11bb4e0d7a0c541660e799926ec91f45bb8d761af00926d4f15b8",
+          "00d44f40352fa9c5a7ae80b986eb25baf014d26f892b8849646c1922ef8c7a9c",
         artifactKind: "assembled-runtime-root",
         runtimeContentsSha256: hash(contents),
         lockfileSha256: hash(await readFile(join(root, "pnpm-lock.yaml"))),

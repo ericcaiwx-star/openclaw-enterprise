@@ -1,169 +1,106 @@
 diff --git a/extensions/codex/package.json b/extensions/codex/package.json
+index 0130d9c07..88cb0c8fd 100644
 --- a/extensions/codex/package.json
 +++ b/extensions/codex/package.json
-@@ -8,7 +8,7 @@
-   },
-   "type": "module",
-   "dependencies": {
+@@ -11 +11 @@
 -    "@openai/codex": "0.160.0",
 +    "@openai/codex": "0.163.0-alpha.1",
-     "@openclaw/fs-safe": "0.24.2",
-     "semver": "7.8.5",
-     "smol-toml": "1.8.0",
 diff --git a/extensions/codex/src/app-server/version.ts b/extensions/codex/src/app-server/version.ts
+index 375c184d0..8ad20cfce 100644
 --- a/extensions/codex/src/app-server/version.ts
 +++ b/extensions/codex/src/app-server/version.ts
-@@ -1,5 +1,5 @@
- /** Exact Codex app-server version shipped by the OpenClaw Codex bridge. */
+@@ -2 +2 @@
 -export const CODEX_APP_SERVER_VERSION = "0.160.0";
 +export const CODEX_APP_SERVER_VERSION = "0.163.0-alpha.1";
- /** Inclusive runtime compatibility floor for external app-server binaries. */
- export const MIN_SUPPORTED_CODEX_APP_SERVER_VERSION = "0.149.0";
- export const MANAGED_CODEX_APP_SERVER_PACKAGE = "@openai/codex";
-diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
---- a/pnpm-workspace.yaml
-+++ b/pnpm-workspace.yaml
-@@ -40,7 +40,7 @@
-   "chevrotain>lodash-es": 4.18.1
-   "@chevrotain/cst-dts-gen>lodash-es": 4.18.1
-   "@chevrotain/gast>lodash-es": 4.18.1
--  "@agentclientprotocol/codex-acp@1.12.0>@openai/codex": 0.160.0
-+  "@agentclientprotocol/codex-acp@1.12.0>@openai/codex": 0.163.0-alpha.1
-   "@codemirror/commands@6.11.1>@codemirror/view": 6.43.13
-   "@codemirror/view@6.43.13>@codemirror/state": 6.7.6
-   "@anthropic-ai/sdk": 0.128.0
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 281e22aec..ec8df746b 100644
 --- a/pnpm-lock.yaml
 +++ b/pnpm-lock.yaml
-@@ -169,7 +169,7 @@
-   chevrotain>lodash-es: 4.18.1
-   '@chevrotain/cst-dts-gen>lodash-es': 4.18.1
-   '@chevrotain/gast>lodash-es': 4.18.1
+@@ -172 +172 @@ overrides:
 -  '@agentclientprotocol/codex-acp@1.12.0>@openai/codex': 0.160.0
 +  '@agentclientprotocol/codex-acp@1.12.0>@openai/codex': 0.163.0-alpha.1
-   '@codemirror/commands@6.11.1>@codemirror/view': 6.43.13
-   '@codemirror/view@6.43.13>@codemirror/state': 6.7.6
-   '@anthropic-ai/sdk': 0.128.0
-@@ -935,8 +935,8 @@
-   extensions/codex:
-     dependencies:
-       '@openai/codex':
+@@ -938,2 +938,2 @@ importers:
 -        specifier: 0.160.0
 -        version: 0.160.0
 +        specifier: 0.163.0-alpha.1
 +        version: 0.163.0-alpha.1
-       '@openclaw/fs-safe':
-         specifier: 0.24.2
-         version: 0.24.2
-@@ -4615,43 +4615,43 @@
-     resolution: {integrity: sha512-3zcN5Q3yEmeyxXBzqB6fXPQFzYa2ROsGFSr69W0ArXIAGJqxl/aFECOVPD2kbkYPm0U/EHxFKgclK3UA9WQg5A==}
-     engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
- 
+@@ -4618,2 +4618,2 @@ packages:
 -  '@openai/codex@0.160.0':
 -    resolution: {integrity: sha512-kEtVGzjRAYAMOwJxN39bGcna7LT3IDQgq64NNJ/dDTfu4OzZaocJcyNb5/gGJ/IVF/Vj7oK7E2m3nmTan7lpjg==}
 +  '@openai/codex@0.163.0-alpha.1':
 +    resolution: {integrity: sha512-HTUpq9HcB5RmOswyllD4fcxBDOoF/xwXveCSJfOA2fuKLMey4Scil3920sGvjGrVQ0gFX4NplVCFstbBpYX5UQ==}
-     engines: {node: '>=16'}
-     hasBin: true
- 
+@@ -4623,2 +4623,2 @@ packages:
 -  '@openai/codex@0.160.0-darwin-arm64':
 -    resolution: {integrity: sha512-aefV6cqZA2REZgR//4McyXlp7zLcTti4CI2v3j9IVgNndPBv2kCeNEcz07qeelXcwOdSFPUKb6roA48vZmDgrQ==}
 +  '@openai/codex@0.163.0-alpha.1-darwin-arm64':
 +    resolution: {integrity: sha512-X+7CwdsmXULDz2/kUKarbzdtFFYgE1pgY/J4znqNforJh4PMyg+hO0vOvny33RH8Nj22W2DqEalY6bxcgM+r+Q==}
-     engines: {node: '>=16'}
-     cpu: [arm64]
-     os: [darwin]
- 
+@@ -4629,2 +4629,2 @@ packages:
 -  '@openai/codex@0.160.0-darwin-x64':
 -    resolution: {integrity: sha512-ir7cdsPrb9VkqNqpTECoTiomv04xws/FQ968mHQzuL+2J5Da0Dkh2Qlxp7sguDDZJab4YpYmNjQvBVMXbTeQaQ==}
 +  '@openai/codex@0.163.0-alpha.1-darwin-x64':
 +    resolution: {integrity: sha512-YdH+0GxdnLLpzKOYKyys1OcGYlsrzZaw1QvgVm+yOZBjDDZ6yBId7K+UWp9blzwVPKvjRzSBKVdFDTPbVQehnw==}
-     engines: {node: '>=16'}
-     cpu: [x64]
-     os: [darwin]
- 
+@@ -4635,2 +4635,2 @@ packages:
 -  '@openai/codex@0.160.0-linux-arm64':
 -    resolution: {integrity: sha512-VnVdsS06YlDsL8OwaJjQ3xdqdJNG4i+eBJBV3LytddknzSaF/urijLzVg3ptkwvoj8C7Gn7iWpVE+y8WEaPiCg==}
 +  '@openai/codex@0.163.0-alpha.1-linux-arm64':
 +    resolution: {integrity: sha512-XtHt6FsHlBDSaMRoT2TgJGy2739jtZY3sJjo6SCW7QkwUge0Y0nZjwdVUgMa/sViipz80vbYqgeKMY64ED8JQQ==}
-     engines: {node: '>=16'}
-     cpu: [arm64]
-     os: [linux]
- 
+@@ -4641,2 +4641,2 @@ packages:
 -  '@openai/codex@0.160.0-linux-x64':
 -    resolution: {integrity: sha512-KI/73OqGrHmR18s7ya7E1NqV6rT0y3lxr0s8S1qR2m6zU6QRF/HlR529jALLh5vjdUnsRT4Ahoxt0axb4kY99g==}
 +  '@openai/codex@0.163.0-alpha.1-linux-x64':
 +    resolution: {integrity: sha512-HqDL8HoSFHcmeOQdp6YM7wZYYW1KM0Mg0GRmTsqCW6QwBDuNrAPyZBjGmY9WugZGH0Z9H9zZXPqhTh2Hv+Dr+A==}
-     engines: {node: '>=16'}
-     cpu: [x64]
-     os: [linux]
- 
+@@ -4647,2 +4647,2 @@ packages:
 -  '@openai/codex@0.160.0-win32-arm64':
 -    resolution: {integrity: sha512-tTvK9ZIGuj9WnYaYOAnfjJVSfPV7dKqWtDHqUPLf0Hadp6SgynTxx7S7iMXRieFeXVOI2XH76KxEHSOTOnz3zw==}
 +  '@openai/codex@0.163.0-alpha.1-win32-arm64':
 +    resolution: {integrity: sha512-ln4om0GHCoRfDOkc8kuL7Q2EoUHQbvC+KaWAFK+xYAQ0gHyLAggvNRREuxTGqa7Awp6xXj6zdyBppsdwTQ8yWQ==}
-     engines: {node: '>=16'}
-     cpu: [arm64]
-     os: [win32]
- 
+@@ -4653,2 +4653,2 @@ packages:
 -  '@openai/codex@0.160.0-win32-x64':
 -    resolution: {integrity: sha512-/gCFcuOmGlQkgGivWCtY8BNEDixh70Pue0HZOk9S8bj2vUIE1GLD9zcNB/KqqDJmn0S+lIttauLpzQnw6HOCHA==}
 +  '@openai/codex@0.163.0-alpha.1-win32-x64':
 +    resolution: {integrity: sha512-Tbou0xPY73hLH/gYf60GznQ/y2K/pN0Y8WlKMp8IefGU07Kx4SS6tnMz9TG2wc2/hN7cBk5zGqCW4LJm0EXesA==}
-     engines: {node: '>=16'}
-     cpu: [x64]
-     os: [win32]
-@@ -10390,7 +10390,7 @@
-   '@agentclientprotocol/codex-acp@1.12.0':
-     dependencies:
-       '@agentclientprotocol/sdk': 1.4.0(zod@4.6.5)
+@@ -10393 +10393 @@ snapshots:
 -      '@openai/codex': 0.160.0
 +      '@openai/codex': 0.163.0-alpha.1
-       diff: 9.0.0
-       open: 11.0.4
-       vscode-jsonrpc: 9.0.2
-@@ -12340,31 +12340,31 @@
- 
-   '@npmcli/redact@5.0.0': {}
- 
+@@ -12343 +12343 @@ snapshots:
 -  '@openai/codex@0.160.0':
 +  '@openai/codex@0.163.0-alpha.1':
-     optionalDependencies:
+@@ -12345,8 +12345,8 @@ snapshots:
 -      '@openai/codex-darwin-arm64': '@openai/codex@0.160.0-darwin-arm64'
 -      '@openai/codex-darwin-x64': '@openai/codex@0.160.0-darwin-x64'
 -      '@openai/codex-linux-arm64': '@openai/codex@0.160.0-linux-arm64'
 -      '@openai/codex-linux-x64': '@openai/codex@0.160.0-linux-x64'
 -      '@openai/codex-win32-arm64': '@openai/codex@0.160.0-win32-arm64'
 -      '@openai/codex-win32-x64': '@openai/codex@0.160.0-win32-x64'
+-
+-  '@openai/codex@0.160.0-darwin-arm64':
 +      '@openai/codex-darwin-arm64': '@openai/codex@0.163.0-alpha.1-darwin-arm64'
 +      '@openai/codex-darwin-x64': '@openai/codex@0.163.0-alpha.1-darwin-x64'
 +      '@openai/codex-linux-arm64': '@openai/codex@0.163.0-alpha.1-linux-arm64'
 +      '@openai/codex-linux-x64': '@openai/codex@0.163.0-alpha.1-linux-x64'
 +      '@openai/codex-win32-arm64': '@openai/codex@0.163.0-alpha.1-win32-arm64'
 +      '@openai/codex-win32-x64': '@openai/codex@0.163.0-alpha.1-win32-x64'
- 
--  '@openai/codex@0.160.0-darwin-arm64':
++
 +  '@openai/codex@0.163.0-alpha.1-darwin-arm64':
-     optional: true
- 
+@@ -12355 +12355 @@ snapshots:
 -  '@openai/codex@0.160.0-darwin-x64':
 +  '@openai/codex@0.163.0-alpha.1-darwin-x64':
-     optional: true
- 
+@@ -12358 +12358 @@ snapshots:
 -  '@openai/codex@0.160.0-linux-arm64':
 +  '@openai/codex@0.163.0-alpha.1-linux-arm64':
-     optional: true
- 
+@@ -12361 +12361 @@ snapshots:
 -  '@openai/codex@0.160.0-linux-x64':
 +  '@openai/codex@0.163.0-alpha.1-linux-x64':
-     optional: true
- 
+@@ -12364 +12364 @@ snapshots:
 -  '@openai/codex@0.160.0-win32-arm64':
 +  '@openai/codex@0.163.0-alpha.1-win32-arm64':
-     optional: true
- 
+@@ -12367 +12367 @@ snapshots:
 -  '@openai/codex@0.160.0-win32-x64':
 +  '@openai/codex@0.163.0-alpha.1-win32-x64':
-     optional: true
- 
-   '@openclaw/crabline@0.1.28':
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index ee653dcb8..7f6888a19 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -43 +43 @@ overrides:
+-  "@agentclientprotocol/codex-acp@1.12.0>@openai/codex": 0.160.0
++  "@agentclientprotocol/codex-acp@1.12.0>@openai/codex": 0.163.0-alpha.1
