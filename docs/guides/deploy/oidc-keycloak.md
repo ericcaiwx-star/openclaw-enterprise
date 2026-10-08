@@ -1,144 +1,189 @@
 # Use Keycloak for OIDC sign-in
 
-Keycloak is the identity provider (IdP) that OpenClaw Enterprise (OCE) checks
-[OIDC sign-in](oidc-sign-in.md) against in CI. This page sets up a Keycloak realm
-and client that OCE accepts and lists the flows CI verifies. Configure the chart,
-attach identities and plan rotation with the [OIDC sign-in guide](oidc-sign-in.md).
+Connect OpenClaw Enterprise (OCE) human sign-in to an organization-managed
+Keycloak through the existing [OIDC integration](oidc-sign-in.md). Choose a
+production Keycloak realm and create a dedicated confidential client for OCE.
+A person can use Keycloak to sign in only after an Installation administrator
+attaches that person's Keycloak subject to an existing OCE account; Keycloak
+groups, roles, and email do not grant OCE permissions.
 
-## Supported version
+## Prepare Keycloak and OCE
 
-Keycloak **26** is supported. CI pins one 26.x image by digest in
-[`tests/fixtures/keycloak/image.json`](../../../tests/fixtures/keycloak/image.json)
-and moves to a newer 26.x release by changing that pin. Other major versions are not
-verified.
+The organization deploys and operates Keycloak separately. OCE's chart configures
+its OIDC client; it does not install production Keycloak. The Keycloak operator owns
+production mode (`start`), a supported persistent database, stable hostname and TLS,
+restricted administrator access, updates, backups and restore, monitoring, and the
+availability appropriate to the deployment. Follow Keycloak's
+[production configuration](https://www.keycloak.org/server/configuration-production)
+and, if applicable, [reverse proxy guidance](https://www.keycloak.org/server/reverseproxy).
+The CI and Local Setup fixture uses `start-dev` and a development file database;
+it is not a production deployment.
 
-CI runs Keycloak with `start-dev` and its development file database. That is a test
-setup, not a production one: run production Keycloak with `start`, a real database and
-your own TLS, as the Keycloak server guides describe. The OCE requirements below are
-the same for both.
+OCE's selected compatibility policy is Keycloak 26.x. The real-provider CI fixture
+currently pins **26.7.5** by digest in
+[`image.json`](../../../tests/fixtures/keycloak/image.json); the pin is the version
+exercised by that fixture, not qualification of every 26.x deployment. Other major
+versions are not verified. Qualify your actual production configuration before use.
 
-## Requirements
+Prepare the [guarded OIDC profile](oidc-sign-in.md#requirements): one serving
+controller, PostgreSQL State, native IAM, one canonical HTTPS Console origin, and
+`agentNativeAdmin.enabled: false`. Rolling or mixed-version serving is unsupported.
+Verify access to a password recovery administrator before making changes. Configure
+[trusted proxy settings](../../reference/settings/production.md#github-sign-in-and-trusted-proxies) when
+the API otherwise sees a shared proxy address, so sign-in admission limits use the
+intended client address.
 
-OCE refuses an IdP that breaks its endpoint and token rules. For Keycloak, that means:
+The following route assumes a Keycloak HTTPS endpoint with a publicly trusted
+certificate. OCE requires:
 
-- **One HTTPS host on port 443.** The issuer, authorization, token and JWKS URLs share
-  one DNS host name, written without a port, served over HTTPS on 443 with a
-  certificate the API trusts. For a private CA, set `NODE_EXTRA_CA_CERTS` on the API.
-  Keycloak can serve HTTPS itself or sit behind a TLS proxy on 443.
-- **A fixed hostname.** Set `KC_HOSTNAME` (or `--hostname`) to the issuer's origin,
-  for example `https://sso.example.com`, with no port and no path. Keycloak then
-  publishes the issuer `${KC_HOSTNAME}/realms/<realm>`, which must equal
-  `auth.oidc.issuer` character for character. Without a fixed hostname, Keycloak
-  builds URLs from each request's host, and the token's `iss` can differ from the
-  configured issuer.
-- **No `.localhost` name when the API runs in a Pod.** The controller image resolves
-  every `*.localhost` name to loopback, so the API cannot reach such a Keycloak. CI
-  uses `keycloak.oce.localhost` only because its API runs as a host process.
-- **An RS256 key of at least 2,048 bits.** The API accepts only RS256 ID tokens signed
-  by an RSA key of 2,048 bits or more, named by its `kid` in the JWKS. Keycloak's
-  default `rsa-generated` realm key meets this; keep the client's ID token signature
-  algorithm at RS256 (the default).
-- **No audience mapper.** A Keycloak ID token's `aud` is the client ID by default. The
-  API refuses a token whose audience names anything else, so add no audience mapper
-  to the client or its scopes.
+- **One HTTPS host on port 443:** the issuer, authorization, token and JWKS URLs
+  use the same DNS host, written without a port. Browsers reach and trust the
+  authorization endpoint; the API must reach and trust the token and JWKS endpoints.
+- **A stable issuer:** configure Keycloak's hostname, for example
+  `https://sso.example.com`. The discovery document's issuer, such as
+  `https://sso.example.com/realms/acme`, must match `auth.oidc.issuer` and the
+  ID token's `iss` exactly. Do not use a `*.localhost` name for a Keycloak the API
+  must reach from a Pod: the controller image resolves it to loopback.
+- **RS256 and a client-only audience:** ID tokens must use an RSA signing key of
+  at least 2,048 bits named by its `kid` in the JWKS. Keep the client ID token
+  signature algorithm at RS256 and do not add an audience mapper: OCE rejects an
+  additional audience.
 
-API Pod egress to the Keycloak host is covered by the chart's OIDC NetworkPolicy. A
-Keycloak that runs in the same cluster may need an
-[extra egress policy](oidc-sign-in.md#configure-the-chart).
+For a private CA, the current chart has no OIDC CA value or turnkey mount. Use an
+explicit, upgrade-safe deployment customization to mount a combined public CA
+bundle for the API, configure `NODE_EXTRA_CA_CERTS` to read it, and restart the
+Node process after trust changes. Preserve any existing Gateway CA roots in that
+bundle: the chart may already set `NODE_EXTRA_CA_CERTS` for Gateway routing, so
+replacing it with only the Keycloak CA can break Gateway trust. See
+[Gateway trust and rotation](../../reference/gateway-routing.md#tls-and-certificate-lifecycle).
+Verify the customized deployment and its trust after each upgrade.
 
-## Create the realm
+The chart's OIDC NetworkPolicy permits API egress on TCP 443. For an in-cluster
+Keycloak endpoint behind a Service with a non-443 `targetPort`, add a separate
+[egress policy](oidc-sign-in.md#configure-the-chart) for the destination Pod port;
+`auth.oidc.egressCidrs` alone cannot change that port. Verify the selected topology
+and policy in your deployment.
 
-These admin-console steps produce the realm that CI imports from
-[`tests/fixtures/keycloak/realm-oce.json`](../../../tests/fixtures/keycloak/realm-oce.json).
-Names are the ones CI uses; choose your own.
+## Create the OCE client
 
-1. **Create realm:** realm name `oce`, enabled.
-2. **Realm settings → General:** **Require SSL** `External requests`.
-3. **Realm settings → Login:** turn off **User registration**, **Forgot password**,
-   **Remember me** and **Login with email**. Leave **Duplicate emails** off.
-4. **Clients → Create client:**
-   - **General settings:** client type `OpenID Connect`, client ID `oce-console`,
-     name `OCE Console`.
-   - **Capability config:** **Client authentication** on. Under authentication flow,
-     keep **Standard flow** and clear **Direct access grants**, **Implicit flow**,
-     **Service accounts roles**, **Standard Token Exchange**, **OAuth 2.0 Device
-     Authorization Grant** and **OIDC CIBA Grant**.
-   - **Login settings:** one **Valid redirect URI**, `OCC_AUTH_BASE_URL` followed by
-     `/api/auth/providers/oidc/callback`, for example
-     `https://occ.example.com/api/auth/providers/oidc/callback`. Leave **Web origins**
-     empty.
-5. **The client's Settings tab → Logout settings:** turn off **Front channel logout**
-   and **Backchannel logout session required**. OCE implements neither.
-6. **The client's Advanced tab → Advanced settings:** set **Proof Key for Code Exchange
-   Code Challenge Method** to `S256`.
-7. **The client's Credentials tab:** keep **Client Id and Secret** as the client
-   authenticator, which accepts both `client_secret_post` and `client_secret_basic`.
-   Copy the client secret into the file you give the chart's Secret.
-8. **Users → Add user** for each person: username, email with **Email verified**, first
-   and last name. On the user's **Credentials** tab, set a password with **Temporary**
-   off.
+Choose an organization-managed realm. Realm login settings, password and user
+policies, enrollment, and federation are the organization's responsibility. People
+may already exist in the realm or come from a federated identity source; OCE does
+not require fixture users or create Keycloak users.
 
-Leave the client scopes and mappers at their defaults. OCE requests only `openid` and
-reads no email or profile claims.
+In the Keycloak admin console, create a client dedicated to OCE:
 
-To import the realm file instead, start Keycloak with `--import-realm` and the file in
-`/opt/keycloak/data/import`. Set every `${VAR}` placeholder in its environment first:
-`OCE_KEYCLOAK_CLIENT_SECRET`, `OCE_KEYCLOAK_REDIRECT_URI`,
-`OCE_KEYCLOAK_ALICE_PASSWORD` and `OCE_KEYCLOAK_CAROL_PASSWORD`. Keycloak imports an
-unset placeholder as its literal text, so an unset secret becomes a guessable one.
-Import runs only when the realm does not exist yet.
+1. Under **Clients → Create client**, select `OpenID Connect` and choose a client
+   ID, for example `oce-console`.
+2. Turn on **Client authentication** and **Standard flow**. Turn off **Direct
+   access grants**, **Implicit flow**, **Service accounts roles**, **Standard
+   Token Exchange**, **OAuth 2.0 Device Authorization Grant** and **OIDC CIBA
+   Grant**.
+3. Set one **Valid redirect URI** to `OCC_AUTH_BASE_URL` followed by
+   `/api/auth/providers/oidc/callback`, for example
+   `https://occ.example.com/api/auth/providers/oidc/callback`. Leave **Web origins**
+   empty.
+4. Under **Logout settings**, turn off **Front channel logout** and **Backchannel
+   logout session required**; OCE implements neither. Under **Advanced settings**,
+   set **Proof Key for Code Exchange Code Challenge Method** to `S256`.
+5. On **Credentials**, use **Client Id and Secret**. Save the ID and secret in
+   protected files for the dedicated OCE Secret. The authenticator accepts
+   `client_secret_post` and `client_secret_basic`.
+
+Leave client scopes and mappers at their defaults unless your organization has
+verified that changes meet OCE's token requirements. OCE requests only `openid`
+and reads no email or profile claims.
+
+The checked-in realm and its fixed identities are **disposable CI/local fixtures**.
+Do not import the fixture realm as a production provisioning shortcut: its test
+users and placeholder credentials are not production identities or secrets. For
+the test-only import and generated credentials, see the
+[Keycloak OIDC lane](../../testing/keycloak.md).
+
+## Configure and enable OCE
+
+1. Read the discovery document at `<issuer>/.well-known/openid-configuration`.
+   Confirm that its issuer and same-host HTTPS endpoints meet the requirements
+   above. For example, realm `acme` on `sso.example.com` supplies:
+
+   ```yaml
+   auth:
+     oidc:
+       issuer: https://sso.example.com/realms/acme
+       authorizationUrl: https://sso.example.com/realms/acme/protocol/openid-connect/auth
+       tokenUrl: https://sso.example.com/realms/acme/protocol/openid-connect/token
+       jwksUrl: https://sso.example.com/realms/acme/protocol/openid-connect/certs
+       tokenAuth: client_secret_post # client_secret_basic is also available
+   ```
+
+   These are example values; copy and review your own discovery values. OCE does
+   not fetch discovery for configuration. Verify API Pod DNS, TLS trust, and
+   network access to the token and JWKS endpoints.
+
+2. Create the dedicated Secret from the protected client ID and secret files and
+   configure `auth.oidc.enabled`, `secretName`, the Secret keys,
+   `auth.recoveryUserId`, and the other chart values in
+   [Configure the chart](oidc-sign-in.md#configure-the-chart).
+3. Follow the linked [stopped maintenance procedure](google-sign-in.md#enable-it):
+   close ingress, stop identity writers, upgrade, and verify through restricted
+   access before reopening ingress. Retain the verified password recovery account.
+4. Find each person's Keycloak `sub` and
+   [attach it to the person's existing OCE account](oidc-sign-in.md#attach-and-detach)
+   as a human Installation administrator. Grant the OCE permissions the person
+   needs using [IAM](../topics/iam.md); an attachment alone grants no permissions.
+   Verify browser sign-in and the person's expected OCE access.
+5. Verify that a valid, unattached Keycloak identity is refused and that the
+   recovery administrator can still sign in with a password, including during an
+   IdP outage. Password sign-in defaults to `all`. After every ordinary account
+   has an attached external identity and each person has verified sign-in, follow
+   the staged [recovery-only procedure](../../reference/authentication/external-sign-in.md#recovery-only-password-sign-in)
+   if you choose to restrict password sign-in to the recovery administrator.
 
 ## Find a person's subject
 
-OCE attaches a person by the ID token's `sub`, which for Keycloak is the user's ID.
+OCE attaches the ID token's `sub`, which for Keycloak is the user's ID:
 
-- **Admin console:** **Users →** the user **→ Details**, the **ID** field (a UUID).
-- **Admin API:** `GET /admin/realms/<realm>/users?username=<name>&exact=true` returns
-  it as `id`.
+- **Admin console:** **Users →** the user **→ Details**, the **ID** field.
+- **Admin API:** `GET /admin/realms/<realm>/users?username=<name>&exact=true`
+  returns it as `id`.
 
-The admin console assigns random IDs. Only an import fixes them: the realm file gives
-`alice` the ID `6f1c1e9a-3d4b-4c55-9a2e-0a11ce000001`. Attach the subject as the
-[OIDC sign-in guide](oidc-sign-in.md#attach-and-detach) describes.
+Confirm the subject belongs to the intended person and issuer before attachment.
+See [Attach and detach](oidc-sign-in.md#attach-and-detach) for the guarded API
+procedure.
 
-## Chart values
+## Operate and verify
 
-For realm `oce` on `https://sso.example.com`, copy these from
-`https://sso.example.com/realms/oce/.well-known/openid-configuration`:
+Qualify the actual production deployment with browser sign-in, expected OCE
+permissions, unattached-user refusal, recovery during provider outage, Keycloak
+restart and persistence, signing-key and client-secret rotation, and offboarding.
+Record the results for the topology and versions you operate. The fixture evidence
+below does not qualify a production Keycloak deployment.
 
-```yaml
-auth:
-  oidc:
-    issuer: https://sso.example.com/realms/oce
-    authorizationUrl: https://sso.example.com/realms/oce/protocol/openid-connect/auth
-    tokenUrl: https://sso.example.com/realms/oce/protocol/openid-connect/token
-    jwksUrl: https://sso.example.com/realms/oce/protocol/openid-connect/certs
-    tokenAuth: client_secret_post # client_secret_basic is verified too
-```
+OCE sign-out ends the local OCE session, not the Keycloak session; a person may
+sign in again while the Keycloak session remains active. Disabling a user in
+Keycloak prevents new provider sign-ins but does not end an existing OCE session.
+For offboarding, disable the OCE account or detach its identity, and separately
+revoke applicable service keys. Follow
+[Changes, rotation and outages](oidc-sign-in.md#changes-rotation-and-outages) for
+session limits, client-secret rotation, issuer or client-ID changes, and recovery.
 
-Set the client ID `oce-console`, the secret, `auth.recoveryUserId` and the other values
-from [Configure the chart](oidc-sign-in.md#configure-the-chart).
+## CI verification and limits
 
-## Verified flows
+The `keycloak-oidc` CI lane uses the pinned real Keycloak and Chromium, the
+imported test realm, `start-dev` storage, fixture TLS and test HTTPS ingress. It
+composes the production API in a host process; it does not deploy a production
+Keycloak topology. The lane runs in full-mode pull request CI and on pushes to
+`main`, but is not a dependency of `CI Required`; documentation-only and test-only
+CI modes do not run it.
 
-The `keycloak-oidc` CI lane signs in through the pinned Keycloak, the realm file and a
-real browser, with the production API and its unmodified HTTPS transport. Each row is
-one named test in
-[`keycloak-oidc-sign-in.test.mjs`](../../../tests/integration/keycloak-oidc-sign-in.test.mjs).
-The lane runs in full-mode pull request CI and on pushes to `main`. It is not
-yet a dependency of `CI Required`; documentation-only and test-only CI modes
-do not run it.
-
-| Test                                                                                                                                                                        | What it shows for operators                                                                                                |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Keycloak discovery matches the configured endpoints and its JWKS offers an RS256 key of 2,048 bits or more                                                                  | The four values copied from discovery pass the API's endpoint rules, and the default realm key is accepted.                |
-| attached alice signs in through Keycloak with client_secret_post                                                                                                            | An attached person signs in through Keycloak's own login form and lands in the Console.                                    |
-| attached alice signs in through Keycloak with client_secret_basic                                                                                                           | The other `tokenAuth` setting works with the default client authenticator.                                                 |
-| a higher-priority Keycloak realm key changes the signing kid and the next sign-in succeeds without a controller restart                                                     | Realm key rotation needs no OCE restart.                                                                                   |
-| unattached carol is refused after Keycloak sign-in, audited and given no account                                                                                            | A valid Keycloak user without an attached OCE account is refused, audited as `EXTERNAL_IDENTITY_REJECTED`.                 |
-| Console sign-out ends alice's OCE session, one click signs her in again while her Keycloak session lives, and disabling her keeps that session but refuses her next sign-in | Sign-out is local to OCE; disabling a user in Keycloak stops new sign-ins but not a live OCE session. Offboard in OCE too. |
-
-Not verified: Keycloak behind a TLS proxy, Keycloak in the same cluster as the API,
-and other major versions. To run the lane, read the [Keycloak OIDC lane](../../testing/keycloak.md).
+The lane checks discovery and the signing key, attached sign-in with both client
+authentication methods, signing-key rotation, refusal of an unattached user, and
+local sign-out and user disablement behavior. See the
+[Keycloak OIDC lane](../../testing/keycloak.md#verified-flows) for each test and
+its evidence. Keycloak behind a TLS proxy, Keycloak in the same cluster as the API,
+other major versions, and a production `start` deployment with a persistent external
+database are not qualified by this fixture. Operator browser and recovery checks
+remain necessary for the actual deployment.
 
 ## Related
 
