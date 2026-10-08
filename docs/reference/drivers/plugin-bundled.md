@@ -213,9 +213,12 @@ enforcement also remain acceptance gates. See
 
 Dedicated Codex replaces its isolated `CODEX_HOME` config before each startup,
 setting `apps._default.enabled=false` and `plugins._default.enabled=false`.
-Empty selections disable Apps/Plugins and skip plugin RPCs. After installation,
-startup replaces both policy tables with exact `name@marketplace` plugin IDs and
-concrete app IDs. Disabled/failed selections get disabled entries. With active
+Empty selections disable Apps/Plugins and skip plugin RPCs. Startup validates
+native metadata, then grants exactly the selected `name@marketplace` plugin IDs
+before installation so native authentication setup can run. Startup writes app/tool
+grants after installation and a metadata recheck succeed. It replaces both policy
+tables with the final plugin and concrete app IDs, then verifies them before readiness.
+Disabled/failed selections get disabled entries. With active
 selections, unselected apps must be disabled and explicitly enabled unselected
 plugins block readiness. Plugin entries without `enabled` inherit default-off;
 approval-only or MCP-policy-only entries do not activate them. Source/account

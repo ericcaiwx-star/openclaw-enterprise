@@ -1734,6 +1734,17 @@ async function installCodexSelectionSet(selections, failures = []) {
   const failedIds = pluginFailureIds(failed);
   const successfulPluginIds = [];
   const installs = pluginRuntimeTranslator.codexInstallPlan(selections, resolvedDetails);
+  // Native installation reports connector auth only for enabled plugins.
+  // Grant validated selections before installation; app grants still wait for revalidation.
+  await codexAppServerRequest("config/batchWrite", {
+    edits: [{ keyPath: "plugins", mergeStrategy: "replace", value: {
+      _default: { enabled: false },
+      ...Object.fromEntries(installs.map((plugin) => [plugin.nativeId, {
+        enabled: enabledPluginIds.has(plugin.pluginId) && !failedIds.has(plugin.pluginId),
+      }])),
+    } }],
+    reloadUserConfig: true,
+  });
   for (const readParams of readParamsList) {
     const selectedPlugin = installs.find(
       (candidate) => candidate.remotePluginId === readParams.pluginName,
@@ -1819,7 +1830,7 @@ async function installCodexSelectionSet(selections, failures = []) {
     throw new Error("Codex plugin installed app mapping does not match startup resolution.");
   }
   // Remote plugin/read reports catalog metadata, not cached bundle contents.
-  // Recheck the admitted release and app mapping before granting activation.
+  // Recheck the admitted release and app mapping before granting apps.
   await writeCodexPluginConfiguration(effectiveResolvedArtifact.configuration);
   const enabledReadParams = readParamsList.filter((readParams) => installs.some(
     (plugin) => plugin.remotePluginId === readParams.pluginName &&

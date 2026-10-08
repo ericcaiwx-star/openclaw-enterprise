@@ -674,6 +674,22 @@ test("Codex runtime helper installs a plugin with skills and applies write actio
       });
     }
     if (method === "config/batchWrite") {
+      if (params.edits.length === 1) {
+        assert.deepEqual(params, {
+          edits: [
+            {
+              keyPath: "plugins",
+              mergeStrategy: "replace",
+              value: {
+                _default: { enabled: false },
+                [CODEX_LINEAR_NATIVE_ID]: { enabled: true },
+              },
+            },
+          ],
+          reloadUserConfig: true,
+        });
+        return { status: "ok", version: "selected-plugins" };
+      }
       assert.deepEqual(params, {
         edits: [
           { keyPath: "features.apps", mergeStrategy: "replace", value: true },
@@ -733,6 +749,8 @@ test("Codex runtime helper installs a plugin with skills and applies write actio
       "initialize",
       "plugin/read",
       "initialize",
+      "config/batchWrite",
+      "initialize",
       "plugin/install",
       "initialize",
       "plugin/read",
@@ -788,6 +806,9 @@ test("Codex startup explicitly denies inherited apps and replaces inherited appr
       return response;
     }
     if (method === "config/batchWrite") {
+      if (!params.edits.some((edit) => edit.keyPath === "apps")) {
+        return { status: "ok", version: "selected-plugins" };
+      }
       const edits = new Map(params.edits.map((edit) => [edit.keyPath, edit.value]));
       assert.equal(edits.get("apps.unselected.enabled"), false);
       assert.equal(
@@ -982,7 +1003,7 @@ test("Codex runtime helper discovers tool policy after installation and before r
     }
     if (method === "mcpServerStatus/list") {
       assert.equal(installed, true, "tool discovery follows native installation");
-      assert.equal(plugins, undefined, "tool inventory does not require activating plugins");
+      assert.equal(apps, undefined, "tool inventory precedes app grants");
       assert.equal(params.detail, "toolsAndAuthOnly");
       if (params.cursor === undefined) {
         return { data: [{ name: "unrelated", tools: {} }], nextCursor: "apps-page" };
@@ -1025,6 +1046,7 @@ test("Codex runtime helper discovers tool policy after installation and before r
         _default: { enabled: false },
         [CODEX_LINEAR_NATIVE_ID]: { enabled: true },
       });
+      if (apps === undefined) return { status: "ok", version: "selected-plugins" };
       assert.equal(apps._default.enabled, false, "discovery must not grant unselected apps");
       assert.equal(
         apps[CODEX_LINEAR_APP_ID]?.enabled,
@@ -1051,10 +1073,16 @@ test("Codex runtime helper discovers tool policy after installation and before r
     requests.filter(({ method }) => method === "mcpServerStatus/list").map(({ params }) => params),
     [{ detail: "toolsAndAuthOnly" }, { detail: "toolsAndAuthOnly", cursor: "apps-page" }],
   );
-  assert.equal(requests.filter(({ method }) => method === "config/batchWrite").length, 1);
+  assert.equal(
+    requests.filter(
+      ({ method, params }) =>
+        method === "config/batchWrite" && params.edits.some((edit) => edit.keyPath === "apps"),
+    ).length,
+    1,
+  );
 });
 
-test("Codex runtime helper rejects incomplete or unbounded tool discovery before writing policy", async (t) => {
+test("Codex runtime helper rejects incomplete or unbounded tool discovery before writing app policy", async (t) => {
   for (const [name, response, expected] of [
     ["invalid data", () => ({ data: {}, nextCursor: null }), /invalid pagination data/],
     ["invalid cursor", () => ({ data: [], nextCursor: 1 }), /invalid pagination data/],
@@ -1090,6 +1118,9 @@ test("Codex runtime helper rejects incomplete or unbounded tool discovery before
           if (method === "plugin/install") {
             return { authPolicy: "ON_USE", appsNeedingAuth: [] };
           }
+          if (method === "config/batchWrite") {
+            return { status: "ok", version: "selected-plugins" };
+          }
           if (method === "mcpServerStatus/list") {
             return response(page++);
           }
@@ -1099,7 +1130,10 @@ test("Codex runtime helper rejects incomplete or unbounded tool discovery before
       );
       assert.match(result.error?.message ?? "", expected);
       assert.equal(
-        result.requests.some(({ method }) => method === "config/batchWrite"),
+        result.requests.some(
+          ({ method, params }) =>
+            method === "config/batchWrite" && params.edits.some((edit) => edit.keyPath === "apps"),
+        ),
         false,
       );
     });
@@ -1164,7 +1198,11 @@ test("Codex runtime helper reports plugin install warnings without retrying", as
     ],
   });
   assert.equal(result.requests.filter((request) => request.method === "plugin/install").length, 1);
-  const write = result.requests.find((request) => request.method === "config/batchWrite");
+  const write = result.requests.find(
+    (request) =>
+      request.method === "config/batchWrite" &&
+      request.params.edits.some((edit) => edit.keyPath === "apps"),
+  );
   assert.ok(write);
   assert.deepEqual(
     write.params.edits.find((edit) => edit.keyPath === "apps")?.value[CODEX_LINEAR_APP_ID],
@@ -1188,9 +1226,10 @@ test("Codex runtime helper reports connector-auth warnings with the admitted key
       },
     },
   };
+  let pluginEnabled = false;
   const result = await runCodexRuntimeHelper(
     runtime,
-    (method) => {
+    (method, params) => {
       if (method === "initialize") {
         return { serverInfo: { name: "codex", version: "0.149.0" } };
       }
@@ -1201,18 +1240,23 @@ test("Codex runtime helper reports connector-auth warnings with the admitted key
         return codexReadResponse();
       }
       if (method === "config/batchWrite") {
+        pluginEnabled =
+          params.edits.find((edit) => edit.keyPath === "plugins")?.value[CODEX_LINEAR_NATIVE_ID]
+            ?.enabled === true;
         return { status: "ok", version: "test-config-1" };
       }
       if (method === "plugin/install") {
         return {
           authPolicy: "ON_USE",
-          appsNeedingAuth: [
-            {
-              id: CODEX_LINEAR_APP_ID,
-              name: "Linear",
-              category: null,
-            },
-          ],
+          appsNeedingAuth: pluginEnabled
+            ? [
+                {
+                  id: CODEX_LINEAR_APP_ID,
+                  name: "Linear",
+                  category: null,
+                },
+              ]
+            : [],
         };
       }
       if (method === "config/read") {
@@ -1231,6 +1275,7 @@ test("Codex runtime helper reports connector-auth warnings with the admitted key
     successfulPluginIds: [],
     failures: [{ pluginId: "linear@openai-curated-remote", code: "PLUGIN_AUTH_REQUIRED" }],
   });
+  assert.equal(pluginEnabled, false, "auth failures revoke the startup plugin grant");
 });
 
 test("Codex runtime helper disables curated plugins at once under API-key login", async () => {
@@ -1662,10 +1707,13 @@ test("Codex runtime installs and reports only enabled selections in mixed plugin
       return { authPolicy: "ON_USE", appsNeedingAuth: [] };
     }
     if (method === "config/batchWrite") {
-      assert.deepEqual(params.edits.find((edit) => edit.keyPath === "apps")?.value, {
-        _default: { enabled: false },
-        [CODEX_LINEAR_APP_ID]: { enabled: true, default_tools_approval_mode: "auto" },
-      });
+      const appEdit = params.edits.find((edit) => edit.keyPath === "apps");
+      if (appEdit !== undefined) {
+        assert.deepEqual(appEdit.value, {
+          _default: { enabled: false },
+          [CODEX_LINEAR_APP_ID]: { enabled: true, default_tools_approval_mode: "auto" },
+        });
+      }
       assert.deepEqual(params.edits.find((edit) => edit.keyPath === "plugins")?.value, {
         _default: { enabled: false },
         [CODEX_LINEAR_NATIVE_ID]: { enabled: true },
@@ -1769,7 +1817,7 @@ test("Codex runtime helper fails before readiness when catalog identity is absen
   );
 });
 
-test("Codex runtime helper rejects catalog drift before activation", async (t) => {
+test("Codex runtime helper rejects catalog drift before app grants and readiness", async (t) => {
   const state = codexLinearPluginState();
   const runtime = {
     manifest: pluginRuntimeSpecForRevision(revision({ plugins: state })),
@@ -1805,7 +1853,7 @@ test("Codex runtime helper rejects catalog drift before activation", async (t) =
               return codexReadResponse(readCount === 1 ? {} : installedDetail);
             }
             if (method === "config/batchWrite") {
-              policyWritten = true;
+              policyWritten = params.edits.some((edit) => edit.keyPath === "apps");
               return { status: "ok", version: "test-config-1" };
             }
             if (method === "plugin/install") {
@@ -1819,7 +1867,7 @@ test("Codex runtime helper rejects catalog drift before activation", async (t) =
           }),
         error,
       );
-      assert.equal(policyWritten, false, "catalog details must be admitted before activation");
+      assert.equal(policyWritten, false, "catalog details must be revalidated before app grants");
     });
   }
 });

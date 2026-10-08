@@ -49,10 +49,10 @@ graph TD
   A["Authorize and validate policy"] -->|valid| S["Save Agent selections"]
   A -->|unsupported| Y["Reject write"]
   S --> B["Revalidate and snapshot revision"]
-  B --> C["Resolve native metadata"]
+  B --> C["Validate native metadata; grant selected plugins"]
   C --> D["Attempt selected installs"]
   D -->|install rejection or auth required| E["Disable failed selections; collect warnings"]
-  D -->|success| T["Resolve owned tools; translate policy"]
+  D -->|success| T["Resolve owned tools; translate final app policy"]
   E --> T
   T --> F["Verify native identity and effective policy"]
   F -->|invalid or unsafe| X["Keep runtime unready"]
@@ -172,8 +172,11 @@ and configuration writes stay sequential; post-install reads use the same
 batching before final policy verification.
 `codexRuntimeArtifact` uses concrete `detail.apps`, excluding `appTemplates`.
 `codexInstallPlan` validates policy and [component support](../reference/drivers/plugin-bundled.md)
-before `plugin/install`. Codex loads bundled skills; selected-only activation
-requires the compatible runtime described below.
+before granting only the selected plugin IDs through `config/batchWrite`, keeping
+the plugin default off. The plugin grants precede `plugin/install` so native
+installation can report required authentication; app/tool grants follow later.
+Codex loads bundled skills; selected-only activation requires the compatible
+runtime described below.
 Install rejections or missing app authentication warn. Explicit tool policies
 require `mcpServerStatus/list`'s `codex_apps` inventory; `codexAppToolSettings`
 binds catalog action IDs through `_meta._codex_apps.resource_uri`. Native IDs
@@ -181,8 +184,8 @@ work. Unknown, unowned, ambiguous, or duplicate IDs fail startup.
 
 `codexRuntimeArtifact` applies the [native policy mappings](../reference/drivers/plugin-bundled.md).
 
-Startup rechecks catalog identity, version, apps, and reported components before
-activation; `plugin/read` cannot inspect bundles.
+After installation, startup rechecks catalog identity, version, apps, and reported
+components before granting final app/tool policy; `plugin/read` cannot inspect bundles.
 `writeCodexPluginConfiguration` replaces the owned plugin/app tables, enabling
 successful enabled selections and disabling failed/disabled plugins. It reads
 merged workspace settings, disables unselected apps, and writes inherited
@@ -320,7 +323,7 @@ deadline.
 
 ## Changelog
 
-- 2026-10-08 20:32: Integrate plugin default-off grants with inherited app policy and skill-only selections. (codex/01a0def9-f5ff-7d11-b79b-7ef3346d526f - ae695e7f2b0c7bcd2416ed8146baeecb765ae233)
+- 2026-10-08 20:32: Integrate validated plugin default-off grants before native install, with final app-policy verification and skill-only selections. (codex/01a0def9-f5ff-7d11-b79b-7ef3346d526f - ae695e7f2b0c7bcd2416ed8146baeecb765ae233)
 
 - 2026-10-07 19:30: Pass the admitted model to native Codex before reviewer validation. (authoring-run/bc793557-585a-4c1a-9463-b2c55682ea02 - b1be0e0602b9db1035a689ca2a4ac4982f6d0b3b)
 

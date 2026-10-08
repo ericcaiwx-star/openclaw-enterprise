@@ -64,6 +64,7 @@ for (const retry of [false, true]) {
     let pending = [];
     let phaseReads = 0;
     let installed = false;
+    let pluginPermitted = false;
     let written = false;
     let attempts = 0;
     let outstanding = 0;
@@ -144,7 +145,7 @@ for (const retry of [false, true]) {
                             plugin: {
                               marketplaceName: "openai-curated-remote",
                               marketplacePath: null,
-                              summary: summary(item.name, installed, written),
+                              summary: summary(item.name, installed, pluginPermitted),
                               description: null,
                               skills: [],
                               apps: [{ id: item.name, name: item.name, needsAuth: false }],
@@ -167,20 +168,45 @@ for (const retry of [false, true]) {
         }
         assert.equal(outstanding, 0, "writes and verification must follow complete read phases");
         if (method === "plugin/install") {
+          assert.equal(
+            pluginPermitted,
+            true,
+            "native install authentication needs the plugin grant",
+          );
           installed = true;
           assert.equal(written, false);
           return send({ authPolicy: "ON_USE", appsNeedingAuth: [] });
         }
         if (method === "config/batchWrite") {
-          assert.equal(installed, true);
-          written = true;
+          assert.equal(params.reloadUserConfig, true);
+          if (params.edits.some((edit) => edit.keyPath === "apps")) {
+            assert.equal(
+              installed,
+              true,
+              "final app policy follows installation and metadata recheck",
+            );
+            assert.equal(pluginPermitted, true);
+            written = true;
+          } else {
+            assert.equal(installed, false);
+            assert.deepEqual(params.edits, [
+              { keyPath: "plugins", mergeStrategy: "replace", value: configuration.plugins },
+            ]);
+            pluginPermitted = true;
+          }
           return send({ status: "ok" });
         }
         if (method === "config/read") {
           if (written) {
             assert.equal(batches.length, retry ? 7 : 6);
           }
-          return send({ config: configuration });
+          return send({
+            config: {
+              ...configuration,
+              plugins: pluginPermitted ? configuration.plugins : { _default: { enabled: false } },
+              apps: written ? configuration.apps : { _default: { enabled: false } },
+            },
+          });
         }
         assert.fail(`unexpected method ${method}`);
       });
