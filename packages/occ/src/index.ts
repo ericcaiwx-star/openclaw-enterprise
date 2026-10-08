@@ -4299,14 +4299,12 @@ export class OpenClawController {
         signal: AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
       };
       status = await gateway.sourceStatus(context);
-      if (
-        status.state === "ready" &&
-        (await this.credentialSourceType(gateway, source.type)).rotation === "refresh"
-      ) {
-        status = {
-          ...status,
-          refresh: await this.credentialRefreshDriver().refreshStatus(context),
-        };
+      const refresh =
+        status.state === "ready"
+          ? await this.refreshDriverForSource(gateway, source.type)
+          : undefined;
+      if (refresh !== undefined) {
+        status = { ...status, refresh: await refresh.refreshStatus(context) };
       }
     } catch (error) {
       // After the grant and the lookup, so naming a driver change reveals nothing new.
@@ -4395,7 +4393,7 @@ export class OpenClawController {
       source,
       signal: AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
     });
-    const refresh = await this.refreshDriverForRemoval(gateway, source.type);
+    const refresh = await this.refreshDriverForSource(gateway, source.type);
     if (refresh !== undefined) {
       await this.credentialGatewayOperation(() => refresh.removeRefresh(context()));
     }
@@ -8902,11 +8900,12 @@ export class OpenClawController {
   }
 
   /**
-   * Deletion must not depend on the current catalog: a source registered while refresh was
-   * selected stays deletable after it is not. Without the role, the gateway's own removal is
-   * the only cleanup left.
+   * Reading and deleting an existing source must not depend on the current catalog: a source
+   * stays observable and deletable after its type is no longer offered. An unoffered type
+   * cannot be classified, so it gets no refresh call; without the role, the gateway's own
+   * status and removal are all that is left.
    */
-  private async refreshDriverForRemoval(
+  private async refreshDriverForSource(
     gateway: CredentialGatewayDriver,
     type: string,
   ): Promise<CredentialRefreshDriver | undefined> {

@@ -550,6 +550,27 @@ test("reading a refresh source reports its refresh status, and deletion removes 
   );
 });
 
+test("reading a source whose type left the catalog keeps the gateway's status", async () => {
+  const context = await fixture();
+  await context.makeReady();
+  const tool = await context.controller.createCredentialSource(administrator, {
+    namespaceId: context.namespace.id,
+    name: "registry",
+    type: "registry",
+    config: { host: "registry.example.com" },
+  });
+  const { source: refresh } = await refreshSource(context);
+  // Removing an Installation setting, such as OpenShell's toolBinaries, withdraws types from
+  // the catalog. Existing sources stay registered, so a read must still report the gateway's
+  // own status rather than a false failure.
+  context.gateway.listSourceTypes = async () => [];
+  const read = (source) =>
+    context.controller.readCredentialSource(administrator, context.namespace.id, source.id);
+  assert.deepEqual((await read(tool)).status, { state: "ready" });
+  // An unoffered refresh type cannot be classified, so its read omits refresh status.
+  assert.deepEqual((await read(refresh)).status, { state: "ready" });
+});
+
 test("registration validates the catalog and hands the gateway values OCC never stores", async () => {
   const { controller, gateway, makeReady, modelSecret, namespace } = await fixture();
   await assert.rejects(

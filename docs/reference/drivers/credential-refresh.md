@@ -83,7 +83,8 @@ destructor.
    suspected token leak. Running Agents keep their placeholder and need no
    redeploy.
 5. **Status.** Reading a source adds the Driver's `refreshStatus` to the
-   gateway's status. Listing sources reads no status.
+   gateway's status. A source whose type the catalog no longer offers keeps its
+   gateway status without refresh status. Listing sources reads no status.
 6. **Deletion.** OCC calls `removeRefresh`, then the gateway's `removeSource`.
 
 ## Limits

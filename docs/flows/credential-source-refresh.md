@@ -90,7 +90,9 @@ The Sandbox proxy substitutes the current token for the stable placeholder on
 each request, so a running Harness needs no restart. OCC makes no call.
 `GET` on the source adds `refreshStatus` to the gateway status; OpenShell's
 `refreshed` state reports `ready`, its error states report `failed` with a
-recovery action, and missing refresh state reports `failed`.
+recovery action, and missing refresh state reports `failed`. OCC finds the
+type through `refreshDriverForSource`, which tolerates a type the catalog no
+longer offers: that source keeps its gateway status without `refresh`.
 
 ### 4. Update and rotation
 
@@ -142,4 +144,5 @@ which sends `DeleteProviderRefresh` with `allow_missing`, and then the gateway's
 
 ## Changelog
 
+- 2026-10-08 11:46: Reading a source no longer needs its type in the current catalog. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - 3ce93bfda)
 - 2026-10-08 00:00: Created for OAuth2 refresh sources and the Credential Refresh Driver. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - 4151882d2)
