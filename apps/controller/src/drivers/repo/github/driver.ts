@@ -8,6 +8,7 @@ import type {
   RepositoryCredentialResolution,
   RepositoryCredentialSessionStatus,
   RepositoryOption,
+  RepositoryOptions,
 } from "@openclaw-enterprise/contracts";
 import { DependencyUnavailableError, ScopeViolationError } from "@openclaw-enterprise/occ";
 import { isAbsolute, resolve } from "node:path";
@@ -23,6 +24,7 @@ import {
 import { encodeRepositoryCredentialSessionFiles } from "./credentials/client/config.ts";
 import type { SessionStatus } from "../credentials/service-contracts.ts";
 import { sameBinding } from "../credentials/sessions.ts";
+import { hasControlCharacter } from "../credentials/client-contracts.ts";
 
 function publicStatus(status: SessionStatus): RepositoryCredentialSessionStatus {
   return Object.freeze({
@@ -34,13 +36,6 @@ function publicStatus(status: SessionStatus): RepositoryCredentialSessionStatus 
       repositoryId: status.binding.repositoryId,
       grantId: status.binding.grantId,
     }),
-  });
-}
-
-function hasControlCharacters(value: string): boolean {
-  return [...value].some((character) => {
-    const code = character.charCodeAt(0);
-    return code <= 0x1f || code === 0x7f;
   });
 }
 
@@ -86,7 +81,7 @@ export class GitHubRepoDriver implements RepoDriver {
         typeof path !== "string" ||
         !isAbsolute(path) ||
         resolve(path) !== path ||
-        hasControlCharacters(path) ||
+        hasControlCharacter(path) ||
         (field === "controlSocket" && Buffer.byteLength(path) > 103)
       ) {
         throw new Error("Repository credential Driver paths must be absolute.");
@@ -97,6 +92,7 @@ export class GitHubRepoDriver implements RepoDriver {
   readonly capability = "repo" as const;
   readonly implementation = "github";
   readonly maintenanceIntervalMs = 30_000;
+  readonly durableBrokerReceipts = true as const;
   readonly id: string;
   readonly #backendId: string;
   readonly #registry: GitHubRepositoryRegistry;
@@ -114,7 +110,7 @@ export class GitHubRepoDriver implements RepoDriver {
       typeof id !== "string" ||
       Buffer.byteLength(id) < 1 ||
       Buffer.byteLength(id) > 512 ||
-      hasControlCharacters(id)
+      hasControlCharacter(id)
     ) {
       throw new Error("The GitHub Backend must declare its repository credential Driver.");
     }
@@ -139,23 +135,71 @@ export class GitHubRepoDriver implements RepoDriver {
     this.#publicCa = options.publicCa === undefined ? undefined : Uint8Array.from(options.publicCa);
   }
 
-  listOptions(input: { readonly namespaceId: string }): readonly RepositoryOption[] {
-    return Object.freeze(
-      this.#registry.repositories.flatMap((repository) => {
-        const policy = repository.namespaces.find(
-          (candidate) => candidate.namespaceId === input.namespaceId,
-        );
-        return policy === undefined
-          ? []
-          : [
-              Object.freeze({
-                repositoryRef: repository.repositoryRef,
-                displayName: repository.repository,
-                allowedProfiles: Object.freeze([...policy.profiles]),
-              }),
-            ];
-      }),
-    );
+  async listOptions(input: {
+    readonly namespaceId: string;
+    readonly descriptionRefs?: readonly string[];
+  }): Promise<RepositoryOptions> {
+    const options: RepositoryOption[] = [];
+    const approved = new Map<string, string>();
+    this.#registry.repositories.forEach((repository) => {
+      const policy = repository.namespaces.find(
+        (candidate) => candidate.namespaceId === input.namespaceId,
+      );
+      if (policy === undefined) {
+        return;
+      }
+      options.push(
+        Object.freeze({
+          repositoryRef: repository.repositoryRef,
+          displayName: repository.repository,
+          allowedProfiles: Object.freeze([...policy.profiles]),
+        }),
+      );
+      approved.set(repository.repositoryRef, repository.repositoryId);
+    });
+    const descriptionRefs = (input.descriptionRefs ?? []).filter((ref) => approved.has(ref));
+    if (descriptionRefs.length === 0) {
+      return Object.freeze({ options: Object.freeze(options), descriptionsPending: false });
+    }
+    try {
+      // Descriptions are optional: the approved registry remains usable if metadata is unavailable.
+      const metadata = await this.#client.descriptions(
+        input.namespaceId,
+        descriptionRefs,
+        AbortSignal.timeout(2_000),
+      );
+      if (
+        metadata.providerInstanceId !== this.#registry.providerInstanceId ||
+        metadata.appId !== this.#registry.appId ||
+        metadata.githubInstallationId !== this.#registry.githubInstallationId
+      ) {
+        throw new Error("unexpected-repository-provider");
+      }
+      const requested = new Set(descriptionRefs);
+      const descriptions = new Map(
+        metadata.descriptions
+          .filter(
+            (entry) =>
+              requested.has(entry.repositoryRef) &&
+              approved.get(entry.repositoryRef) === entry.repositoryId,
+          )
+          .map((entry) => [entry.repositoryRef, entry.description]),
+      );
+      return Object.freeze({
+        options: Object.freeze(
+          options.map((option) => {
+            const description = descriptions.get(option.repositoryRef);
+            return Object.freeze({
+              ...option,
+              ...(description === undefined ? {} : { description }),
+            });
+          }),
+        ),
+        descriptionsPending: metadata.pending,
+      });
+    } catch {
+      return Object.freeze({ options: Object.freeze(options), descriptionsPending: false });
+    }
   }
 
   resolve(input: {
@@ -188,6 +232,10 @@ export class GitHubRepoDriver implements RepoDriver {
     }
   }
 
+  async checkAdmissionReady(signal: AbortSignal): Promise<void> {
+    await this.control(() => this.#client.checkAdmissionReady(signal));
+  }
+
   async open(
     input: OpenRepositorySessionInput,
     signal: AbortSignal,
@@ -207,6 +255,7 @@ export class GitHubRepoDriver implements RepoDriver {
           profile: input.binding.profile,
           durationSeconds: input.durationSeconds,
           deadlineWallMs: input.deadlineWallMs,
+          durableAdmission: true,
           ...(input.recoverOnly === true ? { recoverOnly: true } : {}),
         },
         input.admissionId,

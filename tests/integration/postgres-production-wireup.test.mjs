@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,12 +13,15 @@ import { FilesystemConfigurationDriver } from "../../apps/controller/src/drivers
 import { createControllerWorker } from "../../apps/controller/src/worker.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { composeProduction } from "../../apps/controller/src/composition/production.ts";
+import { composePostgresDevelopment } from "../../apps/controller/src/composition/development-postgres.ts";
 import { loadInstallationConfiguration } from "../../apps/controller/src/composition/installation-config.ts";
 import { createOccLogger } from "../../apps/controller/src/logging.ts";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
+import { createReadyComputeDriver } from "../helpers/development.mjs";
 import { authenticatedHeaders, signInWithEmailPassword } from "../helpers/auth-session.mjs";
 import { createInstallationDriverConfiguration } from "../helpers/installation-driver-configuration.mjs";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
+import { normalizePresetTemplate } from "../../packages/contracts/src/index.ts";
 import { BOOTSTRAP_DEFAULT_NAMESPACE_NAME } from "../../packages/occ/src/index.ts";
 
 const databaseUrl = process.env.OCC_PRODUCTION_WIREUP_DATABASE_URL;
@@ -48,9 +51,7 @@ async function defaultNamespaceRows(pool) {
 }
 
 function createPassiveComputeDriver() {
-  return {
-    id: "compute-production-wireup",
-    capability: "compute",
+  return createReadyComputeDriver("compute-production-wireup", {
     implementation: "production-wireup-memory-compute",
     async preflight() {
       return {
@@ -62,22 +63,7 @@ function createPassiveComputeDriver() {
         ],
       };
     },
-    async ensureNamespace(namespace) {
-      return { namespaceId: namespace.id, namespaceReady: true };
-    },
-    async deleteNamespace(namespace) {
-      return { namespaceId: namespace.id, namespaceDeleted: true };
-    },
-    async prepareRevision(revision) {
-      return {
-        namespaceId: revision.namespaceId,
-        agentId: revision.agentId,
-        revisionId: revision.id,
-        ready: true,
-      };
-    },
-    async retireRevision() {},
-  };
+  });
 }
 
 function memoryLog() {
@@ -108,9 +94,9 @@ function parseLogEvents(stderr) {
     .map((line) => JSON.parse(line));
 }
 
-async function productionDrivers({ includeDefaults = false, configurationRoot } = {}) {
+async function productionDrivers({ includeDefaults = false, files, configurationRoot } = {}) {
   const configuration = createInstallationDriverConfiguration();
-  configuration.presets = { includeDefaults };
+  configuration.presets = { includeDefaults, ...(files === undefined ? {} : { files }) };
   configuration.drivers.compute.id = "compute-production-wireup";
   configuration.drivers.iam.id = "native-iam";
   const runtime = await loadInstallationConfiguration({
@@ -126,6 +112,8 @@ async function productionDrivers({ includeDefaults = false, configurationRoot } 
   return {
     installation,
     defaultPresets: runtime.defaultPresets,
+    shadowedDefaultPresets: runtime.shadowedDefaultPresets,
+    bundledPresetVersions: runtime.bundledPresetVersions,
     computeDriver: createPassiveComputeDriver(),
     configurationDriver: configurationRoot
       ? new FilesystemConfigurationDriver(configurationRoot)
@@ -149,7 +137,7 @@ test(
       ? false
       : "Set OCC_PRODUCTION_WIREUP_DATABASE_URL for real PostgreSQL production bootstrap proof.",
   },
-  async () => {
+  async (t) => {
     const environment = {
       ...process.env,
       NODE_ENV: "production",
@@ -390,12 +378,14 @@ test(
       assert.equal(privileges.rows[0].can_create_schema, false);
 
       const apiLog = memoryLog();
+      const startupPhases = [];
       app = await composeProduction({
         mode: "production",
         host: "127.0.0.1",
         databaseUrl,
         authSecret,
         authBaseURL,
+        onStartupPhase: (phase, durationMs) => startupPhases.push({ phase, durationMs }),
         // Leftover pilot settings must not change authentication when the feature is disabled.
         nativeAdmin: {
           enabled: false,
@@ -429,6 +419,12 @@ test(
         ],
         "production API composition must emit the Compute warning and continue startup",
       );
+      // The API's `listening` line reports these, so an operator can see which phase was slow.
+      assert.deepEqual(
+        startupPhases.map(({ phase }) => phase),
+        ["database", "authentication", "identity", "computePreflight", "controller", "routes"],
+      );
+      assert.ok(startupPhases.every(({ durationMs }) => Number.isSafeInteger(durationMs)));
       endpoint = await app.listen({ port: 0, host: "127.0.0.1" });
 
       await assert.rejects(
@@ -480,13 +476,14 @@ test(
       assert.equal((await serviceAuthorized.json()).data.id, installation.rows[0].id);
 
       // Prove all production ServiceAccount grants through the real cookie-authenticated HTTP boundary.
-      async function request(method, path, payload) {
+      async function request(method, path, payload, caller = session) {
         const response = await fetch(`${endpoint}${path}`, {
           method,
-          headers: authenticatedHeaders(
-            session,
-            payload === undefined ? {} : { "content-type": "application/json" },
-          ),
+          headers: authenticatedHeaders(caller, {
+            // This fixture configures port 0 before listening on an ephemeral port.
+            origin: authBaseURL,
+            ...(payload === undefined ? {} : { "content-type": "application/json" }),
+          }),
           ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
         });
         return {
@@ -501,6 +498,7 @@ test(
       assert.deepEqual(defaults.data.map((preset) => preset.name).sort(), [
         "Standard Codex",
         "Standard OpenClaw",
+        "default-codex",
       ]);
       const copied = defaults.data.find((preset) => preset.name === "Standard Codex");
       const copiedOpenClaw = defaults.data.find((preset) => preset.name === "Standard OpenClaw");
@@ -534,31 +532,137 @@ test(
         template: { agent: { name: "Kept across restart" } },
       });
       assert.equal(customized.status, 200);
-      await app.close();
-      app = await composeProduction({
-        mode: "production",
-        host: "127.0.0.1",
-        databaseUrl,
-        authSecret,
-        authBaseURL,
-        drivers: await productionDrivers({
-          includeDefaults: true,
-          configurationRoot: join(passwordDirectory, "configurations"),
-        }),
+      // Roll Standard OpenClaw back to an earlier shipped version, as a Namespace seeded
+      // by that release holds it. The restart below must refresh it in place.
+      const archivedPreset = async (path) =>
+        JSON.parse(
+          await readFile(new URL(`../../deploy/presets/archive/${path}`, import.meta.url), "utf8"),
+        );
+      const earlierOpenClaw = await archivedPreset("standard-openclaw/ed4bae5153f86b94.json");
+      const rolledBack = await request("PATCH", `${presetPath}/${copiedOpenClaw.id}`, {
+        template: earlierOpenClaw.template,
       });
-      endpoint = await app.listen({ port: 0, host: "127.0.0.1" });
+      assert.equal(rolledBack.status, 200);
+      assert.notDeepEqual(rolledBack.data.template, copiedOpenClaw.template);
+      const restart = async (drivers, logger) => {
+        await app.close();
+        app = await composeProduction({
+          mode: "production",
+          host: "127.0.0.1",
+          databaseUrl,
+          authSecret,
+          authBaseURL,
+          drivers: await productionDrivers({
+            ...drivers,
+            configurationRoot: join(passwordDirectory, "configurations"),
+          }),
+          ...(logger === undefined ? {} : { logger }),
+        });
+        endpoint = await app.listen({ port: 0, host: "127.0.0.1" });
+      };
+      const readOpenClaw = async () =>
+        (await request("GET", `${presetPath}/${copiedOpenClaw.id}`)).data;
+      // The same file seeded through presets.files, with includeDefaults off, is never refreshed.
+      await restart({
+        includeDefaults: false,
+        files: [
+          fileURLToPath(new URL("../../deploy/presets/standard-openclaw.json", import.meta.url)),
+        ],
+      });
+      assert.deepEqual(await readOpenClaw(), rolledBack.data);
+      await restart({ includeDefaults: true });
       const afterRestart = await request("GET", presetPath);
       assert.deepEqual(afterRestart.data.map((preset) => preset.name).sort(), [
         "Standard Codex",
         "Standard OpenClaw",
+        "default-codex",
       ]);
       assert.deepEqual(
         afterRestart.data.find((preset) => preset.name === "Standard Codex"),
         customized.data,
       );
+      // Refreshed from the stored JSONB: same ID, current template. The edit above stays.
       assert.deepEqual(
         afterRestart.data.find((preset) => preset.name === "Standard OpenClaw"),
         copiedOpenClaw,
+      );
+      // A Restriction freezing the Namespace's Presets keeps an earlier copy, and startup
+      // only warns. It stays for the rest of this test, which never updates these Presets.
+      const refrozen = await request("PATCH", `${presetPath}/${copiedOpenClaw.id}`, {
+        template: earlierOpenClaw.template,
+      });
+      assert.equal(refrozen.status, 200);
+      const freezeId = `freeze-presets-${randomUUID()}`;
+      await pool.query(
+        "INSERT INTO occ.iam_restrictions (id, namespace_id, action, resource_kind) VALUES ($1, $2, 'update', 'preset')",
+        [freezeId, defaultNamespace[0].id],
+      );
+      const skippedRefreshes = ({ lines }) =>
+        lines
+          .filter(({ event }) => event === "presets.default-refresh-skipped")
+          .map(({ severity, namespaceId, presetId, presetName, reason, restrictionIds }) => ({
+            severity,
+            namespaceId,
+            presetId,
+            presetName,
+            reason,
+            restrictionIds,
+          }));
+      const frozenWarning = [
+        {
+          severity: "WARN",
+          namespaceId: defaultNamespace[0].id,
+          presetId: copiedOpenClaw.id,
+          presetName: "Standard OpenClaw",
+          reason: "An applicable Restriction denies the exact action and resource.",
+          restrictionIds: [freezeId],
+        },
+      ];
+      const frozenLog = memoryLog();
+      await restart({ includeDefaults: true }, frozenLog.logger);
+      assert.deepEqual(await readOpenClaw(), refrozen.data);
+      assert.deepEqual(skippedRefreshes(frozenLog), frozenWarning);
+      // Development PostgreSQL startup passes the same warning to its logger.
+      const developmentLog = memoryLog();
+      const development = await composePostgresDevelopment(
+        {
+          mode: "development",
+          host: "127.0.0.1",
+          databaseUrl,
+          authSecret,
+          authBaseURL,
+          logger: developmentLog.logger,
+        },
+        await productionDrivers({
+          includeDefaults: true,
+          configurationRoot: join(passwordDirectory, "configurations"),
+        }),
+      );
+      await development.close();
+      assert.deepEqual(await readOpenClaw(), refrozen.data);
+      assert.deepEqual(skippedRefreshes(developmentLog), frozenWarning);
+      // An operator file named like a bundled default (default-codex was bundled after
+      // operators could already use the name) replaces it: startup warns instead of stopping.
+      const operatorCodexPath = join(passwordDirectory, "operator-default-codex.json");
+      const operatorCodexTemplate = {
+        agent: { name: "Operator Codex", executionMode: "dedicated" },
+      };
+      await writeFile(
+        operatorCodexPath,
+        JSON.stringify({ name: "default-codex", template: operatorCodexTemplate }),
+      );
+      const bundledCodexCopy = async () =>
+        (await request("GET", presetPath)).data.find((preset) => preset.name === "default-codex");
+      const seededCodex = await bundledCodexCopy();
+      const shadowLog = memoryLog();
+      await restart({ includeDefaults: true, files: [operatorCodexPath] }, shadowLog.logger);
+      // The copy seeded earlier from the bundled template stays as it was.
+      assert.deepEqual(await bundledCodexCopy(), seededCodex);
+      assert.deepEqual(
+        shadowLog.lines
+          .filter(({ event }) => event === "presets.bundled-default-shadowed")
+          .map(({ severity, presetName, presetFile }) => ({ severity, presetName, presetFile })),
+        [{ severity: "WARN", presetName: "default-codex", presetFile: operatorCodexPath }],
       );
       const newNamespace = await request("POST", "/namespaces", {
         name: "Preset startup namespace",
@@ -568,7 +672,13 @@ test(
       assert.deepEqual(newPresets.data.map((preset) => preset.name).sort(), [
         "Standard Codex",
         "Standard OpenClaw",
+        "default-codex",
       ]);
+      // A new Namespace receives the operator's template, not the bundled one.
+      assert.equal(
+        newPresets.data.find((preset) => preset.name === "default-codex").template.agent.name,
+        operatorCodexTemplate.agent.name,
+      );
       assert.notEqual(
         newPresets.data.find((preset) => preset.name === "Standard Codex").id,
         copied.id,
@@ -577,6 +687,27 @@ test(
         newPresets.data.find((preset) => preset.name === "Standard OpenClaw").id,
         copiedOpenClaw.id,
       );
+      // An earlier release seeded this default under a name the bundle no longer ships.
+      // The Namespace is still provisioning, so write the row as that seeding did.
+      const earlierCodex = await archivedPreset("standard-codex/a07d1e2070d95c99.json");
+      await pool.query(
+        "INSERT INTO occ.presets (id, namespace_id, name, template, created_at) VALUES ($1, $2, $3, $4, now())",
+        [
+          `pre_${randomUUID()}`,
+          newNamespace.data.id,
+          earlierCodex.name,
+          JSON.stringify(normalizePresetTemplate(earlierCodex.template, newNamespace.data.id)),
+        ],
+      );
+      // Only unmodified seeded defaults remain, so deletion removes them with the Namespace.
+      const deletedNamespace = await request("DELETE", `/namespaces/${newNamespace.data.id}`);
+      assert.equal(deletedNamespace.status, 202);
+      assert.equal(deletedNamespace.data.status, "deleting");
+      const remainingPresets = await pool.query(
+        "SELECT id FROM occ.presets WHERE namespace_id = $1",
+        [newNamespace.data.id],
+      );
+      assert.deepEqual(remainingPresets.rows, []);
 
       const defaultConfiguration = await request(
         "POST",
@@ -697,6 +828,183 @@ test(
         }),
       });
       assert.equal(publicSignup.status, 404);
+
+      await t.test(
+        "persisted sharing follows real cookie sessions across restart and revocation",
+        async () => {
+          // Account enrollment is a precondition, not the behavior under test. Seed an
+          // existing Installation-reader Role, then provision people through the real API.
+          // Their initial Role grants no Namespace, Agent, or policy administration access.
+          const readerRoleId = `role-reader-${randomUUID()}`;
+          await pool.query(
+            "INSERT INTO occ.iam_roles (id, name, permissions) VALUES ($1, $2, $3)",
+            [
+              readerRoleId,
+              "Installation reader",
+              JSON.stringify([{ action: "read", resourceKind: "installation" }]),
+            ],
+          );
+          const people = [];
+          for (const label of ["recipient", "unaffected"]) {
+            const email = `${label}-${randomUUID()}@example.test`;
+            const personPassword = `sharing-${randomUUID()}`;
+            const created = await request("POST", "/api/auth/accounts", {
+              email,
+              password: personPassword,
+              name: label,
+              roleId: readerRoleId,
+            });
+            assert.equal(created.status, 201);
+            const personSession = await signInWithEmailPassword({
+              origin: endpoint,
+              email,
+              password: personPassword,
+            });
+            people.push({ principalId: created.data.principalId, session: personSession });
+            assert.deepEqual(
+              (await request("GET", "/namespaces", undefined, personSession)).data,
+              [],
+            );
+          }
+          const namespaceId = defaultNamespace[0].id;
+          const agentId = defaultAgent.data.id;
+          const agentsPath = `/namespaces/${namespaceId}/agents`;
+          const policyPath = `/namespaces/${namespaceId}/iam`;
+          const sibling = await request("POST", agentsPath, {
+            name: `private-sibling-${randomUUID()}`,
+            configurationId: defaultConfiguration.data.id,
+          });
+          assert.equal(sibling.status, 201);
+          const discoveryRole = await request("POST", `${policyPath}/roles`, {
+            name: "Namespace discovery",
+            permissions: [{ action: "read", resourceKind: "namespace" }],
+          });
+          const agentRole = await request("POST", `${policyPath}/roles`, {
+            name: "Agent native administration",
+            permissions: [
+              { action: "read", resourceKind: "agent" },
+              { action: "administer", resourceKind: "agent" },
+            ],
+          });
+          assert.equal(discoveryRole.status, 201);
+          assert.equal(agentRole.status, 201);
+          const bindings = [];
+          for (const person of people) {
+            assert.equal(
+              (await request("GET", `${agentsPath}/${agentId}`, undefined, person.session)).status,
+              403,
+            );
+            // Use the same exact-scope API sequence as Console sharing. An account's
+            // ability to sign in does not by itself grant discovery or sibling access.
+            for (const [resourceKind, resourceId, roleId] of [
+              ["namespace", namespaceId, discoveryRole.data.id],
+              ["agent", agentId, agentRole.data.id],
+            ]) {
+              const binding = await request("POST", `${policyPath}/access-bindings`, {
+                subjectKind: "identity",
+                subjectId: person.principalId,
+                roleId,
+                resourceKind,
+                resourceId,
+              });
+              assert.equal(binding.status, 201);
+              if (resourceKind === "agent") {
+                bindings.push(binding.data);
+              }
+            }
+          }
+
+          // A fresh application and IAM instance must reconstruct both authority and
+          // sessions from PostgreSQL. Keep the same cookies; do not mint fixture sessions.
+          await app.close();
+          app = await composeProduction({
+            mode: "production",
+            host: "127.0.0.1",
+            databaseUrl,
+            authSecret,
+            authBaseURL,
+            drivers: await productionDrivers(),
+            logger: apiLog.logger,
+          });
+          endpoint = await app.listen({ port: 0, host: "127.0.0.1" });
+          for (const person of people) {
+            const namespaces = await request("GET", "/namespaces", undefined, person.session);
+            assert.equal(namespaces.status, 200);
+            assert.deepEqual(
+              namespaces.data.map(({ id }) => id),
+              [namespaceId],
+            );
+            const agents = await request("GET", agentsPath, undefined, person.session);
+            assert.equal(agents.status, 200);
+            assert.deepEqual(
+              agents.data.map(({ id }) => id),
+              [agentId],
+            );
+            assert.equal(
+              (await request("GET", `${agentsPath}/${agentId}`, undefined, person.session)).status,
+              200,
+            );
+            assert.equal(
+              (await request("GET", `${agentsPath}/${sibling.data.id}`, undefined, person.session))
+                .status,
+              403,
+            );
+            assert.equal(
+              (
+                await request(
+                  "GET",
+                  `/namespaces/${namespaceId}/configurations/${defaultConfiguration.data.id}`,
+                  undefined,
+                  person.session,
+                )
+              ).status,
+              403,
+            );
+            assert.equal(
+              (await request("GET", `${policyPath}/roles`, undefined, person.session)).status,
+              403,
+            );
+          }
+
+          const [recipient, unaffected] = people;
+          const revoked = await request(
+            "DELETE",
+            `${policyPath}/access-bindings/${bindings[0].id}`,
+          );
+          assert.equal(revoked.status, 204);
+          // Check the next real authenticated HTTP request, not a manufactured abort or
+          // changed cookie. This does not claim closure of an already-open native stream.
+          assert.equal(
+            (await request("GET", `${agentsPath}/${agentId}`, undefined, recipient.session)).status,
+            403,
+          );
+          assert.deepEqual(
+            (await request("GET", agentsPath, undefined, recipient.session)).data,
+            [],
+          );
+          assert.deepEqual(
+            (await request("GET", "/namespaces", undefined, recipient.session)).data.map(
+              ({ id }) => id,
+            ),
+            [namespaceId],
+          );
+          assert.equal(
+            (await request("GET", `${agentsPath}/${agentId}`, undefined, unaffected.session))
+              .status,
+            200,
+          );
+          const remaining = await request("GET", `${policyPath}/access-bindings`);
+          assert.equal(remaining.status, 200);
+          assert.equal(
+            remaining.data.some(({ id }) => id === bindings[0].id),
+            false,
+          );
+          assert.equal(
+            remaining.data.some(({ id }) => id === bindings[1].id),
+            true,
+          );
+        },
+      );
     } finally {
       if (app !== undefined) {
         await app.close();

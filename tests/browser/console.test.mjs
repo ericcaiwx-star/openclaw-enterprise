@@ -1,107 +1,43 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-import { chromium } from "playwright";
+import {
+  describePendingBrowserRequests,
+  noteBrowserEvent,
+} from "../helpers/browser-failure-diagnostics.mjs";
+import { createConsoleAppFixture as createBaseConsoleAppFixture } from "../helpers/console-app.mjs";
+import {
+  apiRequests,
+  expectNoText,
+  login,
+  newPage,
+  settledFetches,
+  trackSettledFetches,
+  waitForIdleFetches,
+  waitForSettledFetches,
+} from "./console-agents-browser-helpers.mjs";
 
-import { createConsoleAppFixture } from "../helpers/console-app.mjs";
+const defaultCodexPreset = JSON.parse(
+  await readFile(new URL("../../deploy/presets/default-codex.json", import.meta.url), "utf8"),
+);
+const createConsoleAppFixture = (t, options = {}) =>
+  createBaseConsoleAppFixture(t, { defaultPresets: [defaultCodexPreset], ...options });
 
 const routeHoldTimeoutMs = 30_000;
-
-async function artifactDirectory(t) {
-  const configured = process.env.OCC_TEST_CONSOLE_ARTIFACT_DIR;
-  const directory =
-    configured === undefined || configured.length === 0
-      ? await mkdtemp(join(tmpdir(), "openclaw-console-browser-"))
-      : configured;
-  t.diagnostic(`console browser artifacts: ${directory}`);
-  return directory;
-}
-
-async function launchBrowser() {
-  const browserExecutable =
-    process.env.OCC_TEST_BROWSER_EXECUTABLE === undefined ||
-    process.env.OCC_TEST_BROWSER_EXECUTABLE.length === 0
-      ? undefined
-      : process.env.OCC_TEST_BROWSER_EXECUTABLE;
-  const browser = await chromium.launch({
-    ...(browserExecutable === undefined ? {} : { executablePath: browserExecutable }),
-    headless: true,
-  });
-  return browser;
-}
-
-async function newPage(t, fixture) {
-  const artifacts = await artifactDirectory(t);
-  const browser = await launchBrowser();
-  let context;
-  fixture.registerCleanupBeforeAppClose(async () => {
-    let cleanupError;
-    try {
-      await context?.close();
-    } catch (error) {
-      cleanupError ??= error;
-    } finally {
-      try {
-        await browser.close();
-      } catch (error) {
-        cleanupError ??= error;
-      }
-    }
-    if (cleanupError) {
-      throw cleanupError;
-    }
-  });
-  context = await browser.newContext();
-  return { page: await context.newPage(), artifacts };
-}
-
-async function newMobilePage(t, fixture) {
-  const browser = await launchBrowser();
-  let context;
-  fixture.registerCleanupBeforeAppClose(async () => {
-    let cleanupError;
-    try {
-      await context?.close();
-    } catch (error) {
-      cleanupError ??= error;
-    } finally {
-      try {
-        await browser.close();
-      } catch (error) {
-        cleanupError ??= error;
-      }
-    }
-    if (cleanupError) {
-      throw cleanupError;
-    }
-  });
-  context = await browser.newContext({
-    hasTouch: true,
-    isMobile: true,
-    viewport: { width: 390, height: 844 },
-  });
-  return { page: await context.newPage() };
-}
-
-async function login(page, fixture, path = "/console/") {
-  await page.goto(`${fixture.origin}${path}`);
-  await page.getByLabel("Username").fill(fixture.credentials.email);
-  await page.getByLabel("Password").fill(fixture.credentials.password);
-  await page.getByRole("button", { name: "Login" }).click();
-  await page.waitForURL(/\/console\/(agents|backends|namespaces|settings)/);
-}
+const mobile = {
+  context: { hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } },
+};
 
 async function openShellMenu(page) {
   await page.getByRole("button", { name: /OpenClaw Enterprise/ }).click();
 }
 
-async function chooseNamespace(page, name) {
+async function chooseNamespace(page, name, options) {
   await page
     .getByRole("combobox", { name: "Namespace", exact: true })
-    .selectOption({ label: name });
+    .selectOption({ label: name }, options);
 }
 
 function deferred() {
@@ -112,13 +48,17 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function waitForRoutePhase(promise, description, release, signal) {
+async function waitForRoutePhase(promise, description, release, signal, describeState) {
   let timeout;
   let onAbort;
   const deadline = new Promise((_, reject) => {
     function fail(reason) {
+      // Read the hold's state before release() changes it.
+      const state = describeState?.();
       release();
-      const error = new Error(`${description} did not finish within ${routeHoldTimeoutMs}ms`);
+      const error = new Error(
+        `${description} did not finish within ${routeHoldTimeoutMs}ms${state ? ` (${state})` : ""}`,
+      );
       if (reason !== undefined) {
         error.cause = reason;
       }
@@ -144,29 +84,44 @@ async function waitForRoutePhase(promise, description, release, signal) {
   }
 }
 
-async function holdRoute(t, page, pattern, continueRoute) {
+async function holdRoute(t, page, pattern, continueRoute, { fetchBeforeHold = true } = {}) {
   const releaseGate = deferred();
   const captured = deferred();
   const completed = deferred();
   let released = false;
   let releaseWatchdog;
+  let intercepted = 0;
 
   function release() {
     if (released) {
       return;
     }
     released = true;
+    noteBrowserEvent(page, `held route ${pattern} released`);
     clearTimeout(releaseWatchdog);
     releaseGate.resolve();
   }
 
+  function describeState() {
+    try {
+      return `intercepted ${intercepted}, released ${released}, page ${page.url()}, pending requests: ${describePendingBrowserRequests(page)}`;
+    } catch (error) {
+      return `state unavailable: ${error.message}`;
+    }
+  }
+
   t.signal?.addEventListener("abort", release, { once: true });
   await page.route(pattern, async (route) => {
+    intercepted += 1;
     let response;
-    try {
-      response = await route.fetch();
-    } catch {
-      response = undefined;
+    if (fetchBeforeHold) {
+      try {
+        response = await route.fetch();
+        noteBrowserEvent(page, `held route ${pattern} upstream status ${response.status()}`);
+      } catch (error) {
+        response = undefined;
+        noteBrowserEvent(page, `held route ${pattern} upstream fetch failed: ${error.message}`);
+      }
     }
     captured.resolve();
     if (!released && releaseWatchdog === undefined) {
@@ -176,8 +131,10 @@ async function holdRoute(t, page, pattern, continueRoute) {
     await releaseGate.promise;
     try {
       await continueRoute(route, response);
-    } catch {
+      noteBrowserEvent(page, `held route ${pattern} continued`);
+    } catch (error) {
       /* The page may already have aborted the obsolete read. */
+      noteBrowserEvent(page, `held route ${pattern} continue failed: ${error.message}`);
     } finally {
       completed.resolve();
     }
@@ -186,21 +143,22 @@ async function holdRoute(t, page, pattern, continueRoute) {
   return {
     release,
     waitForRelease: () =>
-      waitForRoutePhase(captured.promise, `route ${pattern} capture`, release, t.signal),
+      waitForRoutePhase(
+        captured.promise,
+        `route ${pattern} capture`,
+        release,
+        t.signal,
+        describeState,
+      ),
     waitForCompletion: () =>
-      waitForRoutePhase(completed.promise, `route ${pattern} completion`, release, t.signal),
+      waitForRoutePhase(
+        completed.promise,
+        `route ${pattern} completion`,
+        release,
+        t.signal,
+        describeState,
+      ),
   };
-}
-
-function apiRequests(page, origin) {
-  const requests = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.origin === origin) {
-      requests.push({ method: request.method(), path: `${url.pathname}${url.search}` });
-    }
-  });
-  return requests;
 }
 
 test("console debug flag is opt-in and follows Namespace navigation without leaking prior Agent reads", async (t) => {
@@ -289,6 +247,8 @@ test("console browser flow keeps Namespace URL state across global pages and log
   assert.match(page.url(), new RegExp(`/console/backends\\?namespace=${alpha.id}$`));
   await page.goBack();
   await page.getByText("openai-primary").waitFor();
+  // Retained text appears before the selector has fresh session and Namespace admission.
+  await page.locator("#namespace-selector:not(:disabled)").waitFor();
   assert.equal(
     await page.getByRole("combobox", { name: "Namespace", exact: true }).inputValue(),
     beta.id,
@@ -329,6 +289,136 @@ test("console browser flow keeps Namespace URL state across global pages and log
   );
 });
 
+test("console shows the external observability link only to Installation administrators", async (t) => {
+  const url = "https://metrics.example.test/d/operations";
+  const fixture = await createConsoleAppFixture(t, { observabilityUrl: url });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Observability access", { ready: true });
+  // The second account can open the console but has no Installation grant.
+  const limited = await fixture.createAccountWithPolicy("observability-limited", (principal) => {
+    fixture.policy.roles.push({
+      id: "role-browser-observability-reader",
+      namespaceId: namespace.id,
+      permissions: [{ action: "read", resourceKind: "namespace" }],
+    });
+    fixture.policy.bindings.push({
+      id: "binding-browser-observability-reader",
+      namespaceId: namespace.id,
+      subjectKind: "identity",
+      subjectId: principal.id,
+      roleId: "role-browser-observability-reader",
+    });
+  });
+  const { page } = await newPage(t, fixture);
+  let probes = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/observability") {
+      probes += 1;
+    }
+  });
+  await login(page, fixture, "/console/");
+  const link = page.getByRole("link", { name: "Observability" });
+  await link.waitFor();
+  assert.equal(await link.getAttribute("href"), url);
+  assert.equal(await link.getAttribute("target"), "_blank");
+  assert.equal(await link.getAttribute("rel"), "noopener noreferrer");
+  assert.equal(await link.locator("svg.external-link-icon[aria-hidden='true']").count(), 1);
+  // Navigation reuses the settled read and keeps the link.
+  await page.getByRole("link", { name: "Namespaces" }).click();
+  await page.getByRole("list", { name: "Namespaces" }).getByText("Observability access").waitFor();
+  await link.waitFor();
+  assert.equal(probes, 1);
+  await page.reload();
+  await link.waitFor();
+  assert.equal(await link.getAttribute("href"), url);
+  assert.equal(probes, 1);
+
+  // An expired session leaves this tab's settled answer behind; logout clears it.
+  const adminAnswer = await page.evaluate(() =>
+    globalThis.sessionStorage.getItem("occ.console.installationAccess"),
+  );
+  assert.ok(adminAnswer);
+  await openShellMenu(page);
+  await page.getByRole("menuitem", { name: "Logout" }).click();
+  // Navigating away before the sign-out request is answered aborts it, and the old session
+  // then opens the Console again instead of the login form.
+  await page.waitForURL(/\/console\/login$/);
+  // Restore the administrator's answer as an expiry would leave it: it belongs to another
+  // session owner, so the next sign-in must probe (a reused answer sends no probe below).
+  await page.evaluate((answer) => {
+    globalThis.sessionStorage.setItem("occ.console.installationAccess", answer);
+  }, adminAnswer);
+  // The shell renders before the probe is answered, so wait for the denial itself.
+  const limitedProbe = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/observability",
+  );
+  await login(page, fixture, "/console/", limited.credentials);
+  assert.equal((await limitedProbe).status(), 403);
+  // The limited user reads no Agents. The empty list renders only after the page applied the
+  // denied probe, so the link checks below see the settled shell, not the loading one.
+  await page.getByRole("heading", { name: "No Agents yet", exact: true }).waitFor();
+  assert.equal(await page.getByRole("link", { name: "Observability" }).count(), 0);
+  // A denied read is audited, so navigation must not repeat it.
+  await page.getByRole("link", { name: "Namespaces" }).click();
+  await page.getByRole("list", { name: "Namespaces" }).getByText("Observability access").waitFor();
+  const namespacesRead = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/namespaces",
+  );
+  await page.getByRole("link", { name: "Agents" }).click();
+  await namespacesRead;
+  await page.getByRole("heading", { name: "No Agents yet", exact: true }).waitFor();
+  assert.equal(await page.getByRole("link", { name: "Observability" }).count(), 0);
+  assert.equal(probes, 2);
+  // A reload in the same tab reuses the settled answer for this session owner.
+  await page.reload();
+  await page.getByRole("heading", { name: "No Agents yet", exact: true }).waitFor();
+  assert.equal(await page.getByRole("link", { name: "Observability" }).count(), 0);
+  assert.equal(probes, 2);
+});
+
+test("a navigation while the Installation-access probe is answered does not ask again", async (t) => {
+  // The API audits every denied probe, so the Console must not repeat one it already sent.
+  let answered = 0;
+  const fixture = await createConsoleAppFixture(t, {
+    observabilityUrl: "https://metrics.example.test/d/operations",
+    async onSend(request, _reply, payload) {
+      if (request.url === "/observability") {
+        answered += 1;
+      }
+      return payload;
+    },
+  });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Probe access", { ready: true });
+  const limited = await fixture.createAccountWithPolicy("probe-limited", (principal) => {
+    fixture.policy.roles.push({
+      id: "role-browser-probe-reader",
+      namespaceId: namespace.id,
+      permissions: [{ action: "read", resourceKind: "namespace" }],
+    });
+    fixture.policy.bindings.push({
+      id: "binding-browser-probe-reader",
+      namespaceId: namespace.id,
+      subjectKind: "identity",
+      subjectId: principal.id,
+      roleId: "role-browser-probe-reader",
+    });
+  });
+  const { page } = await newPage(t, fixture);
+  // The API has answered (and audited) the probe; its response reaches the page only later.
+  const probe = await holdRoute(t, page, "**/observability", (route, response) =>
+    route.fulfill({ response }),
+  );
+  await login(page, fixture, "/console/agents", limited.credentials);
+  await probe.waitForRelease();
+  await page.getByRole("link", { name: "Namespaces" }).click();
+  await page.waitForURL(/\/console\/namespaces/);
+  probe.release();
+  await page.getByRole("list", { name: "Namespaces" }).getByText("Probe access").waitFor();
+  assert.equal(await page.getByRole("link", { name: "Observability" }).count(), 0);
+  assert.equal(answered, 1);
+});
+
 test("console ignores stale collection successes and errors while switching Namespaces", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
@@ -337,7 +427,9 @@ test("console ignores stale collection successes and errors while switching Name
   await fixture.createAgent(slow.id, "Slow agent");
   await fixture.createAgent(current.id, "Current agent");
   const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
   const slowAgents = `**/namespaces/${slow.id}/agents`;
+  const slowAgentsPath = `/namespaces/${slow.id}/agents`;
   await login(page, fixture, `/console/agents?namespace=${slow.id}`);
   await page.getByText("Slow agent").waitFor();
   await chooseNamespace(page, "Current");
@@ -346,33 +438,91 @@ test("console ignores stale collection successes and errors while switching Name
     response ? route.fulfill({ response }) : route.continue(),
   );
   t.after(() => slowSuccess.release());
+  // Changed data makes the held read rebuild the view if the console still treats it as current.
+  await fixture.createAgent(slow.id, "Slow new agent");
 
   await chooseNamespace(page, "Slow");
   await slowSuccess.waitForRelease();
+  const slowSuccessRead = (await settledFetches(page, slowAgentsPath)) + 1;
   await expectRetainedPreview(page, "Slow agent");
+  // Namespace admission has finished, so switching away does not wait for the held read.
   await chooseNamespace(page, "Current");
   await page.getByText("Current agent").waitFor();
   slowSuccess.release();
   await slowSuccess.waitForCompletion();
-  await expectNoText(page, /Slow agent|unavailable|failed/i);
+  // The page has settled the stale read (aborted or answered) and run its handler.
+  await waitForSettledFetches(page, slowAgentsPath, slowSuccessRead);
+  await expectNoText(page, /Slow (new )?agent|unavailable|failed|interrupted/i);
+  assert.equal(await page.getByText("Current agent").isVisible(), true);
+  assert.equal(new URL(page.url()).searchParams.get("namespace"), current.id);
 
   await page.unroute(slowAgents);
   const slowError = await holdRoute(t, page, slowAgents, (route) => route.abort("failed"));
   t.after(() => slowError.release());
   await chooseNamespace(page, "Slow");
   await slowError.waitForRelease();
+  const slowErrorRead = (await settledFetches(page, slowAgentsPath)) + 1;
   await chooseNamespace(page, "Current");
   await page.getByText("Current agent").waitFor();
   slowError.release();
   await slowError.waitForCompletion();
-  await page.waitForTimeout(100);
-  await expectNoText(page, /Slow agent|unavailable|failed/i);
+  await waitForSettledFetches(page, slowAgentsPath, slowErrorRead);
+  // A failed read the console still treated as current would show "Request interrupted".
+  await expectNoText(page, /Slow (new )?agent|unavailable|failed|interrupted/i);
+  assert.equal(await page.getByText("Current agent").isVisible(), true);
+});
+
+test("an unchanged retained view without a Namespace selection selects the default once one is readable", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  await fixture.createNamespace("Granted later", { ready: true });
+  const denyAll = {
+    id: "deny-all-namespace-read",
+    resourceKind: "namespace",
+    action: "read",
+    effect: "deny",
+  };
+  fixture.policy.restrictions.push(denyAll);
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, "/console/backends");
+  await page.getByText("openai-primary", { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("namespace"), null);
+  // A settled view is retained reusable, so returning to it takes the unchanged fast path.
+  await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
+
+  await openShellMenu(page);
+  await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
+  await page.getByText(fixture.credentials.email.toLowerCase(), { exact: true }).waitFor();
+  fixture.policy.restrictions.splice(fixture.policy.restrictions.indexOf(denyAll), 1);
+  // The retained Backends view revalidates unchanged, but its shell was built without a selection.
+  await page.goBack();
+  await page.waitForFunction(
+    () =>
+      globalThis.document.querySelector('.content [aria-live="polite"]:not([inert])') &&
+      globalThis.document.querySelector("#namespace-selector")?.disabled === false,
+  );
+  await page.getByText("openai-primary", { exact: true }).waitFor();
+  const selection = new URL(page.url()).searchParams.get("namespace");
+  assert.notEqual(selection, null);
+  assert.equal(
+    await page.getByRole("combobox", { name: "Namespace", exact: true }).inputValue(),
+    selection,
+  );
+  await expectNoText(page, /No readable Namespaces/);
 });
 
 async function releaseHeldRoute(page, pattern, hold) {
   hold.release();
   await hold.waitForCompletion();
   await page.unroute(pattern);
+}
+
+// The console retains a view for Back and in-app returns only if it finished its reads before
+// the reader left; otherwise the return rebuilds it. Wait for this before leaving a view whose
+// DOM a test later expects to be reused. The page must run trackSettledFetches().
+async function waitForSettledView(page) {
+  await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
+  await waitForIdleFetches(page);
 }
 
 async function expectRetainedPreview(page, visibleText) {
@@ -391,15 +541,18 @@ test("console keeps loaded route families visible while return reads refresh", a
   await fixture.createNamespace("A second Namespace", { ready: true });
   const agent = await fixture.createAgent(namespace.id, "Retained route Agent");
   const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
 
   await login(page, fixture, "/console/agents?namespace=" + namespace.id);
   await page.getByText("Retained route Agent", { exact: true }).waitFor();
+  await waitForSettledView(page);
   const originalAgentRow = await page
     .getByRole("link", { name: "Retained route Agent", exact: true })
     .elementHandle();
 
   await page.getByRole("link", { name: "Namespaces", exact: true }).click();
   await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+  await waitForSettledView(page);
   const originalNamespaceList = await page
     .getByRole("list", { name: "Namespaces", exact: true })
     .elementHandle();
@@ -422,6 +575,7 @@ test("console keeps loaded route families visible while return reads refresh", a
 
   await page.getByRole("link", { name: "Namespaces", exact: true }).click();
   await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+  await waitForSettledView(page);
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   await page.getByText("Retained route Agent", { exact: true }).waitFor();
   const namespacesPattern = "**/namespaces";
@@ -478,9 +632,10 @@ test("console keeps loaded route families visible while return reads refresh", a
   await page.getByRole("heading", { name: "Retained route Agent", exact: true }).waitFor();
   await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   const workspaceNotice =
-    "Workspace files require a deployed Agent with an active revision and a reachable gateway.";
+    "Workspace files require a deployed Agent with a current version and a reachable gateway.";
   await page.getByText(workspaceNotice, { exact: true }).waitFor();
   await page.locator(".native-admin-access").waitFor({ state: "attached" });
+  await waitForSettledView(page);
   const originalNativePanel = await page.locator(".native-admin-access").elementHandle();
   await page.getByRole("link", { name: "← Agents", exact: true }).click();
   await page.getByText("Retained route Agent", { exact: true }).waitFor();
@@ -505,7 +660,7 @@ test("console keeps loaded route families visible while return reads refresh", a
   await page.getByRole("link", { name: "← Agents", exact: true }).click();
   await page.getByRole("button", { name: "Create Agent", exact: true }).click();
   await page.getByRole("heading", { name: "Create Agent", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Start without Preset", exact: true }).click();
+  await page.getByRole("button", { name: "Start with default Preset", exact: true }).click();
   await page.getByLabel("Agent name", { exact: true }).fill("Retained draft Agent");
   await page.getByRole("link", { name: "Namespaces", exact: true }).click();
   await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
@@ -515,14 +670,59 @@ test("console keeps loaded route families visible while return reads refresh", a
   t.after(() => createSessionHold.release());
   await page.goBack();
   await createSessionHold.waitForRelease();
-  // The abandoned no-Preset form must not be shown even as an inert cached preview.
+  // The abandoned default starter form must not appear as an inert cached preview.
   assert.equal(await page.locator("#agent-name").count(), 0);
   createSessionHold.release();
-  await page.getByRole("button", { name: "Start without Preset", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Start with default Preset", exact: true }).waitFor();
   await createSessionHold.waitForCompletion();
   await page.unroute(sessionPattern);
   await page.getByLabel("Preset template").waitFor();
   assert.equal(await page.getByLabel("Agent name", { exact: true }).count(), 0);
+});
+
+test("an Agent tab chosen while the detail is still loading is the one Back restores", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Early tab", { ready: true });
+  const agent = await fixture.createAgent(namespace.id, "Early tab Agent");
+  const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
+  await login(page, fixture, "/console/agents?namespace=" + namespace.id);
+  await page.getByText("Early tab Agent", { exact: true }).waitFor();
+
+  // Hold the detail's Configuration read so the first tab is still loading when the reader
+  // switches tabs; the switch updates the URL in place.
+  const configurationPattern =
+    "**/namespaces/" + namespace.id + "/configurations/" + agent.configurationId;
+  const configurationHold = await holdRoute(t, page, configurationPattern, (route, response) =>
+    response ? route.fulfill({ response }) : route.continue(),
+  );
+  t.after(() => configurationHold.release());
+  await page.getByRole("link", { name: "Early tab Agent", exact: true }).click();
+  await configurationHold.waitForRelease();
+  await page.getByRole("button", { name: "Workspace files", exact: true }).click();
+  const workspaceNotice = page.getByText(
+    "Workspace files require a deployed Agent with a current version and a reachable gateway.",
+    { exact: true },
+  );
+  await workspaceNotice.waitFor();
+  await releaseHeldRoute(page, configurationPattern, configurationHold);
+  await waitForSettledView(page);
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "workspace");
+  const notice = await workspaceNotice.elementHandle();
+
+  // The view is retained under the URL it shows, so Back reuses it instead of rebuilding it.
+  await page.getByRole("link", { name: "← Agents", exact: true }).click();
+  await page.getByRole("button", { name: "Create Agent", exact: true }).waitFor();
+  await page.goBack();
+  await workspaceNotice.waitFor();
+  await waitForSettledView(page);
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "workspace");
+  assert.equal(
+    await notice.evaluate((node) => node.isConnected),
+    true,
+    "Back restores the retained workspace tab",
+  );
 });
 
 test("Refresh and focus restoration retain rows until fresh data arrives", async (t) => {
@@ -534,9 +734,9 @@ test("Refresh and focus restoration retain rows until fresh data arrives", async
   await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
   await page.getByText("Existing background Agent").waitFor();
   for (const trigger of ["Refresh", "focus", "visibilitychange"]) {
-    const pending = await holdRoute(t, page, "**/api/auth/session", (route, response) =>
-      response ? route.fulfill({ response }) : route.continue(),
-    );
+    const pending = await holdRoute(t, page, "**/api/auth/session", (route) => route.continue(), {
+      fetchBeforeHold: false,
+    });
     t.after(() => pending.release());
     await fixture.createAgent(namespace.id, `Added during ${trigger}`);
     if (trigger === "Refresh") {
@@ -561,6 +761,7 @@ test("console retained views clear after session expiry and exact Agent denial",
   const namespace = await fixture.createNamespace("Retained invalidation", { ready: true });
   const agent = await fixture.createAgent(namespace.id, "Denied retained Agent");
   const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
 
   await login(page, fixture, "/console/agents?namespace=" + namespace.id);
   await page.getByText("Denied retained Agent", { exact: true }).waitFor();
@@ -584,6 +785,8 @@ test("console retained views clear after session expiry and exact Agent denial",
   fixture.memoryDatabase.session.length = 0;
   await login(page, fixture, "/console/agents/" + agent.id + "?namespace=" + namespace.id);
   await page.getByRole("heading", { name: "Denied retained Agent", exact: true }).waitFor();
+  // The heading shows before the detail finishes loading; leaving earlier keeps no preview.
+  await waitForSettledView(page);
   await page.getByRole("link", { name: "← Agents", exact: true }).click();
   await page.getByText("Denied retained Agent", { exact: true }).waitFor();
   fixture.policy.restrictions.push({
@@ -604,6 +807,12 @@ test("console retained views clear after session expiry and exact Agent denial",
   await expectRetainedPreview(page, "Denied retained Agent");
   await releaseHeldRoute(page, detailPattern, deniedAgent);
   await page.getByRole("heading", { name: "Access denied", exact: true }).waitFor();
+  // Someone else's Agent link says what the reader can do, not that a collection is unreadable.
+  await page
+    .getByText(
+      "You do not have access to this Agent or its settings, or it was deleted. Ask its owner to share it with you.",
+    )
+    .waitFor();
   await expectNoText(page, /Configuration draft|Selected revision/);
 });
 
@@ -645,13 +854,13 @@ for (const gate of ["/api/auth/session", "/namespaces"]) {
   });
 }
 
-test("a replacement session for the same user discards retained creation drafts", async (t) => {
+test("a session replaced by another tab signs this tab out instead of being adopted", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Session replacement", { ready: true });
   const { page } = await newPage(t, fixture);
   await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
-  await page.getByRole("button", { name: "Start without Preset", exact: true }).click();
+  await page.getByRole("button", { name: "Start with default Preset", exact: true }).click();
   await page.getByLabel("Agent name", { exact: true }).fill("Old session draft");
   await page.getByRole("link", { name: "Namespaces", exact: true }).click();
   await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
@@ -662,18 +871,271 @@ test("a replacement session for the same user discards retained creation drafts"
     data: { email: fixture.credentials.email, password: fixture.credentials.password },
   });
   assert.equal(response.status(), 200);
-  const pending = await holdRoute(t, page, "**/namespaces", (route, read) =>
-    read ? route.fulfill({ response: read }) : route.continue(),
+  const refused = page.waitForResponse(
+    (candidate) => new URL(candidate.url()).pathname === "/api/auth/session",
   );
-  t.after(() => pending.release());
   await page.goBack();
-  await pending.waitForRelease();
-  // The new session has been checked; the old preview must already be gone.
+  // This tab pinned the key of its own session. The controller refuses the
+  // replaced cookie for it, so the tab signs out rather than acting as another session.
+  const refusedSession = await refused;
+  assert.equal(refusedSession.status(), 401);
+  assert.ok(refusedSession.request().headers()["x-occ-session-key"]);
+  await page.getByText("Your session has expired").waitFor();
   assert.equal(await page.locator("#agent-name").count(), 0);
   assert.equal(await page.locator(".content [inert]").count(), 0);
-  await releaseHeldRoute(page, "**/namespaces", pending);
-  await page.getByRole("button", { name: "Start without Preset", exact: true }).click();
+
+  // Signing in again adopts the current session without the old session's draft.
+  await page.getByLabel("Username").fill(fixture.credentials.email);
+  await page.getByLabel("Password").fill(fixture.credentials.password);
+  await page.getByRole("button", { name: "Login" }).click();
+  await page.getByRole("button", { name: "Start with default Preset", exact: true }).click();
   assert.equal(await page.getByLabel("Agent name", { exact: true }).inputValue(), "");
+});
+
+test("an abandoned GitHub attempt does not turn password sign-in into a GitHub failure", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const { page } = await newPage(t, fixture);
+  const requests = [];
+  page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+  await page.goto(`${fixture.origin}/console/login`);
+  await page.getByLabel("Username").waitFor();
+  // Models returning from github.com without completing the callback.
+  await page.evaluate(() => sessionStorage.setItem("occ.console.githubAttempt", "a".repeat(43)));
+  await page.getByLabel("Username").fill(fixture.credentials.email);
+  await page.getByLabel("Password").fill(fixture.credentials.password);
+  await page.getByRole("button", { name: "Login" }).click();
+  await page.waitForURL(/\/console\/agents/);
+  assert.equal(requests.includes("/api/auth/providers/github/result"), false);
+  await expectNoText(page, /Could not sign in with GitHub/);
+});
+
+test("Google sign-in accepts only a Google authorization URL and confirms through its own result", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const { page } = await newPage(t, fixture);
+  const requests = [];
+  page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+  const envelope = (data) => ({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ data, meta: { requestId: "browser-google" } }),
+  });
+  // This controller has no Google configuration; discovery and start are modelled here.
+  await page.route("**/api/auth/providers", (route) =>
+    route.fulfill(envelope({ github: false, google: true, sessionBinding: true })),
+  );
+  const attemptId = "b".repeat(43);
+  const starts = [
+    "https://accounts.google.com.example.test/o/oauth2/v2/auth",
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture",
+  ];
+  await page.route("**/api/auth/providers/google/start", (route) =>
+    route.fulfill(envelope({ url: starts.shift(), attemptId })),
+  );
+  // Models Google redirecting back to Console after the callback set its cookies.
+  await page.route("https://accounts.google.com/**", (route) =>
+    route.fulfill({ status: 302, headers: { location: `${fixture.origin}/console/` } }),
+  );
+  await page.goto(`${fixture.origin}/console/login`);
+  const google = page.getByRole("button", { name: "Continue with Google" });
+  await google.click();
+  await page.getByText("Google sign-in is unavailable. Try again or use your password.").waitFor();
+  assert.equal(await page.getByRole("button", { name: "Continue with GitHub" }).count(), 0);
+
+  const result = page.waitForResponse(
+    (candidate) => new URL(candidate.url()).pathname === "/api/auth/providers/google/result",
+  );
+  await google.click();
+  const refused = await result;
+  assert.equal(refused.request().postDataJSON().attemptId, attemptId);
+  // The unconfigured controller refuses the result, so this tab adopts no session.
+  assert.equal(refused.status(), 403);
+  await page.getByText("Could not sign in with Google. Try again or use your password.").waitFor();
+  assert.equal(requests.includes("/api/auth/providers/github/result"), false);
+
+  await page.goto(`${fixture.origin}/console/?authError=google`);
+  await page.getByText("Could not sign in with Google. Try again or use your password.").waitFor();
+});
+
+test("OIDC sign-in uses the discovered label and accepts only the discovered endpoint", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const { page } = await newPage(t, fixture);
+  const requests = [];
+  page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+  const envelope = (data) => ({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ data, meta: { requestId: "browser-oidc" } }),
+  });
+  const endpoint = "https://sso.example.test/realms/acme/protocol/openid-connect/auth";
+  let discovery = {
+    github: false,
+    google: false,
+    oidc: true,
+    oidcSignIn: { label: "Acme SSO", authorizationUrl: endpoint },
+    sessionBinding: true,
+  };
+  // This controller has no OIDC configuration; discovery and start are modelled here.
+  await page.route("**/api/auth/providers", (route) => route.fulfill(envelope(discovery)));
+  const attemptId = "c".repeat(43);
+  const starts = [
+    "https://sso.example.test/realms/other/protocol/openid-connect/auth",
+    `${endpoint}?client_id=fixture&state=s`,
+  ];
+  await page.route("**/api/auth/providers/oidc/start", (route) =>
+    route.fulfill(envelope({ url: starts.shift(), attemptId })),
+  );
+  // Models the IdP redirecting back to Console after the callback set its cookies.
+  await page.route("https://sso.example.test/**", (route) =>
+    route.fulfill({ status: 302, headers: { location: `${fixture.origin}/console/` } }),
+  );
+  await page.goto(`${fixture.origin}/console/login`);
+  const oidc = page.getByRole("button", { name: "Continue with Acme SSO" });
+  await oidc.click();
+  await page
+    .getByText("Acme SSO sign-in is unavailable. Try again or use your password.")
+    .waitFor();
+  assert.equal(await page.getByRole("button", { name: "Continue with Google" }).count(), 0);
+
+  const result = page.waitForResponse(
+    (candidate) => new URL(candidate.url()).pathname === "/api/auth/providers/oidc/result",
+  );
+  await oidc.click();
+  const refused = await result;
+  assert.equal(refused.request().postDataJSON().attemptId, attemptId);
+  assert.equal(refused.status(), 403);
+  await page
+    .getByText("Could not sign in with Acme SSO. Try again or use your password.")
+    .waitFor();
+  assert.equal(requests.includes("/api/auth/providers/google/result"), false);
+
+  // A non-HTTPS discovered endpoint offers no OIDC button at all.
+  discovery = {
+    ...discovery,
+    oidcSignIn: { label: "Acme SSO", authorizationUrl: "http://sso.example.test/auth" },
+  };
+  await page.goto(`${fixture.origin}/console/login`);
+  await page.getByLabel("Username").waitFor();
+  await expectNoText(page, /Continue with Acme SSO/);
+});
+
+test("GitHub allowlist refusals tell the person why, and other reasons stay generic", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const { page } = await newPage(t, fixture);
+  let password = true;
+  // Discovery models GitHub sign-in with password sign-in for everyone, then recovery-only.
+  await page.route("**/api/auth/providers", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: { github: true, google: false, password, sessionBinding: true },
+        meta: { requestId: "browser-github-allowlist" },
+      }),
+    }),
+  );
+  const cases = [
+    [
+      "membership",
+      "Your GitHub account is not a member of an organization or team allowed to sign in here. If you were invited, accept the invitation on GitHub and try again; otherwise ask an administrator for access or use your password.",
+      "Your GitHub account is not a member of an organization or team allowed to sign in here. If you were invited, accept the invitation on GitHub and try again; otherwise ask an administrator for access.",
+    ],
+    [
+      "membership-unavailable",
+      "Could not check your GitHub organization membership. Try again later or use your password.",
+      "Could not check your GitHub organization membership. Try again later; if this keeps happening, ask an administrator.",
+    ],
+    [
+      "toString",
+      "Could not sign in with GitHub. Try again or use your password.",
+      "Could not sign in with GitHub. Try again, or ask an administrator to attach your GitHub identity to your account.",
+    ],
+  ];
+  for (const [reason, withPassword, recoveryOnly] of cases) {
+    for (const [available, message] of [
+      [true, withPassword],
+      [false, recoveryOnly],
+    ]) {
+      password = available;
+      await page.goto(`${fixture.origin}/console/?authError=github&authReason=${reason}`);
+      await page.getByText(message, { exact: true }).waitFor();
+    }
+  }
+  // The reason applies only to GitHub's own error.
+  password = true;
+  await page.goto(`${fixture.origin}/console/?authError=google&authReason=membership`);
+  await page.getByRole("button", { name: "Login" }).waitFor();
+  await expectNoText(page, /organization/);
+});
+
+test("recovery-only password sign-in keeps the form behind Recovery sign-in", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const { page } = await newPage(t, fixture);
+  // This controller admits every password; discovery models OCC_AUTH_PASSWORD_SIGN_IN.
+  await page.route("**/api/auth/providers", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: { github: true, google: false, password: false, sessionBinding: true },
+        meta: { requestId: "browser-recovery-only" },
+      }),
+    }),
+  );
+  await page.route("**/api/auth/providers/github/start", (route) =>
+    route.fulfill({ status: 503, contentType: "application/json", body: "{}" }),
+  );
+  await page.goto(`${fixture.origin}/console/?authError=github`);
+  const recovery = page.getByRole("button", { name: "Recovery sign-in" });
+  await recovery.waitFor();
+  // Without a password to fall back on, the provider error points to an administrator.
+  await page
+    .getByText(
+      "Could not sign in with GitHub. Try again, or ask an administrator to attach your GitHub identity to your account.",
+    )
+    .waitFor();
+  assert.equal(await page.getByLabel("Password").isVisible(), false);
+  await page.getByRole("button", { name: "Continue with GitHub" }).click();
+  await page.getByText("GitHub sign-in is unavailable. Try again later.").waitFor();
+
+  await recovery.click();
+  assert.equal(await recovery.isVisible(), false);
+  await page.getByText("Use the recovery account's email").waitFor();
+  await page.getByLabel("Username").fill(fixture.credentials.email);
+  await page.getByLabel("Password").fill("not-the-recovery-password");
+  await page.getByRole("button", { name: "Login" }).click();
+  await page
+    .getByText(
+      "Could not sign in. Only the recovery account can use a password; other accounts continue with their external sign-in.",
+    )
+    .waitFor();
+  await page.getByLabel("Password").fill(fixture.credentials.password);
+  await page.getByRole("button", { name: "Login" }).click();
+  await page.waitForURL(/\/console\/agents/);
+});
+
+test("password sign-in stays visible unless discovery reports it recovery-only", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const { page } = await newPage(t, fixture);
+  await page.route("**/api/auth/providers", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: { github: true, google: false, sessionBinding: true },
+        meta: { requestId: "browser-password-default" },
+      }),
+    }),
+  );
+  await page.goto(`${fixture.origin}/console/login`);
+  await page.getByRole("button", { name: "Continue with GitHub" }).waitFor();
+  assert.equal(await page.getByLabel("Password").isVisible(), true);
+  assert.equal(await page.getByRole("button", { name: "Recovery sign-in" }).isVisible(), false);
 });
 
 test("known Namespace revocation invalidates a cached global collection with another selection", async (t) => {
@@ -777,7 +1239,7 @@ test("mobile header switches Namespace without opening the navigation drawer", a
   const beta = await fixture.createNamespace("Beta", { ready: true });
   await fixture.createAgent(alpha.id, "Alpha mobile agent");
   await fixture.createAgent(beta.id, "Beta mobile agent");
-  const { page } = await newMobilePage(t, fixture);
+  const { page } = await newPage(t, fixture, mobile);
 
   await login(page, fixture, `/console/agents?namespace=${alpha.id}`);
   await page.getByText("Alpha mobile agent").waitFor();
@@ -816,6 +1278,253 @@ test("header Namespace selection leaves Agent detail and creation for the select
   assert.equal(
     await page.getByRole("combobox", { name: "Namespace", exact: true }).inputValue(),
     alpha.id,
+  );
+});
+
+for (const trigger of ["Refresh", "Back with a replacement session"]) {
+  test(`inline Namespace recovery waits for current admission during ${trigger}`, async (t) => {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const alpha = await fixture.createNamespace("Previously readable", { ready: true });
+    const beta = await fixture.createNamespace("Still readable", { ready: true });
+    const missingId = "ns_00000000-0000-4000-8000-000000000099";
+    const { page } = await newPage(t, fixture, mobile);
+    await login(page, fixture, `/console/namespaces?namespace=${missingId}`);
+    const selector = page.getByRole("combobox", { name: "Choose a valid Namespace", exact: true });
+    await page.locator("#namespace-selector:not(:disabled)").waitFor();
+    assert.equal(await selector.locator(`option[value="${alpha.id}"]`).count(), 1);
+
+    if (trigger !== "Refresh") {
+      await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+      await page.getByRole("link", { name: "Agents", exact: true }).click();
+      await page.getByRole("button", { name: "Refresh", exact: true }).waitFor();
+      await page.locator(".page-actions button:not(:disabled)").waitFor();
+      // A real login in another tab changes the session while sharing the cookie jar.
+      const response = await page
+        .context()
+        .request.post(`${fixture.origin}/api/auth/sign-in/email`, {
+          headers: { origin: fixture.origin },
+          data: { email: fixture.credentials.email, password: fixture.credentials.password },
+        });
+      assert.equal(response.status(), 200);
+    }
+
+    // Revoke through the actual IAM Driver before capturing the fresh Namespace read.
+    fixture.policy.restrictions.push({
+      id: "deny-previously-readable-namespace",
+      namespaceId: alpha.id,
+      resourceKind: "namespace",
+      action: "read",
+      effect: "deny",
+    });
+    const sessionHold = await holdRoute(t, page, "**/api/auth/session", (route, response) =>
+      response ? route.fulfill({ response }) : route.continue(),
+    );
+    const namespaceHold = await holdRoute(t, page, "**/namespaces", (route, response) =>
+      response ? route.fulfill({ response }) : route.continue(),
+    );
+    t.after(() => {
+      sessionHold.release();
+      namespaceHold.release();
+    });
+    if (trigger === "Refresh") {
+      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    } else {
+      await page.goBack();
+    }
+    await sessionHold.waitForRelease();
+    assert.equal(await selector.isDisabled(), true);
+    assert.equal(await selector.locator('option:not([value=""])').count(), 0);
+    assert.equal(new URL(page.url()).searchParams.get("namespace"), missingId);
+
+    await releaseHeldRoute(page, "**/api/auth/session", sessionHold);
+    if (trigger !== "Refresh") {
+      // Another tab's login expires this tab; only explicit sign-in may adopt a new session.
+      await page.getByText("Your session has expired").waitFor();
+      assert.equal(await page.locator("#namespace-selector").count(), 0);
+      await page.getByLabel("Username").fill(fixture.credentials.email);
+      await page.getByLabel("Password").fill(fixture.credentials.password);
+      await page.getByRole("button", { name: "Login" }).click();
+    }
+    await namespaceHold.waitForRelease();
+    // A changed session can discard a retained shell or leave the first-load shell.
+    // Any remaining selector must still await the fresh readable-Namespace response.
+    if (await selector.count()) {
+      assert.equal(await selector.isDisabled(), true);
+      assert.equal(await selector.locator('option:not([value=""])').count(), 0);
+    }
+    assert.equal(new URL(page.url()).searchParams.get("namespace"), missingId);
+    await releaseHeldRoute(page, "**/namespaces", namespaceHold);
+    await page.locator("#namespace-selector:not(:disabled)").waitFor();
+    assert.equal(await selector.locator(`option[value="${alpha.id}"]`).count(), 0);
+    await selector.selectOption(beta.id);
+    await page.waitForURL(`**/console/namespaces?namespace=${beta.id}`);
+    await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+    assert.equal(await page.locator(".namespace-recovery").count(), 0);
+  });
+}
+
+for (const trigger of ["Refresh", "Back with a replacement session"]) {
+  test(`header Namespace selection waits for current admission during ${trigger}`, async (t) => {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const alpha = await fixture.createNamespace("Previously readable", { ready: true });
+    const beta = await fixture.createNamespace("Still readable", { ready: true });
+    const missingId = "ns_00000000-0000-4000-8000-000000000099";
+    const { page } = await newPage(t, fixture, mobile);
+    await login(page, fixture, `/console/agents?namespace=${missingId}`);
+    const selector = page.locator(".page-header #namespace-selector");
+    await page.locator(".page-header #namespace-selector:not(:disabled)").waitFor();
+    assert.equal(await selector.locator(`option[value="${alpha.id}"]`).count(), 1);
+
+    async function assertPendingHeader() {
+      await selector.waitFor();
+      assert.equal(await selector.isDisabled(), true);
+      assert.equal(await selector.locator('option:not([value=""])').count(), 0);
+      // Disabled controls can still receive programmatic events; admission must reject them.
+      const navigation = await selector.evaluate((element, staleNamespaceId) => {
+        const before = globalThis.location.href;
+        const staleOption = element.ownerDocument.createElement("option");
+        staleOption.value = staleNamespaceId;
+        element.append(staleOption);
+        element.value = staleNamespaceId;
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+        staleOption.remove();
+        return { before, after: globalThis.location.href };
+      }, alpha.id);
+      assert.equal(navigation.after, navigation.before);
+    }
+
+    if (trigger !== "Refresh") {
+      await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+      await page.getByRole("link", { name: "Namespaces", exact: true }).click();
+      await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Refresh", exact: true }).waitFor();
+      await page.locator(".page-actions button:not(:disabled)").waitFor();
+      // A real login in another tab changes the session while sharing the cookie jar.
+      const response = await page
+        .context()
+        .request.post(`${fixture.origin}/api/auth/sign-in/email`, {
+          headers: { origin: fixture.origin },
+          data: { email: fixture.credentials.email, password: fixture.credentials.password },
+        });
+      assert.equal(response.status(), 200);
+    }
+
+    // Revoke through the actual IAM Driver before capturing the fresh Namespace read.
+    fixture.policy.restrictions.push({
+      id: "deny-previously-readable-namespace",
+      namespaceId: alpha.id,
+      resourceKind: "namespace",
+      action: "read",
+      effect: "deny",
+    });
+    const sessionHold = await holdRoute(t, page, "**/api/auth/session", (route, response) =>
+      response ? route.fulfill({ response }) : route.continue(),
+    );
+    const namespaceHold = await holdRoute(t, page, "**/namespaces", (route, response) =>
+      response ? route.fulfill({ response }) : route.continue(),
+    );
+    t.after(() => {
+      sessionHold.release();
+      namespaceHold.release();
+    });
+    if (trigger === "Refresh") {
+      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    } else {
+      await page.goBack();
+    }
+    await sessionHold.waitForRelease();
+    await assertPendingHeader();
+    assert.equal(new URL(page.url()).searchParams.get("namespace"), missingId);
+
+    await releaseHeldRoute(page, "**/api/auth/session", sessionHold);
+    if (trigger !== "Refresh") {
+      // Another tab's login expires this tab; only explicit sign-in may adopt a new session.
+      await page.getByText("Your session has expired").waitFor();
+      assert.equal(await page.locator("#namespace-selector").count(), 0);
+      await page.getByLabel("Username").fill(fixture.credentials.email);
+      await page.getByLabel("Password").fill(fixture.credentials.password);
+      await page.getByRole("button", { name: "Login" }).click();
+    }
+    await namespaceHold.waitForRelease();
+    await assertPendingHeader();
+    assert.equal(new URL(page.url()).searchParams.get("namespace"), missingId);
+    await releaseHeldRoute(page, "**/namespaces", namespaceHold);
+    await page.locator(".page-header #namespace-selector:not(:disabled)").waitFor();
+    assert.equal(await selector.locator(`option[value="${alpha.id}"]`).count(), 0);
+    assert.equal(await selector.locator(`option[value="${beta.id}"]`).count(), 1);
+    await selector.selectOption(beta.id);
+    await page.waitForURL(`**/console/agents?namespace=${beta.id}`);
+    await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
+  });
+}
+
+test("Namespaces recovers stale selection inline and handles losing all readable scopes", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const alpha = await fixture.createNamespace("Alpha", { ready: true });
+  const beta = await fixture.createNamespace("Beta", { ready: true });
+  const missingId = "ns_00000000-0000-4000-8000-000000000099";
+  const { page } = await newPage(t, fixture, mobile);
+  await login(page, fixture, `/console/namespaces?namespace=${missingId}`);
+  await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+
+  // A stale bookmark must offer recovery on this page without opening the drawer.
+  const selector = page.getByRole("combobox", { name: "Choose a valid Namespace", exact: true });
+  assert.equal(await selector.isVisible(), true);
+  assert.equal(await page.locator(".page-header select").count(), 0);
+  await selector.selectOption({ label: "Alpha" });
+  await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).pathname, "/console/namespaces");
+  assert.equal(new URL(page.url()).searchParams.get("namespace"), alpha.id);
+  assert.equal(
+    await page.getByRole("heading", { name: "Namespace unavailable", exact: true }).count(),
+    0,
+  );
+  assert.equal(await page.getByRole("combobox").count(), 0);
+
+  await page.goBack();
+  await selector.waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("namespace"), missingId);
+  await selector.selectOption({ label: "Alpha" });
+  await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+
+  // Revocation comes from the real IAM Driver; the recovery must never offer that scope.
+  fixture.policy.restrictions.push({
+    id: "deny-alpha-read",
+    namespaceId: alpha.id,
+    resourceKind: "namespace",
+    action: "read",
+    effect: "deny",
+  });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await selector.waitFor();
+  assert.equal(await page.getByRole("option", { name: "Alpha", exact: true }).count(), 0);
+  await selector.selectOption({ label: "Beta" });
+  await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).pathname, "/console/namespaces");
+  assert.equal(new URL(page.url()).searchParams.get("namespace"), beta.id);
+
+  // Include the bootstrapped default Namespace when revoking every remaining scope.
+  // With no alternatives, recovery must explain the access requirement.
+  fixture.policy.restrictions.push({
+    id: "deny-all-namespace-read",
+    resourceKind: "namespace",
+    action: "read",
+    effect: "deny",
+  });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.getByRole("heading", { name: "No accessible namespaces", exact: true }).waitFor();
+  await page
+    .getByText("Ask an administrator to provision resources or grant access, then refresh.", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(await page.getByRole("combobox").count(), 0);
+  assert.equal(
+    await page.getByRole("button", { name: "Switch Namespace", exact: true }).count(),
+    0,
   );
 });
 
@@ -882,10 +1591,3 @@ test("console clears private content after session expiry, access revocation, an
 
   await page.screenshot({ path: join(artifacts, "session-isolation.png"), fullPage: true });
 });
-
-async function expectNoText(page, pattern) {
-  await assert.rejects(
-    page.getByText(pattern).waitFor({ state: "visible", timeout: 300 }),
-    /Timeout/,
-  );
-}

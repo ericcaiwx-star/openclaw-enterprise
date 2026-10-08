@@ -1,12 +1,16 @@
+import { startReceiptState } from "../fixtures/repository-credentials/receipt-state.mjs";
+import { createControlledClock } from "../fixtures/repository-credentials/clock.mjs";
+import { run } from "../fixtures/repository-credentials/process.mjs";
+import { controlRequest } from "../fixtures/repository-credentials/service.mjs";
+import { setTimeout as delay } from "node:timers/promises";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { createServer as createNetServer } from "node:net";
 import { request } from "node:https";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DependencyUnavailableError, ScopeViolationError } from "../../packages/occ/src/index.ts";
 import { GitHubRepoDriver } from "../../apps/controller/src/drivers/repo/github/driver.ts";
 import { UnixRepositoryCredentialControlClient } from "../../apps/controller/src/backends/repository-credentials/control-client.ts";
@@ -14,17 +18,6 @@ import {
   defaultRegistryRepositories,
   startRegistryCredentialServiceFixture,
 } from "../fixtures/repository-credentials/registry.mjs";
-
-async function unusedPort() {
-  const server = createNetServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const port = server.address().port;
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
 
 function driverFor(registry, socket, sessionDurationSeconds = 3600, publicCa) {
   return new GitHubRepoDriver(
@@ -84,13 +77,14 @@ test(
   { timeout: 30000 },
   async (t) => {
     const fixture = await startRegistryCredentialServiceFixture(t, {
+      namespaceId: `ns_${randomUUID()}`,
       autoOpen: false,
       repositories: defaultRegistryRepositories.map((entry) =>
         entry.repositoryRef === "repo-b"
           ? { ...entry, pushRefAllowlist: ["refs/heads/agent/*"] }
           : entry,
       ),
-      gateway: { listen: `127.0.0.1:${await unusedPort()}` },
+      gateway: { listen: "127.0.0.1:0" },
     });
     const signal = new AbortController().signal;
     const local = driverFor(fixture.registry, "/nonexistent/repository-control.sock");
@@ -120,6 +114,7 @@ test(
       controlSocket: fixture.config.gateway.controlSocket,
     });
     await client.health(signal);
+    await driver.checkAdmissionReady(signal);
     const contributor = driver.resolve({
       namespaceId: fixture.namespaceId,
       bindings: [{ repositoryRef: "repo-a" }],
@@ -127,21 +122,26 @@ test(
     // This exact registry used to admit the narrower git-write grant under this
     // digest. The real Driver/control/service join must reject its stale authority
     // before either repository's provider sees acquisition or exchange traffic.
+    const deadlineWallMs = fixture.clock.wallNow() + 1800_000;
+    const receipts = await startReceiptState(t, fixture, resolution.bindings, deadlineWallMs);
+    const staleId = `${fixture.clock.wallNow()}-${randomUUID()}`;
+    await receipts.prepare(staleId, contributor.repositoryRef, 3600);
     const legacyGrant = "sha256:94c2dc4513de2fa4a6f885c7fd2f857110510100111cb4f4424db6ddf8d37ae5";
     assert.notEqual(contributor.grant.grantId, legacyGrant);
     await assert.rejects(
       driver.open(
         {
           namespaceId: fixture.namespaceId,
-          admissionId: `${fixture.clock.wallNow()}-${randomUUID()}`,
+          admissionId: staleId,
           binding: { ...contributor, grant: { ...contributor.grant, grantId: legacyGrant } },
           durationSeconds: 3600,
-          deadlineWallMs: fixture.clock.wallNow() + 1800_000,
+          deadlineWallMs,
         },
         signal,
       ),
-      ScopeViolationError,
+      DependencyUnavailableError,
     );
+    await receipts.advance(staleId, "opening", "invalidated");
     assert.ok(
       fixture.repositories.every(
         (entry) => entry.github.trace.length === 0 && entry.github.issuesOfTokens.length === 0,
@@ -152,9 +152,20 @@ test(
       admissionId: `${fixture.clock.wallNow()}-${randomUUID()}`,
       binding,
       durationSeconds: 3600,
-      deadlineWallMs: fixture.clock.wallNow() + 1800_000,
+      deadlineWallMs,
     }));
+    for (const input of inputs) {
+      await receipts.prepare(input.admissionId, input.binding.repositoryRef, input.durationSeconds);
+    }
     const opened = await Promise.all(inputs.map((input) => driver.open(input, signal)));
+    for (let index = 0; index < opened.length; index++) {
+      await receipts.advance(
+        inputs[index].admissionId,
+        "opening",
+        "open",
+        opened[index].session.sessionId,
+      );
+    }
     for (let index = 0; index < opened.length; index++) {
       assert.equal(opened[index].kind, "created");
       const result = opened[index];
@@ -220,7 +231,13 @@ test(
       driver.open({ ...inputs[0], durationSeconds: 3599 }, signal),
       ScopeViolationError,
     );
+    await receipts.advance(inputs[0].admissionId, "open", "closing");
     const fenced = { ...inputs[0], admissionId: `${fixture.clock.wallNow()}-${randomUUID()}` };
+    await receipts.prepare(
+      fenced.admissionId,
+      fenced.binding.repositoryRef,
+      fenced.durationSeconds,
+    );
     assert.deepEqual(await driver.open({ ...fenced, recoverOnly: true }, signal), {
       kind: "missing",
     });
@@ -237,17 +254,30 @@ test(
     );
     await assert.rejects(changedProvider.open(inputs[0], signal), ScopeViolationError);
 
+    await receipts.advance(inputs[1].admissionId, "open", "closing");
     for (let index = 0; index < opened.length; index++) {
       const closed = await driver.close(opened[index].session.sessionId, signal);
       assertPublicStatus(closed, inputs[index].binding.grant);
       assert.notEqual(closed.state, "OPEN");
     }
 
+    for (const result of opened) {
+      let status;
+      for (let index = 0; index < 100; index++) {
+        status = await driver.status(result.session.sessionId, signal);
+        if (status?.state === "DISPOSED") {
+          break;
+        }
+        await delay(20);
+      }
+      assert.equal(status?.state, "DISPOSED");
+    }
     await fixture.restart();
-    assert.equal(await driver.status(opened[0].session.sessionId, signal), undefined);
-    assert.deepEqual(await driver.open({ ...inputs[0], recoverOnly: true }, signal), {
-      kind: "missing",
-    });
+    assert.equal((await driver.status(opened[0].session.sessionId, signal)).state, "DISPOSED");
+    assert.equal(
+      (await driver.open({ ...inputs[0], recoverOnly: true }, signal)).kind,
+      "recovered",
+    );
     await assert.rejects(
       local.status(opened[0].session.sessionId, signal),
       DependencyUnavailableError,
@@ -543,3 +573,281 @@ test("Unix control rejects malformed status and preserves authoritative absence 
     );
   }
 });
+
+test("repository descriptions remain scoped and reject stale identity without blocking choices", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "repository-description-reply-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const socket = join(directory, "control.sock");
+  let reply = {
+    providerInstanceId: "instance",
+    appId: "1",
+    githubInstallationId: "2",
+    pending: false,
+    descriptions: [],
+  };
+  const requests = [];
+  // An independent control peer can return malformed or stale identity data.
+  const server = createServer(async (incoming, response) => {
+    const chunks = [];
+    for await (const chunk of incoming) {
+      chunks.push(chunk);
+    }
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(reply));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socket, resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const driver = driverFor(
+    {
+      version: 1,
+      backendId: "github-test",
+      providerInstanceId: "instance",
+      appId: "1",
+      githubInstallationId: "2",
+      maximumDurationSeconds: 3600,
+      repositories: [
+        {
+          repositoryRef: "project",
+          repositoryId: "73",
+          repository: "example/project",
+          namespaces: [{ namespaceId: "namespace", profiles: ["git-read"] }],
+        },
+        {
+          repositoryRef: "helper",
+          repositoryId: "74",
+          repository: "example/helper",
+          namespaces: [{ namespaceId: "namespace", profiles: ["git-read"] }],
+        },
+        {
+          repositoryRef: "foreign",
+          repositoryId: "75",
+          repository: "example/foreign",
+          namespaces: [{ namespaceId: "other", profiles: ["git-read"] }],
+        },
+      ],
+    },
+    socket,
+    1,
+  );
+  const initial = await driver.listOptions({ namespaceId: "namespace" });
+  assert.equal(requests.length, 0);
+  assert.equal(initial.descriptionsPending, false);
+  assert.deepEqual(
+    initial.options.map((option) => option.repositoryRef),
+    ["helper", "project"],
+  );
+
+  reply = {
+    providerInstanceId: "instance",
+    appId: "1",
+    githubInstallationId: "2",
+    pending: true,
+    descriptions: [
+      { repositoryRef: "project", repositoryId: "73", description: "Approved project" },
+      { repositoryRef: "helper", repositoryId: "74", description: "invalid\ntext" },
+      { repositoryRef: "foreign", repositoryId: "75", description: "Private foreign project" },
+    ],
+  };
+  const input = { namespaceId: "namespace", descriptionRefs: ["project", "helper", "foreign"] };
+  let result = await driver.listOptions(input);
+  assert.deepEqual(requests[0], {
+    namespaceId: "namespace",
+    repositoryRefs: ["project", "helper"],
+  });
+  assert.equal(result.descriptionsPending, true);
+  assert.equal(
+    result.options.find((option) => option.repositoryRef === "project").description,
+    "Approved project",
+  );
+  assert.equal(
+    result.options.find((option) => option.repositoryRef === "helper").description,
+    undefined,
+  );
+  assert.doesNotMatch(JSON.stringify(result), /Private foreign project/);
+
+  // Registry drift must not relabel private metadata from an old repository or App installation.
+  reply = {
+    providerInstanceId: "instance",
+    appId: "1",
+    githubInstallationId: "2",
+    pending: false,
+    descriptions: [
+      { repositoryRef: "project", repositoryId: "999", description: "Stale project" },
+      { repositoryRef: "helper", repositoryId: "74", description: "Current helper" },
+    ],
+  };
+  result = await driver.listOptions(input);
+  assert.equal(
+    result.options.find((option) => option.repositoryRef === "project").description,
+    undefined,
+  );
+  assert.equal(
+    result.options.find((option) => option.repositoryRef === "helper").description,
+    "Current helper",
+  );
+  const matchingReply = reply;
+  for (const changedIdentity of [
+    { providerInstanceId: "old-instance" },
+    { appId: "99" },
+    { githubInstallationId: "99" },
+    { appId: 1 },
+    { githubInstallationId: "invalid" },
+  ]) {
+    reply = { ...matchingReply, ...changedIdentity };
+    result = await driver.listOptions(input);
+    assert.ok(result.options.every((option) => option.description === undefined));
+    assert.equal(result.options.length, 2);
+  }
+});
+test("durable admission capability rejects an old response, malformed replies, and timeouts", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "repository-capability-"));
+  const socket = join(directory, "control.sock");
+  let response = { status: 404, body: { error: "not-found" } };
+  const server = createServer((incoming, outgoing) => {
+    if (incoming.url === "/healthz") {
+      outgoing.writeHead(200, { "content-type": "application/json" });
+      outgoing.end(JSON.stringify({ ready: true, protocolVersion: 1 }));
+      return;
+    }
+    if (response === undefined) {
+      return;
+    }
+    outgoing.writeHead(response.status, {
+      "content-type": response.contentType ?? "application/json",
+    });
+    outgoing.end(JSON.stringify(response.body));
+  });
+  await new Promise((resolve) => server.listen(socket, resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const client = new UnixRepositoryCredentialControlClient({ controlSocket: socket });
+  // An older broker reports healthy protocol 1 but does not recognize this endpoint.
+  await client.health(AbortSignal.timeout(1000));
+  // Every refusal is the retryable control error, never a parse or type error.
+  const unavailable = { name: "RepositoryCredentialControlError", retryable: true };
+  await assert.rejects(client.checkAdmissionReady(AbortSignal.timeout(1000)), unavailable);
+  for (const value of [
+    { status: 200, body: {} },
+    { status: 200, body: { durableAdmissionVersion: 2 } },
+    { status: 200, body: { durableAdmissionVersion: "1" } },
+    { status: 503, body: { error: "unavailable" } },
+    // A well-formed reply still needs both a 200 status and a JSON content type.
+    { status: 503, body: { durableAdmissionVersion: 1 } },
+    { status: 200, body: { durableAdmissionVersion: 1 }, contentType: "text/plain" },
+  ]) {
+    response = value;
+    await assert.rejects(client.checkAdmissionReady(AbortSignal.timeout(1000)), unavailable);
+  }
+  response = { status: 200, body: { durableAdmissionVersion: 1 } };
+  await client.checkAdmissionReady(AbortSignal.timeout(1000));
+  response = undefined;
+  await assert.rejects(client.checkAdmissionReady(AbortSignal.timeout(50)), unavailable);
+});
+
+test(
+  "controller image probe correlates real Driver calls with an isolated receipt fixture",
+  { timeout: 30000 },
+  async (t) => {
+    const fixture = await startRegistryCredentialServiceFixture(t, {
+      autoOpen: false,
+      clock: { ...createControlledClock(), wallNow: Date.now },
+      gateway: { listen: "127.0.0.1:0" },
+    });
+    const receipts = [];
+    let hideReceiptObservation = false;
+    const receiptServer = createServer(async (incoming, outgoing) => {
+      const chunks = [];
+      for await (const chunk of incoming) {
+        chunks.push(chunk);
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!hideReceiptObservation) {
+        receipts.push(body);
+      }
+      // The fixture supplies only a missing recovery result or a failed reserve.
+      // It never acknowledges a reservation or creates provider authority.
+      if (body.kind === "recover") {
+        outgoing.writeHead(200, { "content-type": "application/json" });
+        outgoing.end(JSON.stringify({ kind: "missing" }));
+      } else {
+        outgoing.writeHead(503, { "content-type": "application/json" });
+        outgoing.end(JSON.stringify({ error: "fixture-unavailable" }));
+      }
+    });
+    const receiptSocket = join(dirname(fixture.config.gateway.controlSocket), "receipt.sock");
+    await new Promise((resolve, reject) => {
+      receiptServer.once("error", reject);
+      receiptServer.listen(receiptSocket, resolve);
+    });
+    t.after(async () => {
+      receiptServer.closeAllConnections();
+      await new Promise((resolve) => receiptServer.close(resolve));
+    });
+    const probe = new URL(
+      "../../apps/controller/src/drivers/repo/github/credentials/admission-probe.mjs",
+      import.meta.url,
+    ).pathname;
+    for (const [mode, outcome] of [
+      ["recover", "missing"],
+      ["reserve", "unavailable"],
+    ]) {
+      const admissionId = `${Date.now()}-${randomUUID()}`;
+      const result = await run(process.execPath, [
+        probe,
+        fixture.config.gateway.controlSocket,
+        mode,
+        admissionId,
+      ]);
+      const report = JSON.parse(result.stdout);
+      assert.deepEqual(
+        {
+          version: report.version,
+          mode: report.mode,
+          admissionId: report.admissionId,
+          outcome: report.outcome,
+        },
+        { version: 1, mode, admissionId, outcome },
+      );
+      const observed = receipts.at(-1);
+      assert.equal(observed.kind, mode);
+      assert.equal(observed.admissionId, admissionId);
+      assert.deepEqual(observed.input, report.input);
+    }
+    // An old Driver omits durableAdmission; the new broker rejects it before
+    // contacting the receipt fixture, so a generic failure cannot qualify the pair.
+    const input = { ...receipts[0].input, recoverOnly: true };
+    const before = receipts.length;
+    const { status } = await controlRequest(
+      fixture.config.gateway.controlSocket,
+      "POST",
+      "/v1/sessions",
+      input,
+      { "x-admission-id": `${Date.now()}-${randomUUID()}` },
+    );
+    assert.equal(status, 400);
+    assert.equal(receipts.length, before);
+    // An unavailable result alone cannot prove which request reached the
+    // broker. Qualification must also match the fixture's reserve observation.
+    hideReceiptObservation = true;
+    const unobservedId = `${Date.now()}-${randomUUID()}`;
+    const unobserved = await run(process.execPath, [
+      probe,
+      fixture.config.gateway.controlSocket,
+      "reserve",
+      unobservedId,
+    ]);
+    assert.equal(JSON.parse(unobserved.stdout).outcome, "unavailable");
+    assert.equal(
+      receipts.some(({ admissionId }) => admissionId === unobservedId),
+      false,
+    );
+    assert.ok(fixture.repositories.every(({ github }) => github.issuesOfTokens.length === 0));
+  },
+);

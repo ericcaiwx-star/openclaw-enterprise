@@ -35,6 +35,13 @@ authorized credentials: plugin A remains usable when B fails, B is disabled in
 both native app and gateway bridge configuration, and sibling Agent/workspace
 state is unchanged.
 
+For dedicated Codex removal, clear the last selection through the Agent API and
+redeploy. Run a native shell command in both the existing conversation and a new
+one, and check its tool result against an independent workspace read. Confirm
+that native plugin features remain disabled and the packaged runtime is readable
+without granting broad filesystem access. Configuration readback alone does not
+prove that a command can execute inside the sandbox.
+
 The controlled status suite verifies the private status handoff through real
 Kubernetes and restart behavior; its controlled native producer does not establish
 Codex/OpenClaw compatibility. Missing, malformed, or foreign reports must not make
@@ -59,21 +66,48 @@ cross-node access. Fixture images may use a local tag; native proof
 still requires immutable image references. PostgreSQL cases use a dedicated
 migrated `openclaw_k8s_*` database via `OCC_TEST_DATABASE_URL`.
 
+## Native startup metadata reads
+
+`tests/integration/codex-plugin-startup-reads.test.mjs` normally runs controlled
+protocol cases that verify read batching, error draining, and ordered writes.
+The opt-in companion `codex-plugin-startup-reads-real.test.mjs`, registered in the
+credentialed `plugin-model` lane, launches a disposable Docker container with Codex 0.156.0,
+logs in using an authorized service-account token, and runs the generated
+production client against the real authenticated app-server. It checks six
+catalog reads in batches of at most four, ordered results, a native invalid-plugin
+error followed by successful reads, and the full installer with four disabled
+selections and effective app-policy readback.
+
+After obtaining credential authorization under [the contribution policy](../../CONTRIBUTING.md),
+inject `CODEX_ACCESS_TOKEN` without putting its value in a command or file, and
+set `OCC_TEST_KUBERNETES_AGENT_IMAGE` to a locally available immutable runtime
+image ID or digest containing Codex 0.156.0:
+
+```sh
+OCC_TEST_CODEX_STARTUP_READS_REAL=1 node --test \
+  --test-name-pattern='native Codex app-server' \
+  tests/integration/codex-plugin-startup-reads-real.test.mjs
+```
+
+The test passes the credential through stdin, creates no host mounts or published
+ports, and removes its container. It does not call a model or connector tool.
+This proves compatibility with the native metadata and configuration protocol;
+it does not measure production latency or replace the separate Kubernetes
+lifecycle and enabled-plugin install/auth proofs.
+
 ## Native runtime prerequisites
 
 `tests/integration/plugin-driver-real.test.mjs` is opt-in. Set one scenario flag:
 
 - `OCC_TEST_PLUGIN_DRIVER_OPENCLAW_REAL=1` for embedded OpenClaw with the bundled
   Diffs plugin.
-- `OCC_TEST_PLUGIN_DRIVER_CODEX_CALENDAR_REAL=1` for dedicated Codex with Google
-  Calendar.
 - `OCC_TEST_PLUGIN_DRIVER_CODEX_LINEAR_REAL=1` for catalog-selected Linear in a
   normal dedicated Codex Agent turn.
 - `OCC_TEST_PLUGIN_DRIVER_CODEX_FAILURE_REAL=1` for dedicated Codex with one
   successful selected install followed by one selected install or authentication
   failure.
 - `OCC_TEST_PLUGIN_DRIVER_REAL=1` only when all scenario-specific environments
-  and four separate scenario-specific databases are prepared. The fixture
+  and three separate scenario-specific databases are prepared. The fixture
   rejects missing URLs and duplicate host, port, and database combinations
   before provisioning resources; do not use different host aliases for one database.
 
@@ -81,8 +115,7 @@ All native scenarios use Kubernetes. Provide
 `OCC_TEST_KUBERNETES_KUBECONFIG`, `OCC_TEST_KUBERNETES_CONTEXT`,
 `OCC_TEST_KUBERNETES_GATEWAY_IMAGE`,
 `OCC_TEST_KUBERNETES_PLUGIN_STATUS_PROXY_CIDRS`, and a scenario-specific database such as
-`OCC_TEST_PLUGIN_DRIVER_OPENCLAW_DATABASE_URL` or
-`OCC_TEST_PLUGIN_DRIVER_CODEX_CALENDAR_DATABASE_URL`. The Linear and Codex failure scenarios
+`OCC_TEST_PLUGIN_DRIVER_OPENCLAW_DATABASE_URL`. The Linear and Codex failure scenarios
 require their own distinct `OCC_TEST_PLUGIN_DRIVER_CODEX_LINEAR_DATABASE_URL` and
 `OCC_TEST_PLUGIN_DRIVER_CODEX_FAILURE_DATABASE_URL`.
 The OpenClaw scenario also requires `OPENAI_API_KEY` in the process environment
@@ -101,9 +134,24 @@ injected `CODEX_ACCESS_TOKEN` for the existing designated test account, and a
 runtime image that supports `OPENCLAW_STATE_DIR` for OpenClaw state writes when
 the test starts without a useful `HOME`. Set `OCC_TEST_OPENAI_MODEL` to a model
 supported by that Codex path; the current source default is `gpt-6-astra`.
-The Calendar proof also needs `OCC_TEST_CODEX_CALENDAR_TOOL_NAME` and
-`OCC_TEST_CODEX_CALENDAR_RESULT_EXPECT`, and must show a model-chosen
-`list_calendars(max_results:1)` read during a normal Agent turn.
+Prepare the reviewed [Codex sandbox profile](../guides/deploy/codex-sandbox.md)
+on the test nodes and set `OCC_TEST_KUBERNETES_CODEX_SECCOMP_PROFILE` to its
+kubelet-relative path. Codex fixtures use a 4 GiB Gateway limit and a 2 GiB
+Harness limit; the namespace quota allows two Agent pairs and revision overlap.
+Provide enough cluster memory for the selected scenario and its other workloads.
+The [shipped QA matrix](qa-matrix.md) owns Calendar per-call approval and
+disabled-tool coverage through both shipped installations. The focused
+`plugin-model` lane retains plugin installation, isolation, and failure recovery;
+it has no GitHub workflow entrypoint and is excluded from the `ci` and `full`
+groups. Without an opt-in flag, the native scenarios skip. Neither a green
+required CI run nor an unselected scenario proves live Calendar behavior.
+
+The matrix and the retained Codex failure proof need `OCC_TEST_CODEX_CALENDAR_TOOL_NAME` and
+`OCC_TEST_CODEX_CALENDAR_RESULT_EXPECT`, and must show a model-chosen harmless
+read during a normal Agent turn. Select an exact tool advertised by the connected
+account; the historical `list_calendars` tool is not available in every catalog.
+Set `OCC_TEST_CODEX_CALENDAR_PROMPT` when selecting a different read, such as
+`codex_apps.google_calendar.get_profile`. Discovery alone does not prove execution.
 
 The Linear catalog proof requires that the same authorized account has Linear
 connected. Set `OCC_TEST_CODEX_LINEAR_PROMPT` to a harmless read request,
@@ -134,13 +182,10 @@ identifies the actual `list_calendars` call and requires its successful structur
 result without printing calendar contents. This native proof does not replace
 the controlled status boundary suite above.
 
-The Calendar fixture uses a narrow test-only ServiceAccount import that preserves
-the designated existing account token from a private service-account environment
-file, binds it to the matching Backend, and then runs normal Agent
-create/deploy/API checks. It does not prove native ChatGPT account creation,
-upstream credential issuance, workspace administrator credentials, or creation of
-a new upstream account. Never print credential values or resolved account
-identifiers.
+The focused Codex fixtures import the designated existing ServiceAccount token
+through their test fixture. The QA matrix uses the shipped Secret API and
+supported `codex_pat` authentication instead. Neither path proves creation of a
+new upstream account. Never print credential values or resolved account identifiers.
 
 ## Per-call approval acceptance
 
@@ -156,8 +201,7 @@ session. Each successful call must carry a distinct approved automatic-review ID
 Evidence is scoped to the marker-bearing user turn so an earlier successful call
 cannot satisfy a later assertion.
 
-Run with the Calendar prerequisites above and
-`OCC_TEST_PLUGIN_DRIVER_CODEX_CALENDAR_REAL=1`. The five turns exercise native
+Run the [QA matrix](qa-matrix.md) with its Calendar prerequisites. The five turns exercise native
 approval once, human review twice, and automatic review twice. The fixture uses
 the admitted nested policy through the normal API/deployment flow; it does not
 patch the native runtime or change the fixture's existing session configuration.

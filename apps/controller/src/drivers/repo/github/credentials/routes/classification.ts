@@ -1,5 +1,5 @@
 import type { RequestHead } from "../../../credentials/backend-contracts.ts";
-import type { GitHubProfile } from "../types.ts";
+import type { GitHubTokenProfile } from "../types.ts";
 import { permissionsForProfile } from "../profiles.ts";
 
 export type Route = Readonly<{
@@ -7,6 +7,7 @@ export type Route = Readonly<{
   effect: "read" | "write";
   target: string;
   rawResponse?: boolean;
+  graphql?: true;
 }>;
 const resourceNumber = /^[1-9][0-9]{0,14}$/;
 // Native gh 2.100.0 uses this JSON media profile for GraphQL and REST reads.
@@ -46,7 +47,9 @@ function parseTarget(raw: string, limit: number): ParsedTarget | undefined {
   const split = raw.indexOf("?");
   const path = split < 0 ? raw : raw.slice(0, split);
   const query = split < 0 ? "" : raw.slice(split + 1);
+  // A bare "?" would give one route two targets (for example "/graphql?").
   if (
+    (split >= 0 && query === "") ||
     path.includes("%") ||
     path.split("/").some((piece) => piece === "." || piece === "..") ||
     query.includes("?") ||
@@ -61,7 +64,7 @@ function classifyGitRoute(
   head: RequestHead,
   target: ParsedTarget,
   repository: string,
-  profile: GitHubProfile,
+  profile: GitHubTokenProfile,
 ): Route | undefined {
   const { path, query } = target;
   const parts = /^\/([^/]+\/[^/]+)\/(.*)$/.exec(path);
@@ -114,12 +117,23 @@ interface ApiRoutePolicy {
   readonly rawMedia?: readonly string[];
 }
 
-function matchApiRoute(path: string, repository: string): ApiRoutePolicy | undefined {
+/**
+ * "token-bounded": the upstream token's permissions bound GraphQL (App).
+ * "read-only": mutations are refused at the gateway (static token with allowGraphql).
+ * "deny": no /graphql route.
+ */
+export type GitHubGraphqlMode = "token-bounded" | "read-only" | "deny";
+
+function matchApiRoute(
+  path: string,
+  repository: string,
+  graphql: GitHubGraphqlMode,
+): ApiRoutePolicy | undefined {
   const prefix = `/repos/${repository}`;
   if (path === prefix || path === "/meta") {
     return { methods: ["GET"], queryParameters: [] };
   }
-  if (path === "/graphql") {
+  if (path === "/graphql" && graphql !== "deny") {
     return { methods: ["POST"], queryParameters: [] };
   }
   if (!path.startsWith(`${prefix}/`)) {
@@ -235,14 +249,15 @@ function classifyApiRoute(
   head: RequestHead,
   target: ParsedTarget,
   repository: string,
-  profile: GitHubProfile,
+  profile: GitHubTokenProfile,
+  graphql: GitHubGraphqlMode,
 ): Route | undefined {
   const { raw, path, query } = target;
-  const policy = matchApiRoute(path, repository);
+  const policy = matchApiRoute(path, repository, graphql);
   if (!policy || !policy.methods.includes(head.method)) {
     return;
   }
-  // GraphQL remains token-bounded without inspecting operations, fields or bodies.
+  // GraphQL is bounded by the token or, for "read-only", by the body checks in graphql-input.ts.
   if (head.method !== "GET" && path !== "/graphql") {
     const permissions = permissionsForProfile(profile);
     if (!policy.writePermissions?.some((permission) => permissions[permission] === "write")) {
@@ -280,16 +295,33 @@ function classifyApiRoute(
     effect: head.method === "GET" ? "read" : "write",
     target: raw,
     rawResponse,
+    ...(path === "/graphql" ? { graphql: true as const } : {}),
   };
 }
 
 export function classifyRoute(
   head: RequestHead,
-  policy: Readonly<{ repository: string; profile: GitHubProfile; targetBytes: number }>,
+  policy: Readonly<{
+    repository: string;
+    profile: GitHubTokenProfile;
+    targetBytes: number;
+    graphql: GitHubGraphqlMode;
+  }>,
 ): Route | undefined {
   const target = parseTarget(head.rawTarget, policy.targetBytes);
   if (!target) {
     return;
+  }
+  // This private scope is only used for a single repository metadata read.
+  if (policy.profile === "metadata-read") {
+    if (
+      head.method !== "GET" ||
+      head.contentEncoding !== "identity" ||
+      target.raw !== `/repos/${policy.repository}`
+    ) {
+      return;
+    }
+    return { kind: "api", effect: "read", target: target.raw };
   }
   const git = classifyGitRoute(head, target, policy.repository, policy.profile);
   if (git) {
@@ -298,5 +330,5 @@ export function classifyRoute(
   if (head.contentEncoding !== "identity") {
     return;
   }
-  return classifyApiRoute(head, target, policy.repository, policy.profile);
+  return classifyApiRoute(head, target, policy.repository, policy.profile, policy.graphql);
 }

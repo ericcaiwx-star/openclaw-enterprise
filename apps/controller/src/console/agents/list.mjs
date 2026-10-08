@@ -16,12 +16,33 @@ export function link(label, target, context) {
   return node;
 }
 
+// A Namespace that is still provisioning (or failed to) refuses Agent, Configuration and
+// deployment writes with NAMESPACE_NOT_READY; "conflicts with the saved state" would send the
+// operator to the wrong place.
+export const NAMESPACE_NOT_READY_MESSAGE =
+  "This Namespace is not ready yet. Check its status on the Namespaces page: a provisioning Namespace becomes ready when its Kubernetes setup completes (on Kubernetes installs, after an operator grants the tenant RoleBindings).";
+
 export function message(error, mutation = false) {
+  if (error.code === "SAVED_CONFIGURATION_UNREADABLE") {
+    const field = {
+      plugins: "plugin selections",
+      pluginApprovers: "plugin approvers",
+      repositoryBindings: "repository access",
+      harnessAuth: "harness authentication",
+      secretBindings: "Secret bindings",
+      repositoryCredentials: "repository credentials",
+      configuration: "native configuration",
+    }[error.field];
+    return `Saved ${field ?? "configuration"} could not be read. Editing and deployment are unavailable for these settings. Ask an administrator to repair the saved configuration, then refresh this page.`;
+  }
   if (error.status === 403) {
     return "Access denied. You do not have permission for this operation.";
   }
   if (error.status === 404) {
     return "Resource unavailable in this Namespace. Check the ID and your access.";
+  }
+  if (error.status === 409 && error.code === "NAMESPACE_NOT_READY") {
+    return NAMESPACE_NOT_READY_MESSAGE;
   }
   if (error.status === 409) {
     return "The request conflicts with the saved state. Check for an existing Agent name or changed Configuration, then refresh.";
@@ -36,7 +57,24 @@ export function message(error, mutation = false) {
     ? "Outcome unknown. The result could not be confirmed. Refresh and inspect the saved state before trying again."
     : error.name === "TypeError" || error.name === "TimeoutError"
       ? "Request interrupted. Retry to check current access and saved state."
-      : "Service unavailable. The read could not be completed. Please retry.";
+      : "Service unavailable. The read could not be completed. Try again.";
+}
+
+// A rejected write shows the API's own sentence, which names the field to fix (for example
+// an inline model credential); other failures keep the generic status text.
+export function rejectionMessage(error, mutation = false) {
+  return error.status === 400 && error.serverMessage !== undefined
+    ? error.serverMessage
+    : message(error, mutation);
+}
+
+export function assertReadableConfiguration(resource) {
+  if (resource.configurationReadError) {
+    throw Object.assign(
+      new Error(message(resource.configurationReadError)),
+      resource.configurationReadError,
+    );
+  }
 }
 
 export function renderAgentList(context) {
@@ -101,6 +139,9 @@ export function renderAgentList(context) {
             link(item.name, `agents/${item.id}`, context),
             element("span", { className: "resource-id" }, item.id),
             item.status === "deleting" ? element("span", { className: "badge" }, "Deleting") : null,
+            item.configurationReadError
+              ? element("span", { className: "badge" }, "Saved configuration unreadable")
+              : null,
           ),
           element("td", {}, item.executionMode === "dedicated" ? "Dedicated" : "Embedded"),
           element(

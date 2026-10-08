@@ -1,16 +1,129 @@
 # Troubleshoot the platform
 
-Use this page when the Kubernetes installation, control plane, or several Agents
-are affected. For a problem with one Agent, start with
-[Agent troubleshooting](../topics/agent-troubleshoot.md). For a
-failure before local Kubernetes starts, use [Local Setup](../quickstart.md).
+Use this page when local startup, the Kubernetes installation, the control plane,
+or several Agents are affected. For a problem with one Agent, start with
+[Agent troubleshooting](../topics/agent-troubleshoot.md).
+
+## Local K3s cannot find the cpuset controller
+
+If the k3d server logs report `failed to find cpuset cgroup (v2)`, inspect
+`/sys/fs/cgroup/cgroup.controllers` inside that server. Docker running inside a
+containerized development host needs the outer host to delegate `cpuset`;
+a running Docker daemon does not prove delegation. On native rootless Podman,
+delegating `cpuset` is not enough: k3d still fails with
+`mkdir /var/run/docker.sock: permission denied`. Use the
+[rootful setup requirements](../deploy/local-kubernetes-development.md#start-the-profile).
+
+Use the host management service's documented delegation procedure. If delegation
+changes fail, check that service before concluding that an outer-host change is
+required. Restore any paused management service and verify its health before
+continuing; do not disable the K3s check. Confirm `cpuset` is available inside the
+k3d server and that K3s starts successfully.
+
+## Local K3s image lookup times out
+
+The Compose control-plane profile without OpenShell resolves a K3s channel
+unless `OCC_DEVELOPMENT_K3S_IMAGE` selects an explicit image. If that lookup times out,
+select an approved Kubernetes 1.35-or-newer image through the
+[profile settings](../../reference/settings/development.md).
+
+After a failed creation, wait for startup to exit, then run `./scripts/dev-down`
+from the repository root with the same profile and state directory. Retry the
+[Compose profile startup](../deploy/local-kubernetes-development.md#run-occ-in-compose-with-kubernetes-compute)
+with the selected image and wait for the development stack to report ready.
+
+## Local startup stalls on cert-manager
+
+On some Linux hosts, especially Ubuntu with Docker 29, the k3d node cannot
+resolve container registries. Startup then waits on the cert-manager rollout
+while its pods stay in `ContainerCreating`. The launcher does not print those
+Pod events, and it prints the kubeconfig path only after startup succeeds.
+
+In a second terminal, while that wait is still running, describe the
+cert-manager Pods. The context is `k3d-` plus the cluster name from the first
+startup line, `Creating Kubernetes-only k3d cluster ...`. `<state-directory>`
+belongs to the process that started OCC, not to this second terminal. Use
+`OCC_DEVELOPMENT_STATE_DIRECTORY` when that process set it. Otherwise use that
+process's temporary directory plus `openclaw-development`: its `TMPDIR` when
+set, and `/tmp` on Linux when `TMPDIR` is unset. Do not substitute this
+terminal's `TMPDIR`. The
+[development settings](../../reference/settings/development.md#required-development-controller-environment)
+define that directory.
+
+```bash
+kubectl --kubeconfig '<state-directory>/kubeconfig' \
+  --context 'k3d-<cluster>' \
+  -n cert-manager describe pods
+```
+
+A registry DNS failure shows up as a lookup error in the Pod events. Follow
+[Resolve node DNS failures](../deploy/local-kubernetes-development.md#resolve-node-dns-failures)
+and set a reachable resolver for a fresh start. That recovery changes only the
+owned node's resolver. If startup rolls the cluster back, wait until that
+command exits before starting again.
+
+## Local Codex sandbox check fails
+
+Kubernetes Compute startup with `OCC_DEVELOPMENT_SANDBOX_DRIVER=none` verifies the
+dedicated Codex sandbox during startup. On Ubuntu 24.04,
+`kernel.apparmor_restrict_unprivileged_userns=1` denies the user namespace
+Codex bubblewrap needs. Startup reports `kubectl failed` while verifying that
+sandbox and rolls the owned cluster back. The preparation step does not print
+the bubblewrap error.
+
+Set that host sysctl to `0`, wait until the failed startup exits, and start
+again. The setting applies to the whole host. The launcher does not change it,
+and the sandbox check still runs. Do not skip the check.
+
+A production node uses the separate
+[Codex sandbox profile](../deploy/codex-sandbox.md) procedure. Do not copy this
+sysctl change onto a shared cluster.
+
+## Open the console from another machine
+
+Kubernetes-only startup without OpenShell prints an HTTPS console URL such as
+`https://console.<cluster>.oce.localhost:8443/console/`. `<cluster>` is the k3d
+cluster name from startup. `8443` is the default `OCC_DEVELOPMENT_BROWSER_PORT`;
+use the printed port when it differs. Kubernetes-only startup with OpenShell
+prints `Console: <apiURL>/console/` and does not print this browser URL or CA.
+
+Open that URL on the machine that ran `occ dev up`. The hostname ends in
+`.localhost`, so the computer that looks it up resolves it to its own loopback
+address. The launcher publishes the console port on `127.0.0.1` of the startup
+machine only. A browser on another computer reports a connection error, such as
+`ERR_CONNECTION_REFUSED`, because nothing is listening there.
+
+From the computer that will run the browser, forward the printed port to the
+startup machine's loopback and bind the local listener to loopback. Leave this
+session open:
+
+```bash
+ssh -N -L localhost:8443:127.0.0.1:8443 <user>@<startup-host>
+```
+
+Replace `8443` in both places when startup printed a different port. The
+`localhost` bind keeps the forwarded port on the browser machine's loopback
+even when that machine's SSH configuration sets `GatewayPorts yes`.
+
+Copy only the printed public CA to that same computer, then import the local
+copy if the browser does not already trust it:
+
+```bash
+scp <user>@<startup-host>:<printed-ca-path> ./browser-ca.crt
+```
+
+`<printed-ca-path>` is the `browser-ca.crt` path from startup. Leave the CA
+private key and the state directory on the startup machine. Open the printed
+URL. The console sign-in page loads. Stop the forward when you are done. Do
+not publish the console port on an address other than loopback. This name and
+certificate are for the private development installation.
+
+## The Helm installation did not complete
 
 Run production commands from an operator shell with Helm and `kubectl`, read
 access to the `openclaw-system` namespace, and `KUBECONFIG_FILE` and `CONTEXT`
 set to the affected cluster. The examples use the default release `oce`; replace
 it if you installed with another name.
-
-## The Helm installation did not complete
 
 Start with the release and the initialization Job:
 
@@ -20,17 +133,24 @@ helm status "$HELM_RELEASE" --namespace openclaw-system \
   --kubeconfig "$KUBECONFIG_FILE" --kube-context "$CONTEXT"
 kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
   get jobs,pods,pvc
+INITIALIZATION_JOB=$(kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
+  get jobs --selector "app.kubernetes.io/instance=$HELM_RELEASE,app.kubernetes.io/component=initialization" \
+  -o name)
 kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
-  describe job "$HELM_RELEASE-initialization"
+  describe "$INITIALIZATION_JOB"
 ```
+
+The lookup uses release labels because long release names have a shortened Job
+name. If it finds no Job, inspect the Helm error before running `describe` or
+`logs`; the hook may not have been created.
 
 If the Job started, inspect the failing container:
 
 ```bash
 kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
-  logs "job/$HELM_RELEASE-initialization" -c migration
+  logs "$INITIALIZATION_JOB" -c migration
 kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
-  logs "job/$HELM_RELEASE-initialization" -c bootstrap
+  logs "$INITIALIZATION_JOB" -c bootstrap
 ```
 
 Migration runs before bootstrap; an unstarted bootstrap container has no logs.
@@ -61,6 +181,26 @@ worker logs and the [tenant RoleBindings](../deploy/production-agents.md#grant-t
 After fixing the cause, repeat `occ installation get` and confirm the Namespace
 reports `ready` before creating an Agent there. A healthy control plane does
 not prove an Agent has deployed or can run a model.
+
+## An Agent's Gateway or Harness Pod stays unready
+
+Run `kubectl describe pod <pod-name>` in the Agent's tenant namespace. Each
+`Readiness probe failed:` event names the step that is not ready, such as
+`plugin runtime phase is starting` or `Gateway /readyz unavailable: ECONNREFUSED`.
+When the startup wrapper holds a failed check, the event adds it, for example
+`; startup check model-probe failed with AUTHENTICATION_FAILED`. See
+[Harness authentication](../../reference/harness-execution.md#harness-authentication)
+for the probe codes.
+
+## A Gateway log asks for a restart to apply the model catalog
+
+OpenClaw downloads its hosted model catalog in the background and logs
+`remote model catalog downloaded; restart the Gateway to apply it`. No action
+is needed: the Gateway keeps serving with the catalog it started with, and the
+download applies, if at all, at its next start. To stop this background
+traffic, set `models.catalogRefresh.enabled` to `false` in the Agent's
+Configuration and deploy it; the Gateway then uses only the catalog bundled in
+the runtime image.
 
 ## Authentication fails after installation
 

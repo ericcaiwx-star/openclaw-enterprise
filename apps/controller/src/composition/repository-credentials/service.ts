@@ -8,14 +8,24 @@ export interface RunningService {
   readonly listeners: BoundListeners;
 }
 
+export interface StartOptions {
+  /** Process-level opt-in for the development-only GitHub token authority. */
+  readonly developmentAuthority?: boolean;
+}
+
 /** Start the service using its protected, operator-owned configuration. */
-export async function startCredentialService(configurationPath: string): Promise<RunningService> {
+export async function startCredentialService(
+  configurationPath: string,
+  options: StartOptions = {},
+): Promise<RunningService> {
   const [{ createSystemClock }, { loadConfiguration }] = await Promise.all([
     import("../../drivers/repo/credentials/clock.ts"),
     import("./config.ts"),
   ]);
   const clock = createSystemClock();
-  const loaded = await loadConfiguration(configurationPath, clock);
+  const loaded = await loadConfiguration(configurationPath, clock, {
+    developmentAuthority: options.developmentAuthority === true,
+  });
   return runService(loaded, clock);
 }
 
@@ -32,12 +42,16 @@ export async function runService(
     config: loaded.config,
     factory: loaded.factory,
     clock,
+    ...(loaded.providerQueue === undefined ? {} : { providerQueue: loaded.providerQueue }),
   });
   let listeners: BoundListeners;
   try {
     listeners = await startListeners({ ...loaded, service, clock });
   } catch {
-    await service.shutdown(loaded.config.limits.shutdownGraceMs);
+    await Promise.all([
+      service.shutdown(loaded.config.limits.shutdownGraceMs),
+      loaded.repositoryDescriptions?.shutdown(loaded.config.limits.shutdownGraceMs),
+    ]);
     loaded.close();
     throw new Error("startup-failed");
   }
@@ -50,33 +64,56 @@ export async function runService(
     listeners.stopAdmission();
     const grace = loaded.config.limits.shutdownGraceMs;
     // Wall-time process guard is independent of provider callbacks and injected clocks.
-    const pending = service.shutdown(grace);
-    const forced = setTimeout(() => {
+    const pending = Promise.all([
+      service.shutdown(grace),
+      loaded.repositoryDescriptions?.shutdown(grace),
+    ]).then(([summary, descriptions]) => ({
+      closedSessions: summary.closedSessions + (descriptions?.closedSessions ?? 0),
+      disposedSessions: summary.disposedSessions + (descriptions?.disposedSessions ?? 0),
+      pendingActions: summary.pendingActions + (descriptions?.pendingActions ?? 0),
+      pendingCredentials: summary.pendingCredentials + (descriptions?.pendingCredentials ?? 0),
+      pendingAuxiliary: summary.pendingAuxiliary + (descriptions?.pendingAuxiliary ?? 0),
+      graceExpired: summary.graceExpired || (descriptions?.graceExpired ?? false),
+    }));
+    const forceExit = () => {
       process.stderr.write(
         `${JSON.stringify({ event: "shutdown", graceExpired: true, unresolved: true })}\n`,
       );
       loaded.close();
       process.exit(1);
-    }, grace);
-    void pending.then(
-      async (summary) => {
+    };
+    let forced = setTimeout(forceExit, grace);
+    void (async () => {
+      try {
+        const summary = await pending;
+        if (!summary.graceExpired) {
+          // Provider ownership has drained. Reserve a separate bounded window
+          // for committing the original broker's terminal observations.
+          clearTimeout(forced);
+          forced = setTimeout(forceExit, 10_000);
+        }
         await listeners.close();
         loaded.close();
         process.stdout.write(`${JSON.stringify({ event: "shutdown", ...summary })}\n`);
         clearTimeout(forced);
         process.exit(summary.graceExpired ? 1 : 0);
-      },
-      () => {
+      } catch {
         process.stderr.write(
           `${JSON.stringify({ event: "shutdown", graceExpired: true, unresolved: true })}\n`,
         );
         loaded.close();
         process.exit(1);
-      },
-    );
+      }
+    })();
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
+  if (loaded.authority === "github-token-development") {
+    // Name the development authority and token class (never the token) at startup.
+    process.stderr.write(
+      `${JSON.stringify({ event: "started", authority: loaded.authority, tokenClass: loaded.tokenClass })}\n`,
+    );
+  }
   const controls = Object.freeze<CredentialService>({
     open: (input) => service.open(input),
     status: (sessionId) => service.status(sessionId),

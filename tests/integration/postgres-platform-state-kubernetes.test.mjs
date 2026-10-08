@@ -17,10 +17,10 @@ import {
   requiresPostgresAndKubernetesConfiguration,
   startKubernetesController,
   startKubernetesWorker,
-  stopController,
   updateConfiguration,
   waitForNamespaceReady,
 } from "../helpers/postgres-platform-state.mjs";
+import { stopProcess } from "../helpers/stop-process.mjs";
 
 test(
   "real OCC subprocesses retain Installation, Namespace, Agent, IAM, audit, and work after restart",
@@ -86,7 +86,7 @@ test(
 
     // The live worker can still produce unrelated lifecycle audit rows, such as
     // bootstrap Namespace convergence, so stop it before measuring this request.
-    await stopController(worker.child);
+    await stopProcess(worker.child);
 
     const auditBeforeUnauthenticatedRequest = await pool.query(
       "SELECT count(*)::integer AS count FROM occ.audit_events",
@@ -104,7 +104,7 @@ test(
       "unauthenticated requests have no attributable actor and cannot write audit rows",
     );
 
-    await stopController(first.child);
+    await stopProcess(first.child);
     const restarted = await startKubernetesController(context);
 
     const reloadedInstallation = await request(restarted, "GET", "/installation");
@@ -322,10 +322,25 @@ test(
     assert.equal(persistedRevision.rows[0].active_revision_id, revision.id);
     assert.equal(activeAgent.activeRevisionId, revision.id);
 
-    const revisionWork = await pool.query(
-      `SELECT namespace_id, agent_id, revision_id, actor_id, state
-       FROM occ.controller_work WHERE revision_id = $1`,
-      [revision.id],
+    // Activation is visible before post-commit effects complete the worker claim.
+    // Wait for durable completion before asserting the admitted work's ownership.
+    const revisionWork = await pollUntil(
+      `admitted revision ${revision.id} work to succeed`,
+      async () => {
+        const current = await pool.query(
+          `SELECT namespace_id, agent_id, revision_id, actor_id, state
+           FROM occ.controller_work WHERE revision_id = $1`,
+          [revision.id],
+        );
+        assert.equal(current.rowCount, 1);
+        assert.notEqual(
+          current.rows[0].state,
+          "failed_permanent",
+          `Revision ${revision.id} work failed permanently`,
+        );
+        return current.rows[0].state === "succeeded" ? current : undefined;
+      },
+      { worker },
     );
     assert.deepEqual(revisionWork.rows, [
       {
@@ -595,7 +610,7 @@ test(
       ],
     );
 
-    await stopController(api.child);
+    await stopProcess(api.child);
     api = await startKubernetesController(context);
     const afterRestart = await request(
       api,

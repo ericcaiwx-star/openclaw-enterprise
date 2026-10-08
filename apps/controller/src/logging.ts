@@ -35,13 +35,21 @@ const ALLOWED_ATTEMPT_FIELDS = new Set([
 ]);
 
 const ALLOWED_FIELDS = new Set([
+  "activationMs",
   "agentId",
   "attempt",
+  "cause",
   "code",
   "computeDriverId",
+  "deployPasses",
+  "dependency",
   "durationMs",
+  "elapsedMs",
+  "errorClass",
   "event",
   "host",
+  "keyHash",
+  "lane",
   "message",
   "method",
   "namespaceId",
@@ -49,12 +57,26 @@ const ALLOWED_FIELDS = new Set([
   "outcome",
   "pending",
   "port",
+  "prepareMs",
+  "presetFile",
+  "presetId",
+  "presetName",
+  "provider",
+  "providerId",
+  "readinessWaitMs",
+  "reason",
   "requestId",
+  "restrictionIds",
   "result",
   "revisionId",
   "route",
   "sandboxDriverId",
+  "signal",
+  "skippedUserCount",
+  "skippedUserIds",
+  "skippedUserIdsTruncated",
   "status",
+  "step",
   "workId",
 ]);
 
@@ -114,6 +136,12 @@ function safeString(value: string): string | undefined {
   return value;
 }
 
+function safePath(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_PATH.test(value) && !SECRET_VALUE.test(value)
+    ? value
+    : undefined;
+}
+
 function safeNumber(key: string, value: number): number | undefined {
   if (!Number.isFinite(value)) {
     return undefined;
@@ -143,6 +171,35 @@ function safeScalar(key: string, value: unknown): string | number | boolean | un
   return undefined;
 }
 
+// One log record carries at most this many account identifiers.
+export const MAX_LOGGED_IDENTIFIERS = 100;
+
+// Fields for a warning about accounts an operator must repair, such as users
+// skipped at GitHub activation. The identifier list is capped; the total count
+// and the truncation flag say when the record does not name every account.
+export function skippedUserLogFields(userIds: readonly string[]): {
+  readonly skippedUserIds: readonly string[];
+  readonly skippedUserCount: number;
+  readonly skippedUserIdsTruncated: boolean;
+} {
+  return {
+    skippedUserIds: userIds.slice(0, MAX_LOGGED_IDENTIFIERS),
+    skippedUserCount: userIds.length,
+    skippedUserIdsTruncated: userIds.length > MAX_LOGGED_IDENTIFIERS,
+  };
+}
+
+// Account identifiers an operator must repair, such as users skipped at GitHub activation.
+function safeIdentifiers(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const identifiers = value
+    .slice(0, MAX_LOGGED_IDENTIFIERS)
+    .filter((entry): entry is string => typeof entry === "string" && safeString(entry) === entry);
+  return identifiers.length === 0 ? undefined : Object.freeze(identifiers);
+}
+
 function safeAttempt(
   value: unknown,
 ): number | Readonly<Record<string, string | number | boolean>> | undefined {
@@ -158,8 +215,9 @@ function safeAttempt(
       continue;
     }
     if ((key === "passwordFile" || key === "serviceKeyFile") && typeof field === "string") {
-      if (SAFE_PATH.test(field) && !SECRET_VALUE.test(field)) {
-        result[key] = field;
+      const path = safePath(field);
+      if (path !== undefined) {
+        result[key] = path;
       }
       continue;
     }
@@ -182,16 +240,35 @@ function sanitizedEvent(
     if (key === "event" || !ALLOWED_FIELDS.has(key)) {
       continue;
     }
-    if (key === "message" && eventName !== "compute.preflight-warning") {
+    if (
+      key === "message" &&
+      eventName !== "compute.preflight-warning" &&
+      eventName !== "worker.compute-prepare-failed"
+    ) {
       continue;
     }
-    const safe = key === "attempt" ? safeAttempt(value) : safeScalar(key, value);
+    const safe =
+      key === "attempt"
+        ? safeAttempt(value)
+        : key === "skippedUserIds" || key === "restrictionIds"
+          ? safeIdentifiers(value)
+          : key === "presetFile"
+            ? safePath(value)
+            : safeScalar(key, value);
     if (safe !== undefined) {
       result[key] = safe;
     }
   }
   return Object.freeze(result);
 }
+
+// Events that warn although their names carry no warning suffix.
+const WARNING_EVENTS = new Set([
+  "authentication.sign-in-limited",
+  "presets.bundled-default-shadowed",
+  "presets.default-create-skipped",
+  "presets.default-refresh-skipped",
+]);
 
 export function emitOccLogEvent(logger: OccLogger, event: Readonly<Record<string, unknown>>): void {
   const record = sanitizedEvent(event);
@@ -205,7 +282,11 @@ export function emitOccLogEvent(logger: OccLogger, event: Readonly<Record<string
     logger.error(record);
     return;
   }
-  if (eventName.endsWith(".warning") || eventName.endsWith("-warning")) {
+  if (
+    eventName.endsWith(".warning") ||
+    eventName.endsWith("-warning") ||
+    WARNING_EVENTS.has(eventName)
+  ) {
     logger.warn(record);
     return;
   }

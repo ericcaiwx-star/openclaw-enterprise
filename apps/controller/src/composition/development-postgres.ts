@@ -13,9 +13,17 @@ import {
 import {
   createPostgresPool,
   OpenClawController,
+  PostgresHumanAuthentication,
   PostgresPlatformState,
 } from "@openclaw-enterprise/occ";
-import { createPostgresControllerAuth } from "../auth/index.ts";
+import {
+  betterAuthIssuer,
+  createPostgresControllerAuth,
+  type GitHubLoginConfiguration,
+  type GoogleSignInConfiguration,
+  type OidcSignInConfiguration,
+  type PreparedAuthAccount,
+} from "../auth/index.ts";
 import { createDockerDevelopmentComputeDriverFromEnv } from "../drivers/compute/docker/index.ts";
 import { createFilesystemDevelopmentConfigurationDriverFromEnv } from "../drivers/configuration/filesystem/index.ts";
 import { createFastifyApp } from "../index.ts";
@@ -28,7 +36,12 @@ import {
   initializeInstallationPresets,
   backendSummariesFromDefinitions,
 } from "./installation-config.ts";
-import type { LoggingConfiguration, OccLogger } from "../logging.ts";
+import {
+  emitOccLogEvent,
+  skippedUserLogFields,
+  type LoggingConfiguration,
+  type OccLogger,
+} from "../logging.ts";
 import { resolveApprovedHarness } from "./production-harness.ts";
 import type { ControllerWorkspaceFilesAccess } from "../gateway/contracts.ts";
 import type { NativeAdminAccessConfig } from "../gateway/native-admin.ts";
@@ -45,14 +58,22 @@ export interface PostgresDevelopmentConfig {
   readonly databaseUrl: string;
   readonly authSecret: string;
   readonly authBaseURL: string;
+  readonly github?: GitHubLoginConfiguration;
+  readonly google?: GoogleSignInConfiguration;
+  readonly oidc?: OidcSignInConfiguration;
+  /** OCC_AUTH_PASSWORD_SIGN_IN=recovery-only; requires GitHub, Google or OIDC sign-in. */
+  readonly passwordSignIn?: "recovery-only";
   readonly poolMax?: number;
   readonly logger?: OccLogger;
   readonly logging?: LoggingConfiguration;
+  readonly observabilityUrl?: string;
   readonly trustedDevelopmentBridgeCidr?: string;
   readonly trustedDevelopmentForwarderCidr?: string;
   readonly workspaceFilesAccess?: ControllerWorkspaceFilesAccess;
   readonly gatewayApiKeyPath?: string;
   readonly nativeAdmin?: NativeAdminAccessConfig;
+  /** Default: enabled. `false` makes both runtime routes answer 501. */
+  readonly agentRuntimeLogsEnabled?: boolean;
 }
 
 export type PostgresDevelopmentRuntimeOptions =
@@ -84,10 +105,19 @@ export async function composePostgresDevelopment(
     );
   }
 
+  if (config.github !== undefined && config.nativeAdmin?.enabled === true) {
+    throw new Error("GitHub sign-in does not support native administration.");
+  }
+  if (config.google !== undefined && config.nativeAdmin?.enabled === true) {
+    throw new Error("Google sign-in does not support native administration.");
+  }
+  if (config.oidc !== undefined && config.nativeAdmin?.enabled === true) {
+    throw new Error("OIDC sign-in does not support native administration.");
+  }
+
   const pool = await createPostgresPool(config.databaseUrl, {
     ...(config.poolMax === undefined ? {} : { max: config.poolMax }),
   });
-  let poolClosed = false;
 
   try {
     const state = new PostgresPlatformState(pool);
@@ -96,18 +126,20 @@ export async function composePostgresDevelopment(
       throw new Error("The platform Installation must be bootstrapped before development startup.");
     }
     const installationId = persistedInstallation.id;
-    const auth = await createPostgresControllerAuth({
-      mode: config.mode,
-      installationId,
-      secret: config.authSecret,
-      baseURL: config.authBaseURL,
-      pool,
-      secureCookies: config.nativeAdmin?.enabled === true,
-      ...(config.nativeAdmin?.enabled === true
-        ? { sharedCookieDomain: config.nativeAdmin.sharedCookieDomain }
-        : {}),
-    });
+
     const computeDriver = options.computeDriver ?? createDevelopmentDockerComputeDriver();
+    if (drivers !== undefined && computeDriver.preflight !== undefined) {
+      const result = await computeDriver.preflight();
+      if (result !== undefined && config.logger !== undefined) {
+        for (const warning of result.warnings) {
+          emitOccLogEvent(config.logger, {
+            event: "compute.preflight-warning",
+            computeDriverId: computeDriver.id,
+            ...warning,
+          });
+        }
+      }
+    }
     const sandboxDriver = drivers?.sandboxDriver;
     const credentialGatewayDriver = drivers?.credentialGatewayDriver;
     const configurationDriver =
@@ -122,6 +154,35 @@ export async function composePostgresDevelopment(
       drivers === undefined
         ? new NativeIAMDriver(state, { id: driverId, implementation: "native" })
         : drivers.createIAMDriver(state);
+    const auth = await createPostgresControllerAuth({
+      mode: config.mode,
+      installationId,
+      secret: config.authSecret,
+      baseURL: config.authBaseURL,
+      pool,
+      state,
+      iamDriver,
+      ...(config.github === undefined ? {} : { github: config.github }),
+      ...(config.google === undefined ? {} : { google: config.google }),
+      ...(config.oidc === undefined ? {} : { oidc: config.oidc }),
+      ...(config.passwordSignIn === undefined ? {} : { passwordSignIn: config.passwordSignIn }),
+      ...(config.logger === undefined
+        ? {}
+        : {
+            onWarning: (warning) => emitOccLogEvent(config.logger!, warning),
+            onOperationalEvent: (event) => emitOccLogEvent(config.logger!, event),
+          }),
+      ...(config.metrics === undefined
+        ? {}
+        : {
+            onUnmatchedCallback: (provider) =>
+              config.metrics!.observeUnmatchedSignInCallback(provider),
+          }),
+      secureCookies: config.nativeAdmin?.enabled === true,
+      ...(config.nativeAdmin?.enabled === true
+        ? { sharedCookieDomain: config.nativeAdmin.sharedCookieDomain }
+        : {}),
+    });
 
     const bootstrapPrincipal = iamState.identities.find(
       (identity) => identity.kind === "principal",
@@ -136,10 +197,37 @@ export async function composePostgresDevelopment(
     if (!principal || principal.kind !== "principal" || principal.id !== bootstrapPrincipal.id) {
       throw new Error("The configured development Principal is absent from persisted IAM policy.");
     }
-    const provisionAuthAccount = async (seed: AuthPrincipalSeed, auditEvent: AuditEvent) => {
+    if (auth.activationSkipped !== undefined && config.logger !== undefined) {
+      emitOccLogEvent(config.logger, {
+        event: "authentication.activation-warning",
+        reason: "Accounts without a Principal or exactly one password were not enrolled.",
+        ...skippedUserLogFields(auth.activationSkipped),
+      });
+    }
+    if (auth.withoutExternalIdentity !== undefined && config.logger !== undefined) {
+      // Recovery-only password sign-in: these accounts cannot sign in until an
+      // administrator attaches a GitHub, Google or OIDC identity.
+      emitOccLogEvent(config.logger, {
+        event: "authentication.password-sign-in-warning",
+        code: "EXTERNAL_IDENTITY_MISSING",
+        ...skippedUserLogFields(auth.withoutExternalIdentity),
+      });
+    }
+    const humanAuthentication = new PostgresHumanAuthentication(
+      state,
+      installationId,
+      betterAuthIssuer(installationId),
+    );
+    const provisionAuthAccount = async (
+      seed: AuthPrincipalSeed,
+      auditEvent: AuditEvent,
+      prepared: PreparedAuthAccount,
+      external?: { readonly providerId: string; readonly subject: string },
+    ) => {
       const current = await state.loadNativeIAMState(installationId);
       validateAuthAccountPrincipalSeed(seed, current, installationId);
-      await state.appendNativeIAMPrincipal(seed, auditEvent);
+      // The account, its Principal and bindings, and its enrolment commit together.
+      await humanAuthentication.provisionPasswordAccount(prepared, seed, auditEvent, external);
     };
 
     const loggingLevel = config.logging?.level ?? drivers?.installation.logging.level;
@@ -147,8 +235,13 @@ export async function composePostgresDevelopment(
       state,
       recordOperations: true,
       defaultPresets: drivers?.defaultPresets ?? [],
+      bundledPresetVersions: drivers?.bundledPresetVersions ?? [],
+      refreshBundledDefaultPresets: drivers?.installation.presets?.includeDefaults === true,
       ...(loggingLevel === undefined ? {} : { loggingLevel }),
       ...(drivers === undefined ? {} : { backends: drivers.installation.backend }),
+      ...(drivers?.installation.runtime === undefined
+        ? {}
+        : { nativeWorkerSupport: drivers.installation.runtime.nativeWorkerSupport }),
     });
     controller.registerDriver(iamDriver);
     controller.selectDriver("iam", driverId);
@@ -184,11 +277,19 @@ export async function composePostgresDevelopment(
     }
     serviceAccountDriverFactory?.(controller, state);
     await controller.validateBackendConfiguration();
+    if (config.logger !== undefined) {
+      for (const shadowed of drivers?.shadowedDefaultPresets ?? []) {
+        emitOccLogEvent(config.logger, { event: "presets.bundled-default-shadowed", ...shadowed });
+      }
+    }
     await initializeInstallationPresets(
       controller,
       iamDriver,
       iamState.identities,
       drivers?.defaultPresets ?? [],
+      config.logger === undefined
+        ? undefined
+        : (warning) => emitOccLogEvent(config.logger!, warning),
     );
 
     let workspaceFilesAccess = config.workspaceFilesAccess;
@@ -201,6 +302,7 @@ export async function composePostgresDevelopment(
       throw new Error("Native admin UI access requires OCC_GATEWAY_API_KEY_PATH.");
     }
 
+    const observabilityUrl = config.observabilityUrl ?? drivers?.installation.observability?.url;
     const app = createFastifyApp({
       ...(config.metrics === undefined ? {} : { metrics: config.metrics }),
       controller,
@@ -208,6 +310,10 @@ export async function composePostgresDevelopment(
       computeDriver,
       publicOrigin: config.authBaseURL,
       ...(config.nativeAdmin === undefined ? {} : { nativeAdmin: config.nativeAdmin }),
+      agentRuntimeLogs: {
+        enabled: config.agentRuntimeLogsEnabled !== false,
+        cursorSecret: config.authSecret,
+      },
       ...(config.nativeAdmin?.enabled === true && config.gatewayApiKeyPath !== undefined
         ? { nativeAdminGatewayApiKey: () => readWorkspaceFilesApiKey(config.gatewayApiKeyPath!) }
         : {}),
@@ -218,6 +324,7 @@ export async function composePostgresDevelopment(
       ...(drivers === undefined
         ? {}
         : { backendSummaries: backendSummariesFromDefinitions(drivers.installation.backend) }),
+      ...(observabilityUrl === undefined ? {} : { observabilityUrl }),
       auth,
       ...(config.logger === undefined ? {} : { logger: config.logger }),
       provisionAuthAccount,
@@ -245,14 +352,11 @@ export async function composePostgresDevelopment(
       return { status: "ready" };
     });
     app.addHook("onClose", async () => {
-      poolClosed = true;
       await state.close();
     });
     return app;
   } catch (error) {
-    if (!poolClosed) {
-      await pool.end();
-    }
+    await pool.end();
     throw error;
   }
 }

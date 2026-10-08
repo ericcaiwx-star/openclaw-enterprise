@@ -8,7 +8,11 @@ metadata:
     {{- include "openclaw.labels" (dict "root" $ "component" $component) | nindent 4 }}
 spec:
   replicas: 1
-  {{- if eq $component "worker" }}
+  {{- if eq $component "api" }}
+  # One serving controller: sign-in limits and session admission are process-local.
+  strategy:
+    type: Recreate
+  {{- else }}
   strategy:
     {{- if $.Values.repositoryCredentials.enabled }}
     type: Recreate
@@ -22,7 +26,7 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: openclaw-enterprise
-      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/instance: {{ $.Release.Name | quote }}
       app.kubernetes.io/component: {{ $component }}
   template:
     metadata:
@@ -47,6 +51,15 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
+        {{- if $.Values.executionCluster.enabled }}
+        - name: execution-kubeconfig
+          secret:
+            secretName: {{ ternary $.Values.executionCluster.apiKubeconfigSecretName $.Values.executionCluster.workerKubeconfigSecretName (eq $component "api") | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ $.Values.executionCluster.kubeconfigKey | quote }}
+                path: kubeconfig
+        {{- end }}
         {{- if $.Values.repositoryCredentials.enabled }}
         - name: repository-registry
           configMap:
@@ -112,9 +125,9 @@ spec:
         {{- end }}
         - name: installation-startup
           secret:
-            secretName: {{ $.Values.installation.secretName }}
+            secretName: {{ $.Values.installation.secretName | quote }}
             items:
-              - key: {{ $.Values.installation.key }}
+              - key: {{ $.Values.installation.key | quote }}
                 path: installation.yaml
         {{- if $.Values.database.caSecretName }}
         - name: database-ca
@@ -151,9 +164,9 @@ spec:
         {{- end }}
         - name: chatgpt-admin
           secret:
-            secretName: {{ $chatgpt.secretName }}
+            secretName: {{ $chatgpt.secretName | quote }}
             items:
-              - key: {{ $chatgpt.key }}
+              - key: {{ $chatgpt.key | quote }}
                 path: admin-key
         {{- end }}
         {{- else }}
@@ -161,14 +174,23 @@ spec:
           emptyDir:
             sizeLimit: 1Mi
         {{- end }}
+      {{- if and (eq $component "worker") $.Values.repositoryCredentials.enabled }}
+      # The receipt server must remain available while the broker drains.
+      initContainers:
+      {{- else }}
       containers:
+      {{- end }}
         - name: {{ $component }}
+          {{- if and (eq $component "worker") $.Values.repositoryCredentials.enabled }}
+          restartPolicy: Always
+          {{- end }}
           image: {{ $.Values.images.controller | quote }}
           args:
             - apps/controller/src/{{ ternary "server" "worker" (eq $component "api") }}.mjs
           securityContext:
             {{- include "openclaw.containerSecurity" $ | nindent 12 }}
           resources:
+            {{- include "openclaw.resourceRequirements" (dict "name" "resources" "requirements" $.Values.resources) }}
             {{- toYaml $.Values.resources | nindent 12 }}
           env:
             - name: NODE_ENV
@@ -204,12 +226,78 @@ spec:
             {{- include "openclaw.secretEnv" (dict "name" "OCC_AUTH_SECRET" "secretName" $.Values.auth.secretName "key" $.Values.auth.secretKey) | nindent 12 }}
             - name: OCC_AUTH_BASE_URL
               value: {{ $.Values.auth.baseUrl | quote }}
-            {{- if $.Values.api.channelDirectoryProxyUrl }}
+            {{- if and $.Values.auth.github $.Values.auth.github.enabled }}
+            {{- include "openclaw.secretEnv" (dict "name" "OCC_AUTH_GITHUB_CLIENT_ID" "secretName" $.Values.auth.github.secretName "key" $.Values.auth.github.clientIdKey) | nindent 12 }}
+            {{- include "openclaw.secretEnv" (dict "name" "OCC_AUTH_GITHUB_CLIENT_SECRET" "secretName" $.Values.auth.github.secretName "key" $.Values.auth.github.clientSecretKey) | nindent 12 }}
+            {{- if $.Values.auth.github.allowedOrgs }}
+            - name: OCC_AUTH_GITHUB_ALLOWED_ORGS
+              value: {{ join "," $.Values.auth.github.allowedOrgs | quote }}
+            {{- end }}
+            {{- if $.Values.auth.github.allowedTeams }}
+            - name: OCC_AUTH_GITHUB_ALLOWED_TEAMS
+              value: {{ join "," $.Values.auth.github.allowedTeams | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if and $.Values.auth.google $.Values.auth.google.enabled }}
+            {{- include "openclaw.secretEnv" (dict "name" "OCC_AUTH_GOOGLE_CLIENT_ID" "secretName" $.Values.auth.google.secretName "key" $.Values.auth.google.clientIdKey) | nindent 12 }}
+            {{- include "openclaw.secretEnv" (dict "name" "OCC_AUTH_GOOGLE_CLIENT_SECRET" "secretName" $.Values.auth.google.secretName "key" $.Values.auth.google.clientSecretKey) | nindent 12 }}
+            {{- if $.Values.auth.google.allowedDomains }}
+            - name: OCC_AUTH_GOOGLE_ALLOWED_DOMAINS
+              value: {{ join "," $.Values.auth.google.allowedDomains | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if and $.Values.auth.oidc $.Values.auth.oidc.enabled }}
+            - name: OCC_AUTH_OIDC_ISSUER
+              value: {{ $.Values.auth.oidc.issuer | quote }}
+            - name: OCC_AUTH_OIDC_AUTHORIZATION_URL
+              value: {{ $.Values.auth.oidc.authorizationUrl | quote }}
+            - name: OCC_AUTH_OIDC_TOKEN_URL
+              value: {{ $.Values.auth.oidc.tokenUrl | quote }}
+            - name: OCC_AUTH_OIDC_JWKS_URL
+              value: {{ $.Values.auth.oidc.jwksUrl | quote }}
+            {{- include "openclaw.secretEnv" (dict "name" "OCC_AUTH_OIDC_CLIENT_ID" "secretName" $.Values.auth.oidc.secretName "key" $.Values.auth.oidc.clientIdKey) | nindent 12 }}
+            {{- include "openclaw.secretEnv" (dict "name" "OCC_AUTH_OIDC_CLIENT_SECRET" "secretName" $.Values.auth.oidc.secretName "key" $.Values.auth.oidc.clientSecretKey) | nindent 12 }}
+            {{- if and $.Values.auth.oidc.tokenAuth (ne $.Values.auth.oidc.tokenAuth "client_secret_post") }}
+            - name: OCC_AUTH_OIDC_TOKEN_AUTH
+              value: {{ $.Values.auth.oidc.tokenAuth | quote }}
+            {{- end }}
+            {{- if $.Values.auth.oidc.displayName }}
+            - name: OCC_AUTH_OIDC_DISPLAY_NAME
+              value: {{ $.Values.auth.oidc.displayName | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $.Values.auth.recoveryUserId }}
+            - name: OCC_AUTH_GITHUB_RECOVERY_USER_ID
+              value: {{ $.Values.auth.recoveryUserId | quote }}
+            {{- end }}
+            {{- if eq (toString (default "all" $.Values.auth.passwordSignIn)) "recovery-only" }}
+            - name: OCC_AUTH_PASSWORD_SIGN_IN
+              value: recovery-only
+            {{- end }}
+            {{- $trustedProxy := default dict $.Values.api.trustedProxy }}
+            {{- if $trustedProxy.preset }}
+            - name: OCC_AUTH_TRUSTED_PROXY_CIDRS
+              value: {{ join "," $trustedProxy.cidrs | quote }}
+            - name: OCC_AUTH_TRUSTED_PROXY_PRESET
+              value: {{ $trustedProxy.preset | quote }}
+            {{- if eq $trustedProxy.preset "generic" }}
+            - name: OCC_AUTH_CLIENT_IP_HEADER
+              value: {{ include "openclaw.trustedProxy.header" $ | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $.Values.slackProxy.enabled }}
+            - name: OCC_CHANNEL_DIRECTORY_PROXY_URL
+              value: {{ include "openclaw.slackProxy.url" $ | quote }}
+            - name: OCC_CHANNEL_DIRECTORY_MANAGED_PROXY_HOST
+              value: {{ printf "%s.%s.svc" (include "openclaw.slackProxy.serviceName" $) $.Release.Namespace | quote }}
+            {{- else if $.Values.api.channelDirectoryProxyUrl }}
             - name: OCC_CHANNEL_DIRECTORY_PROXY_URL
               value: {{ $.Values.api.channelDirectoryProxyUrl | quote }}
             {{- end }}
             - name: OCC_AGENT_NATIVE_ADMIN_ENABLED
               value: {{ ternary "true" "false" $.Values.agentNativeAdmin.enabled | quote }}
+            - name: OCC_AGENT_RUNTIME_LOGS_ENABLED
+              value: {{ ternary "true" "false" $.Values.agentRuntimeLogs.enabled | quote }}
             {{- if $.Values.agentNativeAdmin.enabled }}
             - name: OCC_AGENT_NATIVE_ADMIN_DOMAIN
               value: {{ $.Values.agentNativeAdmin.domain | quote }}
@@ -219,6 +307,8 @@ spec:
             {{- else }}
             - name: OCC_WORKER_READINESS_PATH
               value: /run/openclaw-worker/ready
+            - name: OCC_WORKER_LIVENESS_PATH
+              value: /run/openclaw-worker/alive
             - name: OCC_WORKER_POLL_INTERVAL_MS
               value: {{ $.Values.worker.pollIntervalMs | quote }}
             - name: OCC_WORKER_LEASE_DURATION_MS
@@ -229,6 +319,11 @@ spec:
               value: {{ $.Values.worker.convergenceTimeoutMs | quote }}
             {{- end }}
           volumeMounts:
+            {{- if $.Values.executionCluster.enabled }}
+            - name: execution-kubeconfig
+              mountPath: /etc/openclaw/execution
+              readOnly: true
+            {{- end }}
             {{- if $.Values.repositoryCredentials.enabled }}
             - name: repository-registry
               mountPath: /etc/openclaw/repository-registry
@@ -292,6 +387,16 @@ spec:
             httpGet:
               path: /healthz
               port: http
+          # Liveness starts only once the API answers, so a slow boot (module loading,
+          # database, Kubernetes preflight) gets 2 min before the kubelet restarts it.
+          # Readiness also waits for the first success: a 1 s period lets the API take
+          # traffic about when it listens rather than at a later probe tick.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 1
+            failureThreshold: 120
           {{- else }}
           readinessProbe:
             exec:
@@ -301,6 +406,7 @@ spec:
               command: [node, scripts/production-healthcheck.mjs, worker]
           {{- end }}
         {{- if and (eq $component "worker") $.Values.repositoryCredentials.enabled }}
+      containers:
         - name: repository-credentials
           image: {{ $.Values.repositoryCredentials.image | quote }}
           command: [node, /app/dist/composition/repository-credentials/projected-inputs.js]
@@ -312,6 +418,7 @@ spec:
           securityContext:
             {{- include "openclaw.containerSecurity" $ | nindent 12 }}
           resources:
+            {{- include "openclaw.resourceRequirements" (dict "name" "resources" "requirements" $.Values.resources) }}
             {{- toYaml $.Values.resources | nindent 12 }}
           ports:
             - name: repository-tls

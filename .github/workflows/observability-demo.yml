@@ -5,7 +5,9 @@ on:
     paths:
       - ".github/workflows/observability-demo.yml"
       - ".github/actions/run-ci-lane/**"
+      - ".github/actions/setup-pnpm-store-cache/**"
       - "deploy/helm/openclaw-observability-demo/**"
+      - "tests/integration/observability-demo-chart.test.mjs"
       - "tests/integration/observability-demo-k3d.test.mjs"
       - "tests/helpers/observability-demo-k3d.mjs"
       - "tests/helpers/kubernetes-real.mjs"
@@ -17,7 +19,9 @@ on:
     paths:
       - ".github/workflows/observability-demo.yml"
       - ".github/actions/run-ci-lane/**"
+      - ".github/actions/setup-pnpm-store-cache/**"
       - "deploy/helm/openclaw-observability-demo/**"
+      - "tests/integration/observability-demo-chart.test.mjs"
       - "tests/integration/observability-demo-k3d.test.mjs"
       - "tests/helpers/observability-demo-k3d.mjs"
       - "tests/helpers/kubernetes-real.mjs"

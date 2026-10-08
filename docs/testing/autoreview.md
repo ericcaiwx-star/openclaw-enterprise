@@ -3,18 +3,28 @@
 For test audits, proof selection, and cleanup before review, see
 [Developer skills](developer-skills.md).
 
-When the user or owning workflow requests independent developer review, read the
-[vendored skill](../../.agents/skills/autoreview/SKILL.md), then run from the
-Enterprise repository root:
+When the user or owning workflow requests independent developer review, follow
+the [shared skill setup](../../.agents/skills/autoreview/SKILL.md) once and read
+the complete installed skill. Run from the Enterprise repository root:
 
 ```sh
-.agents/skills/autoreview/scripts/autoreview --mode local --model codex=gpt-6-astra
+python3 "$HOME/.agents/skills/autoreview/scripts/autoreview" --mode local --model codex=gpt-6-astra
 ```
 
-The helper requires Python 3 and an installed, authenticated reviewer CLI (Codex
-by default). Pass `--model codex=gpt-6-astra` to select the Enterprise standard;
-the unchanged upstream helper has its own default when the option is omitted. It
-needs no Enterprise runtime or pnpm dependencies. For a committed branch, use `--mode branch --base origin/main`; fetch the intended base first.
+Use your selected installation path if it differs from the default. On Windows,
+use Python or the installed `scripts/autoreview.ps1` launcher.
+The helper requires Python 3.10 or newer and an installed, authenticated reviewer
+CLI (Codex by default). Image review also requires Pillow. Pass
+`--model codex=gpt-6-astra` to select the Enterprise standard; the shared helper
+owns its default when the option is omitted. It needs no Enterprise runtime or
+pnpm dependencies. For a committed branch in a
+fork checkout, use `--mode branch --base upstream/main` when `upstream` points
+to `openclaw/openclaw-enterprise`. Verify the remote URL and fetch the intended
+base first; use the actual target branch for an existing or dependent PR.
+Pass `--base` explicitly: the helper's `origin/main` default may refer to the
+fork rather than the upstream base. Follow the
+[fork PR policy](../../CONTRIBUTING.md#prepare-a-pull-request) without renaming
+existing remotes.
 Local mode includes untracked files and staged and unstaged changes. The default
 threshold is P0; pass `--max-priority P2` when that broader scope is requested.
 
@@ -23,58 +33,24 @@ authentication, or isolation prerequisite is missing, resolve the reported error
 do not bypass isolation or interpret an absent report as clean. Keep report paths
 outside the repository. Verify findings against the change before applying them.
 This workflow reviews developer changes; it does not configure runtime approvals.
-See the skill for engines, context inputs, exit codes, and result interpretation.
+See the installed skill for engines, context inputs, exit codes, and results.
 
 ## Upstream provenance
 
-The complete `.agents/skills/autoreview` directory is copied without modification
-from [openclaw/agent-skills, `skills/autoreview`](https://github.com/openclaw/agent-skills/tree/bd9b7cc2c37e7af0915f9becee8f8107aaab27b5/skills/autoreview)
-at commit `bd9b7cc2c37e7af0915f9becee8f8107aaab27b5`.
-This matches OpenClaw's vendored directory at commit
-`0d3f4501fd8e9349ef6651b9d73ff99a11cda074`.
-The upstream [MIT license](../../.agents/skills/LICENSE.agent-skills) is retained
-beside the copy. Preserve scripts, tests, fixtures, executable modes, and the
-`CLAUDE.md` symlink together.
+[openclaw/agent-skills](https://github.com/openclaw/agent-skills/tree/main/skills/autoreview)
+owns the implementation, instructions, and tests. Enterprise keeps only a Markdown
+entrypoint. Repository-specific reviewer choices and validation stay on this page.
+The upstream [MIT license](../../.agents/skills/LICENSE.agent-skills) is retained.
 
 ## Sync the skill
 
-Make shared changes in the canonical repository first. Fast-forward a clean
-`openclaw/agent-skills` checkout from `origin/main`, validate the change there,
-and record the selected commit. Do not introduce Enterprise-specific behavior
-inside the vendored directory; keep repository guidance on this page.
+Contribute shared changes to `openclaw/agent-skills` and validate them there first.
+After active reviews finish, update the shared checkout once: symlinked installs
+serve that version to every repository. Copy-mode installs need a reinstall with
+`python3 scripts/install-skills --mode copy --force autoreview` from the updated
+source checkout. Review runs do not download or update code automatically.
 
-From the Enterprise root, export the selected committed directory into a temporary
-directory, using an absolute path to the canonical checkout:
-
-```sh
-upstream_checkout=/absolute/path/to/agent-skills
-upstream_commit=$(git -C "$upstream_checkout" rev-parse HEAD)
-sync_dir=$(mktemp -d)
-git -C "$upstream_checkout" archive "$upstream_commit" skills/autoreview LICENSE |
-  tar -x -C "$sync_dir"
-rsync -a --delete "$sync_dir/skills/autoreview/" .agents/skills/autoreview/
-cp "$sync_dir/LICENSE" .agents/skills/LICENSE.agent-skills
-diff -r "$sync_dir/skills/autoreview" .agents/skills/autoreview
-```
-
-`rsync --delete` removes downstream-only files inside the vendored skill. Check
-for local changes before running it. Update the provenance commit and link above,
-then validate from the Enterprise root:
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 python3 .agents/skills/autoreview/scripts/autoreview_test.py
-(
-  cd .agents/skills/autoreview
-  PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-    tests.test_autoreview_hardening tests.test_codex_inference_route \
-    tests.test_codex_sandbox
-)
-pnpm check:workspace
-pnpm docs:check-length
-pnpm format:check
-git diff --check
-```
-
-Run documentation and formatting checks with their existing installed dependencies;
-do not install dependencies as a verification side effect. Review the complete
-diff, including deletions and file modes, before committing the sync.
+Do not restore repository-local helper or test copies. If the entrypoint itself
+changes upstream, copy `skills/autoreview/references/repository-entrypoint.md`
+to `.agents/skills/autoreview/SKILL.md`. Run the relevant documentation and
+formatting checks with existing dependencies and inspect `git diff --check`.

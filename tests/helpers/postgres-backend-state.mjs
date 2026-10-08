@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { NativeIAMDriver, createAuthPrincipalSeed } from "../../packages/iam/src/index.ts";
@@ -18,7 +15,13 @@ import { createInstallationDriverConfiguration } from "./installation-driver-con
 import { createTestConfigurationDriver } from "./configuration-driver.mjs";
 import { createTestSecretDriver } from "./secret-driver.mjs";
 import { createTestKubernetesComputeDriver } from "./kubernetes-compute.mjs";
+import { stopProcess } from "./stop-process.mjs";
+import { waitFor } from "./wait-for.mjs";
 import { ensureDevelopmentBootstrap } from "./bootstrap-installation.mjs";
+import { reservedPortArgs } from "./available-port.mjs";
+import { databaseUrl, requiresPostgres } from "./postgres-database.mjs";
+
+export { databaseUrl, requiresPostgres };
 
 const repository = fileURLToPath(new URL("../..", import.meta.url));
 const controllerEntrypoint = fileURLToPath(
@@ -29,10 +32,6 @@ export const serviceAccountDriverId = "chatgpt-service-accounts";
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const alternateWorkspaceId = "22222222-2222-4222-8222-222222222222";
 export const apiKeyPath = "/etc/openclaw/chatgpt/admin-key";
-export const databaseUrl = process.env.OCC_TEST_DATABASE_URL;
-export const requiresPostgres = {
-  skip: databaseUrl ? false : "Set OCC_TEST_DATABASE_URL to run real PostgreSQL integration tests.",
-};
 export function backendDefinition(options = {}) {
   return {
     id: backendId,
@@ -46,18 +45,6 @@ export function backendDefinition(options = {}) {
     },
     drivers: { service_account: options.serviceAccountDriverId ?? serviceAccountDriverId },
   };
-}
-
-export async function waitFor(description, read, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await read();
-    if (value !== undefined) {
-      return value;
-    }
-    await delay(20);
-  }
-  assert.fail(`Timed out waiting for ${description}.`);
 }
 
 export function authorizedPrincipal(iam, required = [["deploy", "agent"]]) {
@@ -100,9 +87,14 @@ export async function ensureInstallation(state, label) {
   };
   state.setBootstrapNativeIAM(
     createDevelopmentIAMState(
-      createAuthPrincipalSeed(installation.id, label, {
-        id: `account-${label}-${randomUUID()}`,
-      }),
+      createAuthPrincipalSeed(
+        installation.id,
+        label,
+        {
+          id: `account-${label}-${randomUUID()}`,
+        },
+        { grant: "administrator" },
+      ),
     ),
   );
   await state.transact((unit) => unit.installations.createInstallation(installation));
@@ -320,6 +312,7 @@ export function createBackendController(fixture, options = {}) {
   const controller = new OpenClawController(fixture.installation, {
     state: fixture.state,
     backends,
+    nativeWorkerSupport: options.nativeWorkerSupport,
   });
   registerCoreDrivers(controller, fixture.state, {
     serviceAccountDriverId: backends[0]?.drivers.service_account,
@@ -442,32 +435,6 @@ export function poolWithOneBackendBindingReadFault(pool) {
   };
 }
 
-export async function availablePort() {
-  const server = createServer();
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const { port } = server.address();
-  await new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
-  return port;
-}
-
-export async function stopProcess(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  const exited = once(child, "exit");
-  child.kill("SIGTERM");
-  const force = setTimeout(() => child.kill("SIGKILL"), 2_000);
-  force.unref();
-  try {
-    await exited;
-  } finally {
-    clearTimeout(force);
-  }
-}
-
 export async function startBackendlessDevelopmentServer(context, options) {
   const configurationRoot =
     options.configurationRoot ?? (await mkdtemp(join(tmpdir(), "openclaw-backend-repair-config-")));
@@ -475,21 +442,27 @@ export async function startBackendlessDevelopmentServer(context, options) {
     context.after(() => rm(configurationRoot, { recursive: true, force: true }));
   }
 
-  const child = spawn(process.execPath, [controllerEntrypoint], {
-    cwd: repository,
-    env: {
-      PATH: process.env.PATH,
-      NODE_ENV: "development",
-      OCC_HOST: "127.0.0.1",
-      OCC_PORT: String(options.port),
-      OCC_DATABASE_URL: databaseUrl,
-      OCC_AUTH_BASE_URL: options.origin,
-      OCC_AUTH_SECRET: options.authSecret,
-      OCC_DEVELOPMENT_CONFIGURATION_ROOT: configurationRoot,
-      OCC_DOCKER_RUNTIME_IMAGE: "openclaw-enterprise-runtime:not-used-by-backend-repair",
+  // `options.reservation` (from reservePort) holds the API port. This releases it once the
+  // child logs that it is listening; if the child never does, the caller's after-hook must.
+  const child = spawn(
+    process.execPath,
+    [...reservedPortArgs(options.reservation), controllerEntrypoint],
+    {
+      cwd: repository,
+      env: {
+        PATH: process.env.PATH,
+        NODE_ENV: "development",
+        OCC_HOST: "127.0.0.1",
+        OCC_PORT: String(options.reservation.port),
+        OCC_DATABASE_URL: databaseUrl,
+        OCC_AUTH_BASE_URL: options.origin,
+        OCC_AUTH_SECRET: options.authSecret,
+        OCC_DEVELOPMENT_CONFIGURATION_ROOT: configurationRoot,
+        OCC_DOCKER_RUNTIME_IMAGE: "openclaw-enterprise-runtime:not-used-by-backend-repair",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
     },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  );
   context.after(() => stopProcess(child));
 
   let output = "";
@@ -506,5 +479,6 @@ export async function startBackendlessDevelopmentServer(context, options) {
     },
     15_000,
   );
+  await options.reservation.release();
   return { child };
 }

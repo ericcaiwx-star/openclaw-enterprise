@@ -47,11 +47,13 @@ Stores Agent drafts, their desired runtime state, and the active revision refere
 - `plugins`
 - `plugin_approvers`
 - `repository_bindings`
+- `repository_access` (default and explicit per-repository overrides)
 - `service_principal_id`
 - `harness_auth`
 - `harness_auth_secret_id`
 - `harness_auth_service_account_id`
 - `harness_auth_credential_source_id`
+- `credential_sources` (every bound credential source)
 - `active_revision_id`
 - `desired_runtime_state`
 - `status`
@@ -130,6 +132,14 @@ Stores credential sources registered with the selected Credential Gateway; the g
 - `state`
 - `created_at`
 
+### `agent_credential_sources`
+
+Mirrors each Agent draft's `credential_sources` through a trigger, so the database refuses to delete a source an Agent still binds.
+
+- `namespace_id`
+- `agent_id`
+- `credential_source_id`
+
 ### `credential_source_secrets`
 
 Links each credential source secret field to the Namespace Secret that supplied it.
@@ -138,6 +148,21 @@ Links each credential source secret field to the Namespace Secret that supplied 
 - `credential_source_id`
 - `field`
 - `secret_id`
+
+### `credential_withdrawals`
+
+Records one credential source withdrawn from one Agent revision, until the gateway confirms revocation.
+
+- `namespace_id`
+- `agent_id`
+- `revision_id`
+- `credential_source_id`
+- `state`
+- `requested_by`
+- `requested_at`
+- `completed_at`
+- `last_reason`
+- `last_attempt_at`
 
 ### `service_accounts`
 
@@ -173,10 +198,23 @@ Retains repository-session identity and cleanup context after AgentRevision dele
 - `admission_id`
 - `duration_seconds`
 - `deadline_wall_ms`
+- `broker_protocol`
 - `phase`
 - `session_id`
 - `created_at`
 - `updated_at`
+
+### `repository_broker_receipts`
+
+Retains nonsecret admission fences and broker-confirmed terminal evidence for an exact attempt.
+
+- `admission_id`
+- `state`
+- `generation`
+- `session_id`
+- `deadline_wall_ms`
+- `revoked`
+- `expired`
 
 ## Identity and access
 
@@ -258,8 +296,9 @@ Keeps an append-only record of bootstrap, changes to resources, and authorizatio
 
 ### `controller_work`
 
-Queues and tracks controller work for Namespace and Agent lifecycle changes and revision deployments.
+Queues and tracks controller work for Namespace and Agent lifecycle changes, Agent provisioning, and revision deployments.
 
+- `work_kind`
 - `idempotency_key`
 - `namespace_id`
 - `agent_id`
@@ -275,6 +314,27 @@ Queues and tracks controller work for Namespace and Agent lifecycle changes and 
 - `completed_at`
 - `reason_code`
 - `result_data`
+- `created_at`
+- `updated_at`
+
+### `agent_provisioning_work`
+
+Records one Agent provisioning request and its progress. Each row belongs to a
+`controller_work` row with `work_kind = 'provisioning'`. See the
+[Agent provisioning flow](../../flows/agent-provisioning.md).
+
+- `work_id`
+- `namespace_id`
+- `agent_id`
+- `configuration_id`
+- `actor_id`
+- `request_id`
+- `request_fingerprint`
+- `status`
+- `completed_phase`
+- `revision_id`
+- `plan`
+- `progress`
 - `created_at`
 - `updated_at`
 
@@ -307,7 +367,9 @@ Stores expiring browser sessions for signed-in users.
 
 ### `account`
 
-Links a user to their sign-in account; provisioned password accounts store a password hash.
+Links a user to their sign-in method. Password methods store a password hash;
+identity-only external methods reject password and provider-token storage.
+See [GitHub sign-in](../authentication/external-sign-in.md#github-sign-in-for-existing-accounts).
 
 - `id`
 - `account_id`
@@ -320,8 +382,56 @@ Links a user to their sign-in account; provisioned password accounts store a pas
 - `refresh_token_expires_at`
 - `scope`
 - `password`
+- `authentication_version`
+- `identity_only`
 - `created_at`
 - `updated_at`
+
+### `human_authentication_accounts`
+
+Binds each enrolled human user to its existing Installation Principal and current
+account version. Disabled accounts cannot issue or use profile-bound sessions.
+
+- `user_id`
+- `installation_id`
+- `principal_id`
+- `version`
+- `disabled`
+- `changed_at`
+
+### `human_authentication_sessions`
+
+Binds an ordinary browser session to its admitted account and method versions.
+
+- `session_id`
+- `user_id`
+- `method_id`
+- `version`
+- `method_version`
+
+### `human_authentication_recovery`
+
+Retains the fixed existing password recovery administrator for an Installation.
+
+- `installation_id`
+- `user_id`
+- `principal_id`
+- `method_id`
+
+### `human_authentication_attempts`
+
+Stores one-use external-login attempts with browser binding and a maximum
+five-minute lifetime. Stores the PKCE verifier, but no authorization code or
+provider token. Consumed attempts are deleted before exchange.
+
+- `state_hash`
+- `browser_hash`
+- `installation_id`
+- `provider_id`
+- `callback_url`
+- `code_verifier`
+- `created_at`
+- `expires_at`
 
 ### `verification`
 

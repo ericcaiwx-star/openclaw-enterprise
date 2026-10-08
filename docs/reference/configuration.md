@@ -36,7 +36,9 @@ owns the installed IAM, Compute, and Configuration selection contract. The
 [Backend reference](backends.md) defines the optional `backend` array and its
 required related Driver membership. Backend configuration never enters native
 Agent Configuration documents. The optional `presets.includeDefaults` boolean
-adds bundled Agent Presets to Namespaces; it defaults to `false`. See
+adds bundled Agent Presets to Namespaces; it defaults to `false`. A
+`presets.files` entry named like a bundled default replaces that default with a
+startup warning. See
 [Preset initialization](presets.md#installation-defaults) for permissions,
 restart behavior, and preservation of existing copies.
 
@@ -48,6 +50,37 @@ unsupported settings, and unavailable Drivers stop startup before requests run.
 Each selected Driver validates its own closed configuration schema; unknown
 fields fail startup. OCC routes authorization through the selected IAM Driver,
 whose reviewed implementation is trusted to enforce its policy.
+
+The optional `observability` block sets one external console destination:
+
+```yaml
+observability:
+  url: https://grafana.example.com/d/occ-observability
+```
+
+`url` must be an absolute HTTP or HTTPS URL without embedded credentials or a
+fragment. Unknown fields fail startup. The API exposes the URL only after an
+Installation `administer` check; the console hides the link when unset or
+unauthorized. The destination handles its own authentication. This setting does
+not select an OpenTelemetry exporter or embed a dashboard. Compose development
+can use this block alone with its default Drivers; mount the same file into API
+and worker containers.
+
+The optional `runtime` block declares a runtime image built with native worker
+support, which dedicated native OpenClaw requires:
+
+```yaml
+runtime:
+  nativeWorkerSupport: custom-image
+```
+
+`custom-image` is the only value. It is off by default, and no API or Agent
+Configuration field can set it. When set, the Installation API reports
+`capabilities.nativeWorkers` and admission accepts dedicated native OpenClaw.
+Declare it only for a runtime image built from an OpenClaw source with required
+worker placement and native worker inference. It is unsupported with the pinned
+runtime image, whose Gateways and Harnesses refuse to start. See
+[Native worker support](harness-execution.md#native-worker-support).
 
 ## Create, read, update, and delete
 
@@ -94,7 +127,14 @@ Additional consumer kinds are reserved for future approved resources and are
 not accepted. `values` must be a JSON object. It can contain the nested objects,
 arrays, strings, finite numbers, booleans, and nulls used by native OpenClaw
 configuration. OCC preserves the native document without interpreting its
-fields or resolving SecretRefs. Agent deployment separately validates supported
+fields or resolving SecretRefs, except that Configuration create and update and
+Agent provisioning check each model provider's `baseUrl` and `api`, and those of
+its `models` entries: `baseUrl` must be an absolute `http` or `https` URL, and
+`api` must be a model API the pinned OpenClaw runtime supports, such as
+`openai-responses`, `openai-completions`, `anthropic-messages`, or `ollama`.
+A blank provider `baseUrl` and values with `${VAR}` references are left to the
+runtime. The `400` names the field as a JSON pointer within `values`. Agent
+deployment separately validates supported
 runtime selection, topology, and Secret binding ownership before admission.
 Creation requires `create` permission for Configurations in the
 exact parent Namespace. Reads, updates, and deletes require the corresponding
@@ -161,7 +201,8 @@ The Kubernetes Configuration Driver stores live native documents in tenant Confi
   verify every selected implementation is available.
 - **Configuration create or update returns `400`:** Create with
   `kind: "agent"` and provide a JSON object in `values`. Do not send `kind`,
-  `generation`, or ownership fields in an update.
+  `generation`, or ownership fields in an update. When the message names a
+  `baseUrl` or `api` field, correct that model provider setting.
 - **Configuration operation returns `403`:** Verify exact-Namespace `create`
   or exact-Configuration `read`, `update`, or `delete` permission; check the
   selected Kubernetes identity's namespaced ConfigMap Role separately.
@@ -170,6 +211,8 @@ The Kubernetes Configuration Driver stores live native documents in tenant Confi
 - **Configuration deletion returns `409`:** An Agent still references that
   Configuration. Reassign every referencing Agent, or
   [delete the Agents](agents.md#deletion) and wait for teardown before retrying.
+  A Configuration created by guided Agent provisioning stays referenced until
+  that provisioning succeeds and its Agent selects another Configuration.
 - **Configuration operation returns `503`:** Confirm the selected Driver and
   IAM service are available, Kubernetes authentication and TLS are valid,
   tenant placement is ready, exact namespaced ConfigMap access exists, and the

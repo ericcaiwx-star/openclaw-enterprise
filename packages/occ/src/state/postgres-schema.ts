@@ -5,10 +5,12 @@ import type {
   CredentialSourceState,
   HarnessExecutionMode,
   HarnessAuthBinding,
+  AgentCredentialSourceBinding,
   PluginDesiredState,
   PluginApprovers,
   PresetTemplate,
   RepositoryBindingSelection,
+  RepositoryAccess,
   SecretBindings,
   ServiceAccountCredential,
 } from "@openclaw-enterprise/contracts";
@@ -24,6 +26,7 @@ import {
   jsonb,
   pgSchema,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -262,17 +265,19 @@ export const agents = occSchema.table(
     plugins: jsonb("plugins").$type<PluginDesiredState>(),
     pluginApprovers: jsonb("plugin_approvers").$type<PluginApprovers>(),
     repositoryBindings: jsonb("repository_bindings").$type<readonly RepositoryBindingSelection[]>(),
+    repositoryAccess: jsonb("repository_access").$type<RepositoryAccess>(),
     servicePrincipalId: text("service_principal_id").notNull(),
     harnessAuth: jsonb("harness_auth").$type<HarnessAuthBinding>(),
     harnessAuthSecretId: text("harness_auth_secret_id").generatedAlwaysAs(
-      sql`CASE WHEN harness_auth->>'method' IN ('api_key', 'codex_pat') THEN harness_auth #>> '{source,id}' END`,
+      sql`CASE WHEN harness_auth #>> '{source,kind}' = 'secret' THEN harness_auth #>> '{source,id}' END`,
     ),
     harnessAuthServiceAccountId: text("harness_auth_service_account_id").generatedAlwaysAs(
-      sql`CASE WHEN harness_auth->>'method' = 'chatgpt_service_account' THEN harness_auth->>'serviceAccountId' END`,
+      sql`CASE WHEN harness_auth #>> '{source,kind}' = 'service_account' THEN harness_auth #>> '{source,id}' END`,
     ),
     harnessAuthCredentialSourceId: text("harness_auth_credential_source_id").generatedAlwaysAs(
       sql`CASE WHEN harness_auth->>'method' = 'credential_source' THEN harness_auth->>'sourceId' END`,
     ),
+    credentialSources: jsonb("credential_sources").$type<readonly AgentCredentialSourceBinding[]>(),
     activeRevisionId: text("active_revision_id"),
     desiredRuntimeState: text("desired_runtime_state")
       .$type<AgentDesiredRuntimeState>()
@@ -298,6 +303,13 @@ export const agents = occSchema.table(
     ),
     check("agents_status_valid", sql`${table.status} IN ('active', 'deleting')`),
     check(
+      "agents_harness_credential_source_listed",
+      sql`${table.harnessAuth} IS NULL
+        OR ${table.harnessAuth}->>'method' IS DISTINCT FROM 'credential_source'
+        OR COALESCE(${table.credentialSources}, '[]'::jsonb) @> jsonb_build_array(
+          jsonb_build_object('sourceId', ${table.harnessAuth}->>'sourceId'))`,
+    ),
+    check(
       "agents_deleting_is_stopped",
       sql`${table.status} <> 'deleting' OR ${table.desiredRuntimeState} = 'stopped'`,
     ),
@@ -308,6 +320,10 @@ export const agents = occSchema.table(
     check(
       "agents_plugins_object",
       sql`${table.plugins} IS NULL OR jsonb_typeof(${table.plugins}) = 'object'`,
+    ),
+    check(
+      "agents_repository_access_valid",
+      sql`occ.repository_access_is_valid(${table.repositoryAccess}, ${table.repositoryBindings})`,
     ),
     check(
       "agents_repository_bindings_valid",
@@ -489,6 +505,37 @@ export const credentialSources = occSchema.table(
   ],
 );
 
+/** Kept exact by the `agent_credential_sources_are_synchronized` trigger on `agents`. */
+export const agentCredentialSources = occSchema.table(
+  "agent_credential_sources",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    credentialSourceId: text("credential_source_id").notNull(),
+  },
+  (table): PgTableExtraConfigValue[] => [
+    primaryKey({
+      name: "agent_credential_sources_pkey",
+      columns: [table.namespaceId, table.agentId, table.credentialSourceId],
+    }),
+    foreignKey({
+      name: "agent_credential_sources_agent_owner",
+      columns: [table.namespaceId, table.agentId],
+      foreignColumns: [agents.namespaceId, agents.id],
+    })
+      .onUpdate("restrict")
+      .onDelete("cascade"),
+    foreignKey({
+      name: "agent_credential_sources_source_owner",
+      columns: [table.namespaceId, table.credentialSourceId],
+      foreignColumns: [credentialSources.namespaceId, credentialSources.id],
+    })
+      .onUpdate("restrict")
+      .onDelete("restrict"),
+    index("agent_credential_sources_source_idx").on(table.namespaceId, table.credentialSourceId),
+  ],
+);
+
 export const credentialSourceSecrets = occSchema.table(
   "credential_source_secrets",
   {
@@ -518,6 +565,56 @@ export const credentialSourceSecrets = occSchema.table(
       .onDelete("restrict"),
     check("credential_source_secrets_field_format", sql`${table.field} ~ '^[a-z][a-z0-9_]{0,63}$'`),
     index("credential_source_secrets_secret_idx").on(table.namespaceId, table.secretId),
+  ],
+);
+
+export const credentialWithdrawals = occSchema.table(
+  "credential_withdrawals",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    revisionId: text("revision_id").notNull(),
+    credentialSourceId: text("credential_source_id").notNull(),
+    state: text("state").$type<"pending" | "revoked">().notNull(),
+    requestedBy: text("requested_by").notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    lastReason: text("last_reason"),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+  },
+  (table): PgTableExtraConfigValue[] => [
+    primaryKey({
+      name: "credential_withdrawals_pkey",
+      columns: [table.namespaceId, table.revisionId, table.credentialSourceId],
+    }),
+    foreignKey({
+      name: "credential_withdrawals_revision_owner",
+      columns: [table.namespaceId, table.agentId, table.revisionId],
+      foreignColumns: [agentRevisions.namespaceId, agentRevisions.agentId, agentRevisions.id],
+    })
+      .onUpdate("restrict")
+      .onDelete("cascade"),
+    foreignKey({
+      name: "credential_withdrawals_source_owner",
+      columns: [table.namespaceId, table.credentialSourceId],
+      foreignColumns: [credentialSources.namespaceId, credentialSources.id],
+    })
+      .onUpdate("restrict")
+      .onDelete("cascade"),
+    check("credential_withdrawals_state_valid", sql`${table.state} IN ('pending', 'revoked')`),
+    check(
+      "credential_withdrawals_completion",
+      sql`(${table.state} = 'revoked') = (${table.completedAt} IS NOT NULL)`,
+    ),
+    check(
+      "credential_withdrawals_requested_by_valid",
+      sql`char_length(${table.requestedBy}) BETWEEN 1 AND 256 AND ${table.requestedBy} = btrim(${table.requestedBy})`,
+    ),
+    check(
+      "credential_withdrawals_last_attempt",
+      sql`(${table.lastReason} IS NULL) = (${table.lastAttemptAt} IS NULL) AND (${table.lastReason} IS NULL OR ${table.lastReason} ~ '^[A-Z0-9_]{1,64}$')`,
+    ),
+    index("credential_withdrawals_source_idx").on(table.namespaceId, table.credentialSourceId),
   ],
 );
 
@@ -566,7 +663,7 @@ export const agentRevisions = occSchema.table(
         AND (${table.admittedSpec}
           - 'configuration_id' - 'configuration_kind' - 'configuration_generation'
           - 'draft_spec' - 'harness' - 'compute' - 'sandbox_driver_id'
-          - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'plugins'
+          - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'credential_sources' - 'plugins'
           - 'repository_credentials') = '{}'::jsonb
         AND jsonb_typeof(${table.admittedSpec}->'configuration_id') = 'string'
         AND (${table.admittedSpec}->>'configuration_id') ~ ${identifierPatterns.configuration}
@@ -638,6 +735,7 @@ export const repositorySessionAttempts = occSchema.table(
     deadlineWallMs: bigint("deadline_wall_ms", { mode: "number" }).notNull(),
     phase: text("phase").notNull(),
     sessionId: text("session_id"),
+    brokerProtocol: smallint("broker_protocol").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
@@ -651,8 +749,7 @@ export const repositorySessionAttempts = occSchema.table(
       .onDelete("restrict"),
     check(
       "repository_session_attempts_live_revision_valid",
-      sql`(${table.liveRevisionId} IS NOT NULL AND ${table.liveRevisionId} = ${table.revisionId})
-        OR (${table.liveRevisionId} IS NULL AND ${table.phase} = 'disposed')`,
+      sql`${table.liveRevisionId} IS NULL OR ${table.liveRevisionId} = ${table.revisionId}`,
     ),
     check(
       "repository_session_attempts_cleanup_context_valid",
@@ -696,6 +793,10 @@ export const repositorySessionAttempts = occSchema.table(
       sql`${table.deadlineWallMs} BETWEEN 1 AND 9007199254740991`,
     ),
     check(
+      "repository_session_attempts_broker_protocol_valid",
+      sql`${table.brokerProtocol} IN (0, 1)`,
+    ),
+    check(
       "repository_session_attempts_phase_valid",
       sql`${table.phase} IN ('opening', 'open', 'closing', 'disposed', 'invalidated')`,
     ),
@@ -708,6 +809,36 @@ export const repositorySessionAttempts = occSchema.table(
     check(
       "repository_session_attempts_timestamps_valid",
       sql`isfinite(${table.createdAt}) AND isfinite(${table.updatedAt}) AND ${table.updatedAt} >= ${table.createdAt}`,
+    ),
+  ],
+);
+
+export const repositoryBrokerReceipts = occSchema.table(
+  "repository_broker_receipts",
+  {
+    admissionId: text("admission_id")
+      .primaryKey()
+      .references(() => repositorySessionAttempts.admissionId, { onDelete: "restrict" }),
+    state: text("state").notNull(),
+    generation: uuid("generation"),
+    sessionId: text("session_id").unique(),
+    deadlineWallMs: bigint("deadline_wall_ms", { mode: "number" }),
+    revoked: bigint("revoked", { mode: "number" }),
+    expired: bigint("expired", { mode: "number" }),
+  },
+  (table): PgTableExtraConfigValue[] => [
+    check(
+      "repository_broker_receipts_session_valid",
+      sql`${table.sessionId} IS NULL OR ${table.sessionId} ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'`,
+    ),
+    check(
+      "repository_broker_receipts_state_valid",
+      sql`
+      (${table.state} = 'fenced' AND ${table.sessionId} IS NULL AND ${table.deadlineWallMs} IS NULL AND ${table.revoked} IS NULL AND ${table.expired} IS NULL)
+      OR (${table.state} = 'reserved' AND ${table.generation} IS NOT NULL AND ${table.sessionId} IS NULL AND ${table.deadlineWallMs} IS NULL AND ${table.revoked} IS NULL AND ${table.expired} IS NULL)
+      OR (${table.state} = 'active' AND ${table.generation} IS NOT NULL AND ${table.sessionId} IS NOT NULL AND ${table.deadlineWallMs} IS NOT NULL AND ${table.deadlineWallMs} BETWEEN 1 AND 9007199254740991 AND ${table.revoked} IS NULL AND ${table.expired} IS NULL)
+      OR (${table.state} = 'disposed' AND ${table.generation} IS NOT NULL AND ${table.sessionId} IS NOT NULL AND ${table.deadlineWallMs} IS NOT NULL AND ${table.deadlineWallMs} BETWEEN 1 AND 9007199254740991 AND ${table.revoked} IS NOT NULL AND ${table.revoked} BETWEEN 0 AND 9007199254740991 AND ${table.expired} IS NOT NULL AND ${table.expired} BETWEEN 0 AND 9007199254740991)
+    `,
     ),
   ],
 );
@@ -866,7 +997,7 @@ export const iamRestrictions = occSchema.table(
   (table) => [
     check(
       "iam_restrictions_action_valid",
-      sql`${table.action} IN ('create', 'read', 'update', 'delete', 'deploy', 'operate', 'administer')`,
+      sql`${table.action} IN ('create', 'read', 'update', 'delete', 'deploy', 'operate', 'administer', 'read_logs')`,
     ),
     check(
       "iam_restrictions_resource_kind_valid",
@@ -895,6 +1026,11 @@ export const auditEvents = occSchema.table(
     details: jsonb("details").$type<Record<string, unknown>>(),
   },
   (table) => [
+    index("audit_events_work_attempt_idx")
+      .on(sql`(${table.details}->>'workId')`, table.occurredAt.desc(), table.id.desc())
+      .where(
+        sql`${table.kind} = 'mutation' AND ${table.action} = 'reconcile' AND ${table.resourceKind} = 'agent_revision'`,
+      ),
     check("audit_events_id_format", sql`${table.id} ~ ${identifierPatterns.audit}`),
     check("audit_events_outcome_valid", sql`${table.outcome} IN ('success', 'denied', 'failure')`),
     check(
@@ -971,10 +1107,15 @@ export const controllerWork = occSchema.table(
           AND ${table.agentTarget} IS NOT NULL
           AND ${table.agentTarget} IN ('stopped', 'deleted'))
         OR (${table.workKind} = 'lifecycle' AND ${table.agentId} IS NOT NULL AND ${table.revisionId} IS NOT NULL
-          AND ${table.namespaceTarget} IS NULL AND ${table.agentTarget} IS NULL)
+          AND ${table.namespaceTarget} IS NULL
+          AND (${table.agentTarget} IS NULL OR ${table.agentTarget} = 'credentials_withdrawn'))
         OR (${table.workKind} = 'provisioning' AND ${table.agentId} IS NULL
           AND ${table.revisionId} IS NULL AND ${table.namespaceTarget} IS NULL
           AND ${table.agentTarget} IS NULL)
+        OR (${table.workKind} = 'lifecycle' AND ${table.agentId} IS NULL
+          AND ${table.revisionId} IS NULL AND ${table.namespaceTarget} IS NULL
+          AND ${table.agentTarget} IS NULL
+          AND ${table.idempotencyKey} ~ '^agent_revision:rev_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:repository_cleanup:(retire:)?[0-9a-f]{64}$')
       )`,
     ),
     check(
@@ -1032,6 +1173,40 @@ export const controllerWork = occSchema.table(
                 AND jsonb_typeof(${table.resultData} #> '{runtimeFailure,code}') = 'string'
                 AND char_length(${table.resultData} #>> '{runtimeFailure,code}') BETWEEN 1 AND 64
                 AND (${table.resultData} #>> '{runtimeFailure,code}') ~ '^[A-Za-z0-9._~:@-]{1,64}$'
+              )
+            )
+          )
+          OR (
+            ${table.state} = 'failed_permanent'
+            AND ${table.reasonCode} = 'RUNTIME_MODEL_PROBE_FAILED'
+            AND ${table.resultData} ? 'runtimeFailure'
+            AND (${table.resultData} - 'runtimeFailure') = '{}'::jsonb
+            AND jsonb_typeof(${table.resultData}->'runtimeFailure') = 'object'
+            AND (${table.resultData}->'runtimeFailure') ?& ARRAY['component', 'check', 'checkedAt', 'code']
+            AND ((${table.resultData}->'runtimeFailure') - 'component' - 'check' - 'checkedAt' - 'code' - 'cause') = '{}'::jsonb
+            AND jsonb_typeof(${table.resultData} #> '{runtimeFailure,component}') = 'string'
+            AND (${table.resultData} #>> '{runtimeFailure,component}') ~ '^[A-Za-z0-9._~:@-]{1,64}$'
+            AND jsonb_typeof(${table.resultData} #> '{runtimeFailure,check}') = 'string'
+            AND (${table.resultData} #>> '{runtimeFailure,check}') ~ '^[A-Za-z0-9._~:@-]{1,64}$'
+            AND jsonb_typeof(${table.resultData} #> '{runtimeFailure,checkedAt}') = 'string'
+            AND occ.iso_timestamp_is_valid(${table.resultData} #>> '{runtimeFailure,checkedAt}')
+            AND jsonb_typeof(${table.resultData} #> '{runtimeFailure,code}') = 'string'
+            AND (${table.resultData} #>> '{runtimeFailure,code}') = 'MODEL_PROBE_FAILED'
+            AND (
+              NOT ((${table.resultData}->'runtimeFailure') ? 'cause')
+              OR (
+                jsonb_typeof(${table.resultData} #> '{runtimeFailure,cause}') = 'object'
+                AND (${table.resultData} #> '{runtimeFailure,cause}') ? 'kind'
+                AND ((${table.resultData} #> '{runtimeFailure,cause}') - 'kind' - 'detail') = '{}'::jsonb
+                AND jsonb_typeof(${table.resultData} #> '{runtimeFailure,cause,kind}') = 'string'
+                AND (${table.resultData} #>> '{runtimeFailure,cause,kind}') IN ('PROCESS_EXIT', 'PROBE_STATUS', 'INVALID_OUTPUT', 'WRAPPER_ERROR')
+                AND (
+                  NOT ((${table.resultData} #> '{runtimeFailure,cause}') ? 'detail')
+                  OR (
+                    jsonb_typeof(${table.resultData} #> '{runtimeFailure,cause,detail}') = 'string'
+                    AND (${table.resultData} #>> '{runtimeFailure,cause,detail}') ~ '^[A-Za-z0-9_-]{1,32}$'
+                  )
+                )
               )
             )
           )
@@ -1142,7 +1317,7 @@ export const agentProvisioningWork = occSchema.table(
     ),
     check(
       "agent_provisioning_success_requires_handoff",
-      sql`${table.status} <> 'succeeded' OR (${table.completedPhase} = 'handoff' AND ${table.agentId} IS NOT NULL AND ${table.configurationId} IS NOT NULL AND ${table.revisionId} IS NOT NULL)`,
+      sql`${table.status} <> 'succeeded' OR (${table.completedPhase} = 'handoff' AND ${table.agentId} IS NOT NULL AND ${table.revisionId} IS NOT NULL)`,
     ),
     check(
       "agent_provisioning_failed_before_handoff",
@@ -1212,10 +1387,20 @@ export const account = occSchema.table(
     refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
     scope: text("scope"),
     password: text("password"),
+    authenticationVersion: integer("authentication_version").notNull().default(1),
+    identityOnly: boolean("identity_only").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (table) => [
+    check("account_authentication_version_positive", sql`${table.authenticationVersion} > 0`),
+    check(
+      "account_identity_only",
+      sql`NOT ${table.identityOnly} OR (
+      ${table.providerId} <> 'credential' AND ${table.password} IS NULL AND ${table.accessToken} IS NULL
+      AND ${table.refreshToken} IS NULL AND ${table.idToken} IS NULL AND ${table.accessTokenExpiresAt} IS NULL
+      AND ${table.refreshTokenExpiresAt} IS NULL AND ${table.scope} IS NULL)`,
+    ),
     index("account_user_id_idx").on(table.userId),
     uniqueIndex("account_provider_account_unique").on(table.providerId, table.accountId),
     check("auth_account_id_length", sql`char_length(${table.id}) BETWEEN 1 AND 200`),
@@ -1225,6 +1410,112 @@ export const account = occSchema.table(
       sql`char_length(${table.accountId}) BETWEEN 1 AND 512`,
     ),
     check("auth_account_timestamp_order", sql`${table.updatedAt} >= ${table.createdAt}`),
+  ],
+);
+
+export const humanAuthenticationAccounts = occSchema.table(
+  "human_authentication_accounts",
+  {
+    userId: text("user_id")
+      .primaryKey()
+      .references(() => user.id, { onUpdate: "restrict", onDelete: "cascade" }),
+    installationId: text("installation_id")
+      .notNull()
+      .references(() => installation.id, { onUpdate: "restrict", onDelete: "restrict" }),
+    principalId: text("principal_id")
+      .notNull()
+      .references(() => iamIdentities.id, { onUpdate: "restrict", onDelete: "restrict" }),
+    version: integer("version").notNull().default(1),
+    disabled: boolean("disabled").notNull().default(false),
+    changedAt: timestamp("changed_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (table) => [
+    check("human_authentication_version_positive", sql`${table.version} > 0`),
+    unique("human_authentication_principal_unique").on(table.principalId),
+  ],
+);
+
+export const humanAuthenticationSessions = occSchema.table(
+  "human_authentication_sessions",
+  {
+    sessionId: text("session_id")
+      .primaryKey()
+      .references(() => session.id, { onUpdate: "restrict", onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => humanAuthenticationAccounts.userId, {
+        onUpdate: "restrict",
+        onDelete: "cascade",
+      }),
+    methodId: text("method_id")
+      .notNull()
+      .references(() => account.id, { onUpdate: "restrict", onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    methodVersion: integer("method_version").notNull(),
+  },
+  (table) => [
+    check("human_authentication_session_version_positive", sql`${table.version} > 0`),
+    check("human_authentication_session_method_version_positive", sql`${table.methodVersion} > 0`),
+  ],
+);
+
+export const humanAuthenticationRecovery = occSchema.table("human_authentication_recovery", {
+  installationId: text("installation_id")
+    .primaryKey()
+    .references(() => installation.id, { onUpdate: "restrict", onDelete: "restrict" }),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => humanAuthenticationAccounts.userId, {
+      onUpdate: "restrict",
+      onDelete: "restrict",
+    }),
+  principalId: text("principal_id")
+    .notNull()
+    .references(() => iamIdentities.id, { onUpdate: "restrict", onDelete: "restrict" }),
+  methodId: text("method_id")
+    .notNull()
+    .references(() => account.id, { onUpdate: "restrict", onDelete: "restrict" }),
+});
+
+export const humanAuthenticationAttempts = occSchema.table(
+  "human_authentication_attempts",
+  {
+    stateHash: text("state_hash").primaryKey(),
+    browserHash: text("browser_hash").notNull(),
+    installationId: text("installation_id")
+      .notNull()
+      .references(() => installation.id, { onUpdate: "restrict", onDelete: "cascade" }),
+    providerId: text("provider_id").notNull(),
+    callbackURL: text("callback_url").notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    check("human_authentication_state_hash", sql`${table.stateHash} ~ '^[a-f0-9]{64}$'`),
+    check("human_authentication_browser_hash", sql`${table.browserHash} ~ '^[a-f0-9]{64}$'`),
+    check(
+      "human_authentication_provider_length",
+      sql`char_length(${table.providerId}) BETWEEN 1 AND 200 AND ${table.providerId} <> 'credential'`,
+    ),
+    check(
+      "human_authentication_callback_length",
+      sql`char_length(${table.callbackURL}) BETWEEN 1 AND 2048`,
+    ),
+    check(
+      "human_authentication_verifier",
+      sql`${table.codeVerifier} ~ '^[A-Za-z0-9._~-]{43,128}$'`,
+    ),
+    check(
+      "human_authentication_attempt_lifetime",
+      sql`${table.expiresAt} > ${table.createdAt} AND ${table.expiresAt} <= ${table.createdAt} + interval '5 minutes'`,
+    ),
+    index("human_authentication_attempt_expiry").on(table.expiresAt),
   ],
 );
 

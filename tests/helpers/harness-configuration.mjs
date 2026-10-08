@@ -1,5 +1,6 @@
 export function createHarnessConfiguration(harnessId, providerModel) {
   const modelReference = `${harnessId === "codex" ? "codex" : "openai"}/${providerModel}`;
+  const reasoning = !/^gpt-4(?:o(?:-mini)?|\.1)(?:-|$)/u.test(providerModel);
   const provider =
     harnessId === "codex"
       ? {
@@ -13,7 +14,16 @@ export function createHarnessConfiguration(harnessId, providerModel) {
           openai: {
             baseUrl: "https://api.openai.com/v1",
             api: "openai-responses",
-            models: [{ id: providerModel, name: providerModel }],
+            models: [
+              {
+                id: providerModel,
+                name: providerModel,
+                contextWindow: 128000,
+                maxTokens: 8192,
+                reasoning,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              },
+            ],
           },
         };
 
@@ -57,5 +67,22 @@ export function createHarnessConfiguration(harnessId, providerModel) {
           },
         }
       : {}),
+  };
+}
+
+// For an image that stubs OpenClaw: names a provider endpoint that is not the
+// real one, so the runtime's upfront credential check never sends a fixture key
+// to the provider (it runs only against the default endpoint).
+export function withStubbedProviderEndpoint(configuration) {
+  const openai = configuration.models?.providers?.openai ?? { api: "openai-responses", models: [] };
+  return {
+    ...configuration,
+    models: {
+      ...configuration.models,
+      providers: {
+        ...configuration.models?.providers,
+        openai: { ...openai, baseUrl: "https://model.stub.invalid/v1" },
+      },
+    },
   };
 }

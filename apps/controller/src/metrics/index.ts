@@ -7,7 +7,8 @@ export type WorkKind =
   | "agent_provisioning"
   | "agent_revision"
   | "agent_stop"
-  | "agent_delete";
+  | "agent_delete"
+  | "agent_credential_withdrawal";
 export type WorkOutcome = "success" | "pending" | "retry" | "permanent" | "claim_lost" | "error";
 
 const processFamilies = new Set([
@@ -114,12 +115,29 @@ export function createOccMetrics(
           help: "Seconds from work admission to successful Agent deployment or stop completion.",
           labelNames: ["operation"],
           registers: [registry],
-          buckets: [0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 900, 1800],
+          // Deployments span seconds to the 900-second convergence deadline.
+          buckets: [
+            0.1, 0.5, 1, 2, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 450, 600, 900, 1800,
+          ],
         })
       : undefined;
-  // These two bounded label sets provide a baseline before the first operation.
+  // A callback whose state and browser cookie match no pending attempt is unauthenticated
+  // and writes no audit event; this counter is its only aggregate record.
+  const unmatchedCallbacks =
+    service === "api"
+      ? new Counter({
+          name: "occ_sign_in_unmatched_callbacks_total",
+          help: "External sign-in callbacks refused before matching a pending attempt.",
+          labelNames: ["provider"],
+          registers: [registry],
+        })
+      : undefined;
+  // These bounded label sets provide a baseline before the first observation.
   operationDuration?.zero({ operation: "deploy" });
   operationDuration?.zero({ operation: "stop" });
+  for (const provider of ["github", "google", "oidc"]) {
+    unmatchedCallbacks?.inc({ provider }, 0);
+  }
   let inFlight: Promise<string> | undefined;
   return {
     contentType: registry.contentType,
@@ -140,6 +158,9 @@ export function createOccMetrics(
     },
     observeAgentOperation(operation: "deploy" | "stop", seconds: number) {
       operationDuration?.observe({ operation }, seconds);
+    },
+    observeUnmatchedSignInCallback(provider: "github" | "google" | "oidc") {
+      unmatchedCallbacks?.inc({ provider });
     },
     exposition(): Promise<string> {
       if (inFlight !== undefined) {

@@ -50,10 +50,12 @@ credential-renewal method.
 
 Creating an OCC account and issuing its credential are separate operations. An
 account can hold at most one credential; issuance fails if it already has one,
-if the account is outside the specified Namespace, or if the Driver is missing.
-Deletion is blocked while an Agent draft, active revision, or pending deployment
-still references the account. OCC calls the selected Driver before deleting its
-own account record. See the [credential delivery flow](../../flows/service-account-driver-credential-delivery.md).
+if the account is outside the specified Namespace, or if the Driver is missing
+(`409 SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED`, after the grant and lookup).
+Deletion is blocked while an Agent draft, active revision, pending deployment, or
+queued or running Agent provisioning request still references the account. OCC calls the selected Driver before deleting its
+own account record; without a Driver, an account holding an issued access token
+is not deleted (`409 SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED`). See the [credential delivery flow](../../flows/service-account-driver-credential-delivery.md).
 
 ## Limits
 
@@ -72,7 +74,7 @@ own account record. See the [credential delivery flow](../../flows/service-accou
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Account creation succeeds but has no credential | Creation and issuance are separate. Request issuance with `update` permission on that account.                                                             |
 | Credential issuance fails                       | Check the selected Backend/Driver pair, the private account binding, provider authority, Secret storage, and whether the account already has a credential. |
-| Deletion is rejected                            | Remove or update any Agent draft, active revision, or pending deployment reference through OCC before retrying.                                            |
+| Deletion is rejected                            | Remove or update any Agent draft, active revision, or pending deployment reference through OCC, or let provisioning finish, before retrying.               |
 | A managed credential is expired or revoked      | Restore access through the supported provider/account workflow. Do not substitute a different identity or assume automatic renewal.                        |
 
 ## Implementations

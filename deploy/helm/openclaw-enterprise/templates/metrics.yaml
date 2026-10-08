@@ -2,7 +2,8 @@
 {{- fail "metrics.enabled must be a boolean" }}
 {{- end }}
 {{- if .Values.metrics.enabled }}
-{{- if not (regexMatch "^[0-9]+$" (toString .Values.metrics.port)) }}
+{{- /* Sprig int reads a leading zero as octal, while the API uses decimal Number(). */ -}}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.metrics.port)) }}
 {{- fail "metrics.port must be an integer" }}
 {{- end }}
 {{- if ne (empty .Values.metrics.scraperNamespaceLabels) (empty .Values.metrics.scraperPodLabels) }}
@@ -23,7 +24,7 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: openclaw-enterprise
-      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/instance: {{ $.Release.Name | quote }}
       app.kubernetes.io/component: {{ $component }}
   policyTypes: [Ingress]
   ingress:

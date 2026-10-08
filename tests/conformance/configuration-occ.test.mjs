@@ -9,15 +9,23 @@ import { NativeIAMDriver } from "../../packages/iam/src/index.ts";
 import { admitLoggingConfiguration } from "../../packages/contracts/src/index.ts";
 import {
   AuthorizationDeniedError,
+  ConfigurationHarnessError,
   DependencyUnavailableError,
   InMemoryPlatformState,
   NamespaceNotEmptyError,
+  NativeWorkerSupportError,
   OpenClawController,
+  PINNED_OPENCLAW_RUNTIME_SUPPORTS_NATIVE_WORKERS,
   ScopeViolationError,
   resolveConfiguredHarnessId,
 } from "../../packages/occ/src/index.ts";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
+import {
+  createDevelopmentComputeDriver,
+  registerAndSelectDrivers,
+} from "../helpers/development.mjs";
+import { bindRole, grantRole, principalIAMState } from "../helpers/iam-grants.mjs";
 
 const administrator = "principal-configuration-administrator";
 const deployOnly = "principal-configuration-deploy-only";
@@ -26,91 +34,39 @@ const installation = Object.freeze({
   name: "Configuration OCC conformance",
   createdAt: "2026-08-19T00:00:00.000Z",
 });
-async function fixture() {
-  const permissions = [
-    { action: "create", resourceKind: "secret" },
-    { action: "operate", resourceKind: "secret" },
-    { action: "create", resourceKind: "namespace" },
-    { action: "read", resourceKind: "namespace" },
-    { action: "delete", resourceKind: "namespace" },
-    { action: "create", resourceKind: "configuration" },
-    { action: "read", resourceKind: "configuration" },
-    { action: "update", resourceKind: "configuration" },
-    { action: "delete", resourceKind: "configuration" },
-    { action: "create", resourceKind: "agent" },
-    { action: "read", resourceKind: "agent" },
-    { action: "update", resourceKind: "agent" },
-    { action: "deploy", resourceKind: "agent" },
-    { action: "read", resourceKind: "agent_revision" },
-  ];
-  const iamState = {
-    identities: [administrator, deployOnly].map((id) => ({
-      kind: "principal",
-      id,
-      issuer: "configuration-conformance",
-      subject: id,
-    })),
-    groups: [],
-    memberships: [],
-    roles: [
-      { id: "configuration-administrator-role", permissions },
-      {
-        id: "configuration-deploy-only-role",
-        permissions: [
-          { action: "deploy", resourceKind: "agent" },
-          { action: "operate", resourceKind: "secret" },
-        ],
-      },
-    ],
-    bindings: [
-      {
-        id: "configuration-administrator-binding",
-        subjectKind: "identity",
-        subjectId: administrator,
-        roleId: "configuration-administrator-role",
-      },
-      {
-        id: "configuration-deploy-only-binding",
-        subjectKind: "identity",
-        subjectId: deployOnly,
-        roleId: "configuration-deploy-only-role",
-      },
-    ],
-    restrictions: [],
-  };
+async function fixture(options = {}) {
+  const iamState = principalIAMState([administrator, deployOnly], "configuration-conformance");
+  grantRole(iamState, administrator, {
+    id: "configuration-administrator-role",
+    bindingId: "configuration-administrator-binding",
+    permissions: {
+      secret: ["create", "operate"],
+      namespace: ["create", "read", "delete"],
+      configuration: ["create", "read", "update", "delete"],
+      agent: ["create", "read", "update", "deploy"],
+      agent_revision: ["read"],
+      installation: ["read"],
+    },
+  });
+  grantRole(iamState, deployOnly, {
+    id: "configuration-deploy-only-role",
+    bindingId: "configuration-deploy-only-binding",
+    permissions: { agent: ["deploy"], secret: ["operate"] },
+  });
   const iam = new NativeIAMDriver(
     { loadNativeIAMState: async () => iamState },
     { id: "configuration-occ-iam" },
   );
   const compute = {
+    ...createDevelopmentComputeDriver(),
     id: "configuration-occ-compute",
-    capability: "compute",
     implementation: "configuration-conformance-compute",
-    validateHarnessAuth() {},
-    async ensureNamespace(namespace) {
-      return { namespaceId: namespace.id, namespaceReady: true };
-    },
-    async deleteNamespace(namespace) {
-      return { namespaceId: namespace.id, namespaceDeleted: true };
-    },
-    async prepareRevision(revision) {
-      return {
-        namespaceId: revision.namespaceId,
-        agentId: revision.agentId,
-        revisionId: revision.id,
-        ready: true,
-      };
-    },
-    async retireRevision() {},
   };
   const configurationDriver = createTestConfigurationDriver();
   const state = new InMemoryPlatformState();
-  const controller = new OpenClawController(installation, { state });
+  const controller = new OpenClawController(installation, { state, ...options });
   const secretDriver = createTestSecretDriver();
-  for (const driver of [iam, compute, configurationDriver, secretDriver]) {
-    controller.registerDriver(driver);
-    controller.selectDriver(driver.capability, driver.id);
-  }
+  registerAndSelectDrivers(controller, [iam, compute, configurationDriver, secretDriver]);
   const namespace = await controller.createNamespace(administrator, {
     name: "Configuration conformance tenant",
   });
@@ -159,14 +115,11 @@ async function fixture() {
       id: `harness-role-${target.id}`,
       permissions: [{ action: "operate", resourceKind: "secret" }],
     });
-    iamState.bindings.push({
+    bindRole(iamState, target.servicePrincipalId, {
       id: `harness-binding-${target.id}`,
-      subjectKind: "identity",
-      subjectId: target.servicePrincipalId,
       roleId: `harness-role-${target.id}`,
       namespaceId: namespace.id,
-      resourceKind: "secret",
-      resourceId: secret.id,
+      resource: { kind: "secret", id: secret.id },
     });
     return controller.updateAgent(administrator, {
       namespaceId: namespace.id,
@@ -184,6 +137,7 @@ async function fixture() {
     configurationDriver,
     controller,
     iam,
+    iamState,
     namespace,
     state,
   };
@@ -391,6 +345,28 @@ test("native selected-model policy explicitly chooses Codex or OpenClaw", () => 
       },
     }),
     "codex",
+  );
+  // A model ID may itself contain slashes. The provider ends at the first slash, so the
+  // catalog entry `vendor/model` must match `openai/vendor/model` and keep its authored name.
+  assert.equal(
+    resolveConfiguredHarnessId({
+      agents: {
+        defaults: {
+          model: "openai/vendor/model",
+          models: { "openai/vendor/model": { agentRuntime: { id: "openclaw" } } },
+        },
+      },
+      models: {
+        providers: {
+          openai: {
+            baseUrl: "https://gateway.example.test/v1",
+            api: "openai-responses",
+            models: [{ id: "vendor/model", name: "Team Fast", agentRuntime: { id: "openclaw" } }],
+          },
+        },
+      },
+    }),
+    "openclaw",
   );
 });
 
@@ -770,6 +746,24 @@ test("OCC rejects alternate selectable runtimes and unsupported Codex providers 
       },
     },
     {
+      // The nested catalog entry must still be found, or its conflicting runtime would go unseen.
+      name: "selected model policy cannot mask a conflicting nested-slash provider-model runtime",
+      executionMode: "embedded",
+      values: {
+        agents: {
+          defaults: {
+            model: "openai/vendor/model",
+            models: { "openai/vendor/model": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+        models: {
+          providers: {
+            openai: { models: [{ id: "vendor/model", agentRuntime: { id: "codex" } }] },
+          },
+        },
+      },
+    },
+    {
       name: "per-agent model policy cannot mask a conflicting default runtime",
       executionMode: "embedded",
       values: {
@@ -855,13 +849,17 @@ test("Harness admission rejects conflicting selections, mode mismatches, and una
   });
 
   // An explicit Codex selection cannot run in an embedded Agent or use OpenClaw's approval.
+  // The mismatch is the caller's to fix, so it is named rather than reported as a missing dependency.
   await assert.rejects(
     controller.deployAgent(
       administrator,
       { namespaceId: namespace.id, agentId: agent.id },
       resolveApprovedDevelopmentHarness,
     ),
-    DependencyUnavailableError,
+    (error) =>
+      error instanceof ConfigurationHarnessError &&
+      error.message ===
+        "The Configuration selects the Codex Harness, which needs dedicated execution; this Agent uses embedded execution. Change the Agent's execution mode or its Configuration.",
   );
   await assert.rejects(
     controller.deployAgent(
@@ -890,6 +888,29 @@ test("Harness admission rejects conflicting selections, mode mismatches, and una
     resolveApprovedProductionHarness,
   );
   assert.deepEqual(embedded.harness, { ...DEVELOPMENT_HARNESS_DESCRIPTOR, mode: "embedded" });
+  await controller.updateAgent(administrator, {
+    namespaceId: namespace.id,
+    agentId: agent.id,
+    configurationId: openclawConfiguration.id,
+    executionMode: "dedicated",
+  });
+  // The pinned runtime cannot run dedicated OpenClaw, so admission refuses it before
+  // any revision exists unless the Installation declares a native-worker runtime image.
+  assert.equal(PINNED_OPENCLAW_RUNTIME_SUPPORTS_NATIVE_WORKERS, false);
+  await assert.rejects(
+    controller.deployAgent(
+      administrator,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveApprovedProductionHarness,
+    ),
+    (error) =>
+      error instanceof NativeWorkerSupportError &&
+      /cloudWorkers\.requiredProfile/.test(error.message) &&
+      /docs-enterprise\.openclaw\.org\/reference\/harness-execution\/#native-worker-support/.test(
+        error.message,
+      ),
+  );
+  assert.equal((await controller.getInstallation(administrator)).capabilities, undefined);
   assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), [
     embedded,
   ]);
@@ -921,6 +942,43 @@ test("Harness admission rejects conflicting selections, mode mismatches, and una
   );
 });
 
+test("Installation native worker support admits dedicated OpenClaw to Sandbox checks", async () => {
+  const { agent, controller, namespace } = await fixture({ nativeWorkerSupport: "custom-image" });
+  assert.deepEqual((await controller.getInstallation(administrator)).capabilities, {
+    nativeWorkers: { support: "custom-image" },
+  });
+  const openclawConfiguration = await controller.createConfiguration(administrator, {
+    namespaceId: namespace.id,
+    kind: "agent",
+    values: {},
+  });
+  await controller.updateAgent(administrator, {
+    namespaceId: namespace.id,
+    agentId: agent.id,
+    configurationId: openclawConfiguration.id,
+    executionMode: "dedicated",
+  });
+  // The declaration lifts only the runtime refusal: dedicated OpenClaw still fails closed
+  // without a provisioning SandboxDriver that declares networking, filesystem, and process containment.
+  await assert.rejects(
+    controller.deployAgent(
+      administrator,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveApprovedProductionHarness,
+    ),
+    (error) =>
+      error instanceof DependencyUnavailableError &&
+      /requires a provisioning SandboxDriver with networking, filesystem, and process containment/.test(
+        error.message,
+      ),
+  );
+  assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), []);
+  assert.throws(
+    () => new OpenClawController(installation, { nativeWorkerSupport: "pinned-runtime" }),
+    ScopeViolationError,
+  );
+});
+
 test("Agent deployment separately authorizes its exact Configuration", async () => {
   const { agent, controller, namespace } = await fixture();
 
@@ -941,6 +999,50 @@ test("Agent deployment separately authorizes its exact Configuration", async () 
     },
   );
   assert.deepEqual(await controller.listRevisions(administrator, namespace.id, agent.id), []);
+});
+
+test("Agent creation and update separately authorize their exact Configuration", async () => {
+  const { agent, configuration, controller, iamState, namespace } = await fixture();
+  const deniedRead = (error) => {
+    assert.ok(error instanceof AuthorizationDeniedError);
+    assert.deepEqual(error.authorization, {
+      action: "read",
+      resource: { kind: "configuration", id: configuration.id, namespaceId: namespace.id },
+    });
+    return true;
+  };
+  const create = () =>
+    controller.createAgent(administrator, {
+      namespaceId: namespace.id,
+      name: "Configuration read probe",
+      configurationId: configuration.id,
+    });
+  const update = () =>
+    controller.updateAgent(administrator, {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      configurationId: configuration.id,
+    });
+
+  // Agent create and update grants do not imply reading the Configuration they select.
+  iamState.restrictions.push({
+    id: "deny-configuration-read",
+    namespaceId: namespace.id,
+    action: "read",
+    resourceKind: "configuration",
+    resourceId: configuration.id,
+    effect: "deny",
+  });
+  await assert.rejects(create(), deniedRead);
+  await assert.rejects(update(), deniedRead);
+  assert.deepEqual(
+    (await controller.listAgents(administrator, namespace.id)).map(({ id }) => id),
+    [agent.id],
+  );
+
+  iamState.restrictions.pop();
+  assert.equal((await create()).configurationId, configuration.id);
+  assert.equal((await update()).configurationId, configuration.id);
 });
 
 test("Namespace deletion refuses an otherwise agent-free Namespace with Configuration", async () => {

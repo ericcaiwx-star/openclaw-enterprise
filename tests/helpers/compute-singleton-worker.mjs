@@ -1,24 +1,12 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
 import { grantAgentSecretOperate } from "./postgres-harness-auth.mjs";
+import { waitFor } from "./wait-for.mjs";
 
 const databaseUrl = process.env.OCC_TEST_DATABASE_URL;
 const requiresPostgres = {
   skip: databaseUrl ? false : "Set OCC_TEST_DATABASE_URL to run real PostgreSQL integration tests.",
 };
-
-async function waitFor(description, read, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await read();
-    if (value !== undefined) {
-      return value;
-    }
-    await delay(20);
-  }
-  assert.fail(`Timed out waiting for ${description}.`);
-}
 
 async function setup(context) {
   const [
@@ -67,9 +55,14 @@ async function setup(context) {
     };
     state.setBootstrapNativeIAM(
       createDevelopmentIAMState(
-        createAuthPrincipalSeed(installation.id, "before-commit-worker-integration", {
-          id: `account-before-commit-${randomUUID()}`,
-        }),
+        createAuthPrincipalSeed(
+          installation.id,
+          "before-commit-worker-integration",
+          {
+            id: `account-before-commit-${randomUUID()}`,
+          },
+          { grant: "administrator" },
+        ),
       ),
     );
     await state.transact((unit) => unit.installations.createInstallation(installation));
@@ -271,4 +264,4 @@ async function setup(context) {
   };
 }
 
-export { requiresPostgres, setup, waitFor };
+export { requiresPostgres, setup };

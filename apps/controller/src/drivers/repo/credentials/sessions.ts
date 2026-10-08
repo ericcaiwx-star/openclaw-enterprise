@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AuthorityIdentity, Clock, SessionRef } from "./backend-contracts.ts";
 import type { RepositoryCredentialGrantIdentity } from "@openclaw-enterprise/contracts";
+import { hasControlCharacter } from "./client-contracts.ts";
 import type {
   RepositoryCredentialSessionInput,
   RepositoryCredentialBoundSessionInput,
@@ -32,10 +33,7 @@ export function snapshotBinding(
       typeof value !== "string" ||
       value.length === 0 ||
       Buffer.byteLength(value) > 512 ||
-      [...value].some((character) => {
-        const code = character.charCodeAt(0);
-        return code <= 0x1f || code === 0x7f;
-      })
+      hasControlCharacter(value)
     ) {
       throw new Error("INVALID_BINDING");
     }
@@ -61,6 +59,7 @@ export function snapshotSessionInput(value: unknown): SessionInput {
     "expectedBinding",
     "deadlineWallMs",
     "recoverOnly",
+    "durableAdmission",
   ];
   const bound = boundFields.some((field) => Object.hasOwn(input, field));
   const allowed = bound
@@ -87,10 +86,7 @@ export function snapshotSessionInput(value: unknown): SessionInput {
     typeof input.namespaceId !== "string" ||
     input.namespaceId.length === 0 ||
     Buffer.byteLength(input.namespaceId) > 512 ||
-    [...input.namespaceId].some((character) => {
-      const code = character.charCodeAt(0);
-      return code <= 0x1f || code === 0x7f;
-    }) ||
+    hasControlCharacter(input.namespaceId) ||
     typeof input.repositoryRef !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.repositoryRef) ||
     typeof input.profile !== "string" ||
@@ -98,6 +94,7 @@ export function snapshotSessionInput(value: unknown): SessionInput {
     !Number.isSafeInteger(input.deadlineWallMs) ||
     input.deadlineWallMs <= 0 ||
     (input.recoverOnly !== undefined && input.recoverOnly !== true) ||
+    (input.durableAdmission !== undefined && input.durableAdmission !== true) ||
     !input.expectedBinding ||
     typeof input.expectedBinding !== "object" ||
     Array.isArray(input.expectedBinding) ||

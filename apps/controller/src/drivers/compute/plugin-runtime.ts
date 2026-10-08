@@ -74,8 +74,11 @@ function validateDriverMatchesRuntime(
     }
     return;
   }
-  if (revision.harness.id !== "openclaw" || revision.harness.mode !== "embedded") {
-    throw new Error("OpenClaw plugin runtime artifacts require an embedded OpenClaw Harness.");
+  if (
+    revision.harness.id !== "openclaw" ||
+    (revision.harness.mode !== "embedded" && revision.harness.mode !== "dedicated")
+  ) {
+    throw new Error("OpenClaw plugin runtime artifacts require an OpenClaw Harness.");
   }
   if (revision.plugins?.driver.implementation !== "occ/openclaw-plugin") {
     throw new Error("OpenClaw plugin runtime artifacts require the OpenClaw PluginDriver.");
@@ -105,7 +108,7 @@ function pluginFreeRuntimeForRevision(
   if (
     revision.pluginApprovers !== undefined &&
     revision.harness.id === "openclaw" &&
-    revision.harness.mode === "embedded"
+    (revision.harness.mode === "embedded" || revision.harness.mode === "dedicated")
   ) {
     return { kind: "openclaw", selections: {}, pluginApprovers: revision.pluginApprovers };
   }

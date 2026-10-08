@@ -1,5 +1,32 @@
-import type { AccessBinding, ResourceKind, Role } from "@openclaw-enterprise/contracts";
+import type {
+  AccessBinding,
+  ResourceKind,
+  ResourceRef,
+  Role,
+  ServicePrincipal,
+} from "@openclaw-enterprise/contracts";
 import type { ResourceHandlers } from "./types.ts";
+
+// Audit details name what a policy mutation granted or removed, by identifier.
+function roleAuditDetails(role: Readonly<Role>): Record<string, unknown> {
+  return { roleId: role.id, permissions: role.permissions };
+}
+
+function bindingAuditDetails(binding: Readonly<AccessBinding>): Record<string, unknown> {
+  return {
+    bindingId: binding.id,
+    subjectKind: binding.subjectKind,
+    subjectId: binding.subjectId,
+    roleId: binding.roleId,
+  };
+}
+
+// The exact resource the AccessBinding grants, or its Namespace when it has none.
+function bindingAuditResource(binding: Readonly<AccessBinding>, namespaceId: string): ResourceRef {
+  return binding.resourceKind === undefined || binding.resourceId === undefined
+    ? { kind: "namespace", id: namespaceId, namespaceId }
+    : { kind: binding.resourceKind, id: binding.resourceId, namespaceId };
+}
 
 function clientIAMRole(role: Readonly<Role>): Record<string, unknown> {
   return {
@@ -22,6 +49,12 @@ function clientIAMAccessBinding(binding: Readonly<AccessBinding>): Record<string
   };
 }
 
+function clientIAMServicePrincipal(
+  servicePrincipal: Readonly<ServicePrincipal>,
+): Record<string, unknown> {
+  return { id: servicePrincipal.id, namespaceId: servicePrincipal.namespaceId };
+}
+
 export const iamHandlers = {
   async listIAMRoles({ controller, context, request, reply, namespaceId }) {
     const roles = await controller.listIAMRoles(context.actorId, namespaceId);
@@ -34,7 +67,12 @@ export const iamHandlers = {
         ...(body?.name === undefined ? {} : { name: body.name as string }),
         permissions: body?.permissions as never,
       });
-      await unit.audit.append(mutationEvent({ kind: "namespace", id: namespaceId, namespaceId }));
+      await unit.audit.append(
+        mutationEvent(
+          { kind: "namespace", id: namespaceId, namespaceId },
+          roleAuditDetails(created),
+        ),
+      );
       return clientIAMRole(created);
     });
     reply.status(201).send({ data: role, meta: { requestId: request.id } });
@@ -45,8 +83,17 @@ export const iamHandlers = {
   },
   async deleteIAMRole({ controller, context, reply, params, namespaceId, mutationEvent }) {
     await controller.transact(async (unit) => {
-      await controller.deleteIAMRole(context.actorId, namespaceId, params.roleId as string);
-      await unit.audit.append(mutationEvent({ kind: "namespace", id: namespaceId, namespaceId }));
+      const deleted = await controller.deleteIAMRole(
+        context.actorId,
+        namespaceId,
+        params.roleId as string,
+      );
+      await unit.audit.append(
+        mutationEvent(
+          { kind: "namespace", id: namespaceId, namespaceId },
+          roleAuditDetails(deleted),
+        ),
+      );
     });
     reply.status(204).send();
   },
@@ -76,11 +123,7 @@ export const iamHandlers = {
         resourceId: body?.resourceId as string,
       });
       await unit.audit.append(
-        mutationEvent({
-          kind: body?.resourceKind as ResourceKind,
-          id: body?.resourceId as string,
-          namespaceId,
-        }),
+        mutationEvent(bindingAuditResource(created, namespaceId), bindingAuditDetails(created)),
       );
       return clientIAMAccessBinding(created);
     });
@@ -99,13 +142,56 @@ export const iamHandlers = {
   },
   async deleteIAMAccessBinding({ controller, context, reply, params, namespaceId, mutationEvent }) {
     await controller.transact(async (unit) => {
-      await controller.deleteIAMAccessBinding(
+      const deleted = await controller.deleteIAMAccessBinding(
         context.actorId,
         namespaceId,
         params.bindingId as string,
       );
-      await unit.audit.append(mutationEvent({ kind: "namespace", id: namespaceId, namespaceId }));
+      await unit.audit.append(
+        mutationEvent(bindingAuditResource(deleted, namespaceId), bindingAuditDetails(deleted)),
+      );
     });
     reply.status(204).send();
+  },
+  async listIAMServicePrincipals({ controller, context, request, reply, namespaceId }) {
+    const principals = await controller.listIAMServicePrincipals(context.actorId, namespaceId);
+    reply.send({
+      data: principals.map(clientIAMServicePrincipal),
+      meta: { requestId: request.id },
+    });
+  },
+  async createIAMServicePrincipal({
+    controller,
+    context,
+    request,
+    reply,
+    namespaceId,
+    mutationEvent,
+  }) {
+    const created = await controller.transact(async (unit) => {
+      const servicePrincipal = await controller.createIAMServicePrincipal(
+        context.actorId,
+        namespaceId,
+      );
+      await unit.audit.append(
+        mutationEvent(
+          { kind: "namespace", id: namespaceId, namespaceId },
+          { servicePrincipalId: servicePrincipal.id },
+        ),
+      );
+      return clientIAMServicePrincipal(servicePrincipal);
+    });
+    reply.status(201).send({ data: created, meta: { requestId: request.id } });
+  },
+  async getIAMServicePrincipal({ controller, context, request, reply, params, namespaceId }) {
+    const servicePrincipal = await controller.getIAMServicePrincipal(
+      context.actorId,
+      namespaceId,
+      params.servicePrincipalId as string,
+    );
+    reply.send({
+      data: clientIAMServicePrincipal(servicePrincipal),
+      meta: { requestId: request.id },
+    });
   },
 } satisfies ResourceHandlers;

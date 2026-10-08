@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:net";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID, createHash, X509Certificate } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createServer as createHttpsServer } from "node:https";
@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 
+import { FilesystemConfigurationDriver } from "../../apps/controller/src/drivers/configuration/filesystem/index.ts";
 import { createControllerAuth } from "../../apps/controller/src/auth/index.ts";
 import { backendSummariesFromDefinitions } from "../../apps/controller/src/composition/installation-config.ts";
 import { resolveApprovedHarness } from "../../apps/controller/src/composition/production-harness.ts";
@@ -20,6 +21,7 @@ import { authenticatedHeaders, signInWithEmailPassword } from "./auth-session.mj
 import { createTestConfigurationDriver } from "./configuration-driver.mjs";
 import { createTestSecretDriver } from "./secret-driver.mjs";
 import { createTestKubernetesComputeDriver } from "./kubernetes-compute.mjs";
+import { reservePort } from "./available-port.mjs";
 
 export const backendFixtures = Object.freeze([
   Object.freeze({
@@ -38,7 +40,9 @@ function computeDriver({
   repositoryCredentials = false,
   discoverHarnessModels = async () => [],
 } = {}) {
-  const driver = createTestKubernetesComputeDriver("console-compute", { repositoryCredentials });
+  const driver = createTestKubernetesComputeDriver("console-compute", {
+    repositoryCredentials,
+  });
 
   return Object.assign(driver, {
     implementation: "test-memory-lifecycle",
@@ -64,24 +68,19 @@ function computeDriver({
   });
 }
 
-async function availableLoopbackPort() {
-  const server = createServer();
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert.equal(typeof address, "object");
-  assert.notEqual(address, null);
-  await new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
-  return address.port;
-}
-
 export async function createConsoleAppFixture(t, options = {}) {
   const installationId = `ins_${randomUUID()}`;
-  const port = await availableLoopbackPort();
+  // The ports are part of the origins the app is configured with, so hold them until the
+  // listeners bind them; a released probe port can be taken by another listener meanwhile.
+  const appPort = await reservePort();
+  t.after(appPort.release);
+  const port = appPort.port;
   const originHost = options.originHost ?? "127.0.0.1";
-  const browserPort = options.https === true ? await availableLoopbackPort() : port;
+  const browserReservation = options.https === true ? await reservePort() : null;
+  if (browserReservation !== null) {
+    t.after(browserReservation.release);
+  }
+  const browserPort = browserReservation?.port ?? port;
   const origin = `${options.https === true ? "https" : "http"}://${originHost}:${browserPort}`;
   const browserArgs = [];
   const transportOrigin = `http://127.0.0.1:${port}`;
@@ -108,7 +107,7 @@ export async function createConsoleAppFixture(t, options = {}) {
     name: "Console Administrator",
   };
   const account = await auth.createAccount(credentials);
-  const seed = auth.principalSeed(account);
+  const seed = auth.principalSeed(account, { grant: "administrator" });
   const policy = {
     identities: [seed.principal],
     groups: [],
@@ -120,9 +119,62 @@ export async function createConsoleAppFixture(t, options = {}) {
     bindings: seed.bindings.map((binding) => ({ ...binding })),
     restrictions: [],
   };
+  // These grant-free accounts are fixture setup. Accounts added later through
+  // createAccountWithPolicy are also shareable, because State resolves identities live.
+  const provisionedAccounts = [];
+  for (const label of options.provisionedPeople ?? []) {
+    const personCredentials = {
+      email: `${label}-${randomUUID()}@example.com`,
+      password: `console-password-${randomUUID()}`,
+      name: label,
+    };
+    const person = await auth.createAccount(personCredentials);
+    const personSeed = auth.principalSeed(person, { roleId: seed.roles[0].id });
+    policy.identities.push(personSeed.principal);
+    provisionedAccounts.push({ credentials: personCredentials, principal: personSeed.principal });
+  }
   const auditSink = options.auditSink ?? new InMemoryAuditSink();
+  const policyUnit = new AsyncLocalStorage();
+  class ConsolePlatformState extends InMemoryPlatformState {
+    transact(work) {
+      // Authorization inside a transaction reads that actual unit, without waiting on itself.
+      return super.transact((unit) => policyUnit.run(unit, () => work(unit)));
+    }
+  }
+  const platformState =
+    options.state ??
+    new ConsolePlatformState({
+      auditSink,
+      // Live lookup, so people enrolled after construction can be bound like in Postgres.
+      resolveIAMIdentity: (identityId) =>
+        policy.identities.find((identity) => identity.id === identityId),
+    });
   const iamDriver = new NativeIAMDriver(
-    { loadNativeIAMState: async () => policy },
+    {
+      async loadNativeIAMState() {
+        // The real evaluator reads Roles and bindings committed by the real policy APIs.
+        if (options.provisionedPeople === undefined) {
+          return policy;
+        }
+        const readPolicy = async (view) => {
+          const namespaces = await view.namespaces.listNamespaces();
+          const roles = [];
+          const bindings = [];
+          for (const namespace of namespaces) {
+            roles.push(...(await view.iamPolicy.listRoles(namespace.id)));
+            bindings.push(...(await view.iamPolicy.listAccessBindings(namespace.id)));
+          }
+          return { roles, bindings };
+        };
+        const unit = policyUnit.getStore();
+        const managed = await (unit ? readPolicy(unit) : platformState.read(readPolicy));
+        return {
+          ...policy,
+          roles: [...policy.roles, ...managed.roles],
+          bindings: [...policy.bindings, ...managed.bindings],
+        };
+      },
+    },
     { id: "console-native-iam" },
   );
   const backends = options.backends ?? backendFixtures;
@@ -130,10 +182,20 @@ export async function createConsoleAppFixture(t, options = {}) {
   const backendSummaries = Object.hasOwn(options, "backendSummaries")
     ? options.backendSummaries
     : backendSummariesFromDefinitions(backends);
-  const platformState = options.state ?? new InMemoryPlatformState({ auditSink });
   const secretDriver = Object.hasOwn(options, "secretDriver")
     ? options.secretDriver
     : createTestSecretDriver({ id: "console-secret" });
+  let configurationDriver = options.configurationDriver;
+  if (
+    configurationDriver === undefined &&
+    (options.filesystemConfiguration === true || options.defaultPresets?.length)
+  ) {
+    // Native value validation (Preset seeding, inline credential checks) needs the
+    // real storage Driver; the in-memory test Driver accepts any values.
+    const root = await mkdtemp(join(tmpdir(), "occ-console-configuration-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    configurationDriver = new FilesystemConfigurationDriver(root);
+  }
   let controller;
   const appOptions = {
     metrics: options.metrics,
@@ -150,10 +212,17 @@ export async function createConsoleAppFixture(t, options = {}) {
         discoverHarnessModels: options.discoverHarnessModels,
       }),
     configurationDriver:
-      options.configurationDriver ?? createTestConfigurationDriver({ id: "console-configuration" }),
+      configurationDriver ?? createTestConfigurationDriver({ id: "console-configuration" }),
+    ...(options.sandboxDriver === undefined ? {} : { sandboxDriver: options.sandboxDriver }),
     ...(secretDriver === undefined || secretDriver === null ? {} : { secretDriver }),
     ...(publicOrigin === undefined ? {} : { publicOrigin }),
+    ...(options.observabilityUrl === undefined
+      ? {}
+      : { observabilityUrl: options.observabilityUrl }),
     ...(options.nativeAdmin === undefined ? {} : { nativeAdmin: options.nativeAdmin }),
+    ...(options.agentRuntimeLogs === undefined
+      ? {}
+      : { agentRuntimeLogs: options.agentRuntimeLogs }),
     ...(options.nativeAdminGatewayApiKey === undefined
       ? {}
       : { nativeAdminGatewayApiKey: options.nativeAdminGatewayApiKey }),
@@ -161,9 +230,15 @@ export async function createConsoleAppFixture(t, options = {}) {
     createController(installation) {
       controller = new OpenClawController(installation, {
         state: platformState,
+        ...(options.now === undefined ? {} : { now: options.now }),
         recordOperations: options.recordOperations ?? false,
         backends,
         defaultPresets: options.defaultPresets ?? [],
+        bundledPresetVersions: options.bundledPresetVersions ?? [],
+        refreshBundledDefaultPresets: options.refreshBundledDefaultPresets === true,
+        ...(options.nativeWorkerSupport === undefined
+          ? {}
+          : { nativeWorkerSupport: options.nativeWorkerSupport }),
       });
       const modelBackends = backends.filter((backend) => backend.type === "chatgpt");
       if (modelBackends.length > 0) {
@@ -189,7 +264,11 @@ export async function createConsoleAppFixture(t, options = {}) {
     appOptions.backendSummaries = backendSummaries;
   }
   const app = createFastifyApp(appOptions);
-  await app.listen({ host: "127.0.0.1", port });
+  if (options.onSend) {
+    app.addHook("onSend", options.onSend);
+  }
+  await app.listen({ host: "127.0.0.1", port, reusePort: appPort.reusePort });
+  await appPort.release();
   const cleanupBeforeAppClose = [];
   let appClosed = false;
 
@@ -280,8 +359,13 @@ export async function createConsoleAppFixture(t, options = {}) {
         ingress.close((error) => (error ? reject(error) : resolve())),
       );
     });
-    ingress.listen(browserPort, "127.0.0.1");
+    ingress.listen({
+      port: browserPort,
+      host: "127.0.0.1",
+      reusePort: browserReservation.reusePort,
+    });
     await once(ingress, "listening");
+    await browserReservation.release();
     const spki = createHash("sha256")
       .update(new X509Certificate(cert).publicKey.export({ type: "spki", format: "der" }))
       .digest("base64");
@@ -339,10 +423,13 @@ export async function createConsoleAppFixture(t, options = {}) {
 
   async function request(method, path, { session = adminSession, headers = {}, body } = {}) {
     const result = await rawRequest(method, path, {
-      headers: session === null ? headers : authenticatedHeaders(session, headers),
+      headers:
+        session === null
+          ? headers
+          : authenticatedHeaders(session, { origin: new URL(authBaseURL).origin, ...headers }),
       body,
     });
-    const payload = parseJson(result);
+    const payload = result.response.status === 204 ? {} : parseJson(result);
     return {
       status: result.response.status,
       headers: result.response.headers,
@@ -406,6 +493,30 @@ export async function createConsoleAppFixture(t, options = {}) {
     return configuration.data;
   }
 
+  function grantAgentSecretOperate(agent, source) {
+    const roleId = `auth-${agent.id}`;
+    policy.identities.push({
+      id: agent.servicePrincipalId,
+      kind: "service_principal",
+      namespaceId: agent.namespaceId,
+      agentId: agent.id,
+    });
+    policy.roles.push({
+      id: roleId,
+      namespaceId: agent.namespaceId,
+      permissions: [{ action: "operate", resourceKind: "secret" }],
+    });
+    policy.bindings.push({
+      id: roleId,
+      namespaceId: agent.namespaceId,
+      subjectKind: "identity",
+      subjectId: agent.servicePrincipalId,
+      roleId,
+      resourceKind: "secret",
+      resourceId: source.id,
+    });
+  }
+
   async function createAgent(namespaceId, name, values = {}, options = {}) {
     const configuration = await createConfiguration(namespaceId, values, {
       secretBindings: options.secretBindings,
@@ -431,28 +542,7 @@ export async function createConsoleAppFixture(t, options = {}) {
     });
     assert.equal(agent.status, 201);
     if (harnessAuth?.method === "api_key") {
-      const servicePrincipalId = `service-agent-${agent.data.id}`;
-      const roleId = `auth-${agent.data.id}`;
-      policy.identities.push({
-        id: servicePrincipalId,
-        kind: "service_principal",
-        namespaceId,
-        agentId: agent.data.id,
-      });
-      policy.roles.push({
-        id: roleId,
-        namespaceId,
-        permissions: [{ action: "operate", resourceKind: "secret" }],
-      });
-      policy.bindings.push({
-        id: roleId,
-        namespaceId,
-        subjectKind: "identity",
-        subjectId: servicePrincipalId,
-        roleId,
-        resourceKind: "secret",
-        resourceId: harnessAuth.source.id,
-      });
+      grantAgentSecretOperate(agent.data, harnessAuth.source);
     }
     return agent.data;
   }
@@ -514,7 +604,10 @@ export async function createConsoleAppFixture(t, options = {}) {
     browserArgs,
     credentials,
     memoryDatabase,
+    provisionedAccounts,
     policy,
+    // The real Native IAM Driver, for tests that simulate an IAM outage at its boundary.
+    iamDriver,
     rawRequest,
     request,
     signIn,
@@ -523,6 +616,7 @@ export async function createConsoleAppFixture(t, options = {}) {
     createConfiguration,
     updateConfiguration,
     createAgent,
+    grantAgentSecretOperate,
     updateAgent,
     deployAgent,
     activateRevision,

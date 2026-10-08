@@ -20,6 +20,17 @@
   },
   "files": [
     {
+      "path": "tests/integration/observability-demo-chart.test.mjs",
+      "expectedTests": [
+        "demo Grafana keeps its disposable SQLite database off node disk",
+        "demo guide install can be rerun after a cold-cache wait timeout",
+        "demo Kubernetes identifiers remain strings for 407",
+        "demo Kubernetes identifiers remain strings for true",
+        "demo Kubernetes identifiers remain strings for null",
+        "demo Kubernetes identifiers remain strings for 1e3"
+      ]
+    },
+    {
       "path": "tests/integration/observability-demo-k3d.test.mjs",
       "expectedTests": ["demo Helm stack ingests fixture metrics and OTLP logs through Grafana"]
     }

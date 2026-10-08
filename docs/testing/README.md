@@ -5,6 +5,8 @@ These guides are for contributors verifying Enterprise changes. Run commands
 from the repository root. For installation and supported product settings, use
 the [deployment guide](../guides/deploy.md) and [settings reference](../reference/settings.md).
 
+For all four shipped installation/preset combinations, run the [credentialed QA matrix](qa-matrix.md).
+
 ## Run tests
 
 | Command                 | Tests selected                                                            |
@@ -48,6 +50,21 @@ workspace check or prepare fixtures. It preserves Node's failure, skip, todo,
 process isolation, and cancellation behavior. A valid file selection or a green
 filtered run does not prove that the intended cases ran; inspect the reported
 case and skip counts. Existing suite discovery and CI selection remain available.
+
+### Run the local installation lane
+
+The `dev-up-k3d` lane selects all four real local installation cases and fails
+on skips. Install Node.js 24 or newer, the repository-pinned pnpm, the Go
+version from `go.mod`, Docker, k3d, kubectl, and Helm. Then build the CLI as
+described in [Local Kubernetes installation](kubernetes.md#local-kubernetes-installation).
+The lane creates its own disposable clusters. Run it with a fresh results
+directory:
+
+```sh
+run_dir=$(mktemp -d)
+node scripts/ci/run-tests.mjs run dev-up-k3d \
+  --state "$run_dir/state.json" --results "$run_dir/results.json"
+```
 
 ## Integration tests
 
@@ -101,6 +118,13 @@ commit, nonsecret image digests/model, and which optional cases were enabled.
 Do not report a skipped model turn, database case, or cluster case as verified.
 Keep optional live Configuration cases and mutually exclusive Slack selection
 distinct from missing prerequisites.
+
+CI results artifacts also carry a per-file `measurements` array. A test adds one
+with `t.diagnostic("openclaw-ci-measurement <json>")`; the
+[reporter](../../scripts/ci/reporter.mjs) keeps only allowlisted shapes (today
+`kubelet-volume-refresh`, from the
+[volume refresh test](../../tests/integration/kubelet-volume-refresh-k3d.test.mjs))
+and drops other diagnostics.
 
 Tests normally clean up their own temporary processes, resources, and files, but
 some suites leave clusters, databases, Slack messages, or provider accounts for

@@ -59,8 +59,13 @@ drivers:
 ```
 
 The singular `backend` key is an array; omission or `[]` means none. IDs are
-unique strings of 1–200 characters without leading/trailing whitespace or ASCII
-control characters. `openai` is an operator-chosen ID. The bundled types are
+unique strings of 1–200 characters, counted as Unicode code points, with no
+leading or trailing whitespace and no control characters (C0, DEL or C1) or
+line (U+2028) or paragraph (U+2029) separators. An Agent's `backendId` follows
+the same rule, so any configured ChatGPT Backend ID can be selected. A GitHub
+Backend ID must also fit in 200 UTF-16 code units (for example, 100 characters
+outside the Basic Multilingual Plane), because repository bindings store it
+under that bound. `openai` is an operator-chosen ID. The bundled types are
 `chatgpt`, `github`, and `openshell`; each has its own closed configuration and
 required member Drivers. A ChatGPT workspace UUID identifies the upstream workspace, not a Namespace.
 
@@ -133,7 +138,8 @@ backend:
 Its closed `configuration` accepts:
 
 - `endpoint`: `host:port`, or an `http` or `https` origin without credentials,
-  path, query, or fragment.
+  path, query, or fragment. HTTP origins use port 80 when omitted; an explicit
+  `:80` also remains 80 in the gRPC target. HTTPS retains its default 443.
 - `serviceName`, `scheme`, and `port`: used when `endpoint` is omitted. A dotted
   name is used as-is; a bare name resolves in each tenant namespace. `port`
   defaults to `8080`, and `scheme` defaults to `https` only when
@@ -142,7 +148,9 @@ Its closed `configuration` accepts:
   an absolute path.
 - `requestTimeoutMs`: the per-call deadline, from 1000 to 30000 ms. The bound
   limits how late a timed-out credential registration can land.
-- `rootCertificatePath`: an absolute path to the gateway CA.
+- `rootCertificatePath`: an absolute path to the gateway CA. An `https`
+  `endpoint` at an IP address sends no TLS server name, so the gateway
+  certificate must carry that IP address.
 - `insecureTransport: network-policy`: required when the connection lacks TLS or
   bearer-token authentication, and rejected otherwise. It declares that
   NetworkPolicy restricts the gateway to the OCE API, worker, and OpenShell
@@ -210,8 +218,13 @@ Driver, workspace, and recorded issuance. A mismatch returns
 The worker repeats ownership checks after IAM reauthorization and before
 Compute effects. It reads only binding metadata, never external IDs or admin
 credentials. Mismatches prevent candidate activation; database read failures
-use normal retries. The account-owned token/workspace Secret is delivered only
+use normal retries. The account-owned token Secret is delivered only
 to its compatible dedicated Codex workload.
+
+The ChatGPT client cancels unused HTTP error bodies and responses declared
+larger than its 4 MiB allowance before reporting a sanitized failure. Cancelling
+releases occupied transport capacity without reading the discarded body. This cleanup adds
+no automatic retries or provider-effect guarantees.
 
 ## Startup identity and safe Backend changes
 
@@ -232,7 +245,7 @@ ownership and do not rewrite existing credentials.
 
 Unsupported state predating Backend composition requires explicit cleanup and recreation of the
 selected disposable state, as recorded in the
-[implementation specification](../../specs/17-provider-driver-abstraction/contract.md#migration-and-implementation-boundaries).
+[implementation specification](../../specs/plans/17-provider-driver-abstraction/contract.md#migration-and-implementation-boundaries).
 Ownership is never inferred or backfilled. Draft edits and API shutdown do not
 stop workloads; exact upstream cleanup still needs the original configuration.
 
@@ -251,8 +264,9 @@ backend:
 
 Enable it with the Installation Backend. The dedicated Secret mounts only in
 the API Pod at `/etc/openclaw/chatgpt/admin-key`; `apiKeyPath` must match.
-`providerCidr` adds one IPv4 `/32` destination on TCP/443 to the API Pod's
-NetworkPolicy. It configures no DNS, routing, or application proxy. The bundled
+`providerCidr` is required when `enabled` is true: the chart refuses to render
+without exactly one IPv4 `/32`. It adds that destination on TCP/443 to the API
+Pod's NetworkPolicy. It configures no DNS, routing, or application proxy. The bundled
 client sends HTTPS directly to `api.chatgpt.com`; the upstream URL is fixed,
 and the chart configures no HTTP CONNECT or `HTTPS_PROXY` transport. Entering
 an ordinary forward proxy's IP will not cause the client to use it.

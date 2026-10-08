@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CodexPluginDriver } from "../../apps/controller/src/drivers/plugin/index.ts";
+import {
+  CodexPluginDriver,
+  OCCPluginDriver,
+} from "../../apps/controller/src/drivers/plugin/index.ts";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import {
   apiRequests,
@@ -16,7 +19,8 @@ import { createRuntimeAuthFixture } from "./console-agents-runtime-auth-fixture.
 test("Agent plugin approver selectors save inheritance and workspace-qualified users", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
-  const pluginDriver = new CodexPluginDriver();
+  // Plugin and tool overrides need a Driver that advertises them; Codex offers only the default.
+  const pluginDriver = new OCCPluginDriver();
   fixture.controller.registerDriver(pluginDriver);
   fixture.controller.selectDriver("plugin", pluginDriver.id);
   const namespace = await fixture.createNamespace("Slack directory picker", { ready: true });
@@ -33,17 +37,17 @@ test("Agent plugin approver selectors save inheritance and workspace-qualified u
   const agent = await fixture.createAgent(
     namespace.id,
     "Slack Directory Agent",
-    nativeValues("slack-directory", { harnessId: "codex", channels: { slack } }),
+    nativeValues("slack-directory", { channels: { slack } }),
     {
-      executionMode: "dedicated",
+      executionMode: "embedded",
       secretBindings: {
         SLACK_APP_TOKEN: { source: appSecret.ref, delivery: { type: "env" } },
         SLACK_BOT_TOKEN: { source: botSecret.ref, delivery: { type: "env" } },
       },
     },
   );
-  const pluginId = "codex-plugin:calendar@openai-curated-remote";
-  const toolId = "app_calendar/create_event";
+  const pluginId = "occ-plugin:diffs";
+  const toolId = "diffs";
   await fixture.updateAgent(namespace.id, agent.id, {
     configurationId: agent.configurationId,
     plugins: { [pluginId]: { enabled: true, tools: { [toolId]: { enabled: true } } } },
@@ -51,12 +55,24 @@ test("Agent plugin approver selectors save inheritance and workspace-qualified u
   const { page } = await newPage(t, fixture);
   const requests = apiRequests(page, fixture.origin);
   const directoryBodies = [];
+  let directoryAvailable = true;
   // The browser test owns Console selection and saved API state; only provider directory data is simulated.
   await page.route(
     `${fixture.origin}/namespaces/${namespace.id}/channel-directory/lookup`,
     async (route) => {
       const body = route.request().postDataJSON();
       directoryBodies.push(body);
+      if (!directoryAvailable) {
+        await route.fulfill({
+          status: 501,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: { code: "NOT_IMPLEMENTED", message: "Directory unavailable" },
+            meta: { requestId: "req_test_slack_directory_unavailable" },
+          }),
+        });
+        return;
+      }
       const candidates =
         body.kind === "users"
           ? [{ id: "UTEST123", name: "alex", displayName: "Alex" }]
@@ -83,7 +99,7 @@ test("Agent plugin approver selectors save inheritance and workspace-qualified u
   );
 
   const pluginsUrl = detailUrl(fixture, namespace.id, agent.id, "draft", "plugins");
-  await login(page, fixture, pluginsUrl.pathname + pluginsUrl.search);
+  await login(page, fixture, pluginsUrl);
   await page.getByLabel("Default plugin approvers mode").selectOption("chosen");
   const people = page.getByRole("combobox", {
     name: "Default plugin approvers people",
@@ -182,11 +198,16 @@ test("Agent plugin approver selectors save inheritance and workspace-qualified u
   await picker
     .getByText("This bot belongs to workspace TTEST123. Enter a user in that workspace.")
     .waitFor();
-  await people.fill("team:TTEST123:user:UTEST999");
+  directoryAvailable = false;
+  await people.fill("UTEST999");
+  await picker.getByText("Slack directory lookup is unavailable.").waitFor();
   await people.press("Enter");
   await picker
-    .getByRole("button", { name: "Remove team:TTEST123:user:UTEST999", exact: true })
-    .click();
+    .locator('.slack-directory-chip[data-value="UTEST999"]')
+    .getByText("UTEST999")
+    .waitFor();
+  await picker.getByRole("button", { name: "Remove UTEST999", exact: true }).click();
+  directoryAvailable = true;
   await people.fill("Alex");
   await picker.getByRole("option", { name: /Alex.*UTEST123/ }).click();
   assert.equal(
@@ -200,12 +221,14 @@ test("Agent plugin approver selectors save inheritance and workspace-qualified u
   const toolRow = pluginDialog.locator(`details.plugin-tool-row[data-tool="${toolId}"]`);
   await toolRow.locator("summary").click();
   await toolRow.getByLabel(`${toolId} tool approvers mode`).selectOption("chosen");
-  await toolRow
-    .getByRole("combobox", { name: `${toolId} tool approvers people`, exact: true })
-    .fill("team:TTEST123:user:UTEST123");
-  await toolRow
-    .getByRole("combobox", { name: `${toolId} tool approvers people`, exact: true })
-    .press("Enter");
+  const toolPeople = toolRow.getByRole("combobox", {
+    name: `${toolId} tool approvers people`,
+    exact: true,
+  });
+  directoryAvailable = false;
+  await toolPeople.fill("UTEST123");
+  await toolRow.getByText("Slack directory lookup is unavailable.").waitFor();
+  await toolPeople.press("Enter");
   await pluginDialog.getByRole("button", { name: "Done", exact: true }).click();
   const savedApprovers = page.waitForResponse(
     (response) =>
@@ -228,14 +251,17 @@ test("Agent plugin approver selectors save inheritance and workspace-qualified u
   let savedAgent = (await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`))
     .data;
   assert.deepEqual(savedAgent.plugins[pluginId].approvers, []);
-  assert.deepEqual(savedAgent.plugins[pluginId].tools[toolId].approvers, approvers);
+  assert.deepEqual(savedAgent.plugins[pluginId].tools[toolId].approvers, [
+    { channel: "slack", id: "UTEST123" },
+  ]);
+  directoryAvailable = true;
   assert.deepEqual(directoryBodies[0], {
     secretId: botSecret.id,
     kind: "users",
     agentId: agent.id,
   });
 
-  await page.goto(`${fixture.origin}${pluginsUrl.pathname}${pluginsUrl.search}`);
+  await page.goto(pluginsUrl.href);
   await page
     .locator('.slack-directory-chip[data-value="team:TTEST123:user:UTEST123"]')
     .getByText("Alex")
@@ -266,7 +292,7 @@ test("Agent plugin approver selectors save inheritance and workspace-qualified u
   assert.deepEqual(savedAgent.plugins[pluginId].approvers, []);
   assert.deepEqual(savedAgent.plugins[pluginId].tools[toolId], { enabled: true });
 
-  await page.goto(`${fixture.origin}${pluginsUrl.pathname}${pluginsUrl.search}`);
+  await page.goto(pluginsUrl.href);
   await page.getByLabel("Default plugin approvers mode").selectOption("inherit");
   await page.getByRole("button", { name: "Channels", exact: true }).click();
   await page.getByRole("button", { name: "Plugins", exact: true }).click();
@@ -301,7 +327,7 @@ test("Unsaved default plugin approvers block deployment after leaving Plugins", 
   );
   const { page } = await newPage(t, fixture);
   const url = detailUrl(fixture, namespace.id, agent.id, "draft", "plugins");
-  await login(page, fixture, url.pathname + url.search);
+  await login(page, fixture, url);
   const deploy = page.getByRole("button", { name: "Deploy new version" });
   assert.equal(await deploy.isDisabled(), false);
 
@@ -320,4 +346,37 @@ test("Unsaved default plugin approvers block deployment after leaving Plugins", 
     .getByText("Save or discard plugin changes before deploying.", { exact: true })
     .waitFor();
   assert.equal(await deploy.isDisabled(), true);
+});
+
+test("Codex Agents offer only default plugin approvers", async (t) => {
+  const { fixture, namespace } = await createRuntimeAuthFixture(t, "Codex plugin approvers");
+  const pluginDriver = new CodexPluginDriver();
+  fixture.controller.registerDriver(pluginDriver);
+  fixture.controller.selectDriver("plugin", pluginDriver.id);
+  const agent = await fixture.createAgent(
+    namespace.id,
+    "Codex Approver Agent",
+    nativeValues("codex-approvers"),
+    { executionMode: "embedded", harnessAuth: { method: "runtime" } },
+  );
+  const pluginId = "codex-plugin:calendar@openai-curated-remote";
+  const toolId = "app_calendar/create_event";
+  await fixture.updateAgent(namespace.id, agent.id, {
+    configurationId: agent.configurationId,
+    plugins: { [pluginId]: { enabled: true, tools: { [toolId]: { enabled: true } } } },
+  });
+  const { page } = await newPage(t, fixture);
+  const url = detailUrl(fixture, namespace.id, agent.id, "draft", "plugins");
+  await login(page, fixture, url);
+  // Codex approval requests carry no plugin or tool identity, so the API refuses those
+  // overrides and the Console must not offer them. The Agent default stays available.
+  await page.getByLabel("Default plugin approvers mode").waitFor();
+  await page.getByRole("button", { name: "Configure plugins", exact: true }).click();
+  const pluginDialog = page.getByRole("dialog", { name: "Configure plugins", exact: true });
+  await pluginDialog.getByRole("button", { name: pluginId, exact: true }).click();
+  const toolRow = pluginDialog.locator(`details.plugin-tool-row[data-tool="${toolId}"]`);
+  await toolRow.locator("summary").click();
+  await toolRow.getByLabel(`${toolId} require approval for`).waitFor();
+  assert.equal(await pluginDialog.getByLabel(`${pluginId} plugin approvers mode`).count(), 0);
+  assert.equal(await toolRow.getByLabel(`${toolId} tool approvers mode`).count(), 0);
 });

@@ -1,7 +1,7 @@
 # Local Kubernetes and development operations
 
-Build images for a disposable Kubernetes cluster, stop the development stack
-without deleting its data, or check local Agent access. Run
+Build images for a disposable Kubernetes cluster, stop a Docker Compute
+development stack without deleting its data, or check local Agent access. Run
 commands from the repository root. If you are installing the platform for the
 first time, start with [Local Setup](../quickstart.md). For Namespace and Agent
 setup on an existing installation, use the [production deployment sequence](../deploy.md#production).
@@ -20,7 +20,7 @@ Create a disposable single-server cluster without changing your kubeconfig:
 export CLUSTER="occ-images-$(date +%s)"
 export OCC_EXAMPLE_DIRECTORY="$(mktemp -d)"
 k3d cluster create "$CLUSTER" --image +v1.35 --servers 1 --agents 0 \
-  --api-port 127.0.0.1:0 \
+  --api-port 127.0.0.1:random \
   --kubeconfig-update-default=false --kubeconfig-switch-context=false
 k3d kubeconfig get "$CLUSTER" > "$OCC_EXAMPLE_DIRECTORY/kubeconfig"
 chmod 600 "$OCC_EXAMPLE_DIRECTORY/kubeconfig"
@@ -81,11 +81,28 @@ For an already installed, persistent Helm release on k3d, follow
 [local k3d image upgrades](local-k3d-image-upgrade.md) to preserve its state.
 The disposable cluster cleanup above is not an upgrade procedure.
 
+For missing DNS, denied connections, or unready Kubernetes Agents after a
+checkout update, inspect the [ordinary network profile](../../reference/drivers/kubernetes-compute/networking-and-isolation.md#explicit-network-profiles)
+on the affected Pod and its workload template, plus all matching NetworkPolicies.
+The upgrade restarts nothing: running Pods keep their templates and grants until
+Compute next prepares a revision of their Agent. To move an Agent onto the
+profile, rebuild the controller and deploy a new revision. Preparing it
+re-renders that Agent's grants with the profile, and its new templates carry the
+label. A Gateway from an earlier template, embedded or dedicated, keeps serving
+until activation replaces it. Re-preparing an active revision, for
+example during repository-credential maintenance, rolls its Pods once onto
+profiled templates. Namespace-wide `allow-dns`,
+`allow-gateway-ingress` and `allow-node-gateway` are narrowed only in namespaces
+provisioned after the upgrade; an earlier namespace keeps its previous selectors
+until it is recreated. OpenShell Sandboxes need a redeployed revision.
+Restarting a Pod from an old template retains the missing label; assigning the
+profile to arbitrary Pods grants access and is not a repair.
+
 ## Stop development safely
 
-Run the exact command under `Cleanup` in the `dev-up` output. For Podman, it
-uses `occ dev down` with `compose.podman.yaml` and the Compose options passed at
-startup. Keep any `CONTAINER_CONNECTION` or `CONTAINER_HOST` selection used for
+For a Docker Compute stack, run the exact command under `Cleanup` in the
+`dev-up` output. For Podman, it uses `occ dev down` with `compose.podman.yaml`
+and the Compose options passed at startup. Keep any `CONTAINER_CONNECTION` or `CONTAINER_HOST` selection used for
 startup, including macOS machine connections. See the
 [cleanup flow](../../flows/docker-compose-development.md#3-clean-up-docker-or-podman-compose)
 for how the host connection and worker socket are handled.
@@ -93,6 +110,12 @@ for how the host connection and worker socket are handled.
 This preserves PostgreSQL, Configuration, and bootstrap-key volumes. Use
 `--volumes` only to delete the local Installation. First account for any Agent
 containers and tenant networks owned by Docker Compute.
+
+A Kubernetes profile's `Cleanup` command instead deletes its k3d cluster,
+database, Agents, and volumes; see [stop and clean up](local-kubernetes-development.md#stop-and-clean-up).
+To keep that data, run `k3d cluster stop` and later `k3d cluster start` with the
+cluster name instead: the `Kubernetes context` from the `dev-up` output without
+its `k3d-` prefix ([storage across restarts](local-kubernetes-development.md#preserve-storage-across-restarts)).
 
 ## Development end-to-end TUI
 
@@ -103,7 +126,7 @@ Compose; exporting `OPENAI_API_KEY` to the worker does not change this.
 
 For a local authenticated Agent and TUI trial, build the Kubernetes images above,
 then follow [production Agent deployment](production-agents.md) and
-[production TUI verification](production-agents.md#attach-with-the-openclaw-tui) against that disposable cluster.
+[production TUI verification](production-tui.md) against that disposable cluster.
 Complete the same Secret binding, exact IAM grants, and tenant RoleBindings as
 for a production installation. Both the TUI and the
 [HTTP model response check](../operate/model-verification.md) use an optional

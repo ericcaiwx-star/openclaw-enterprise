@@ -1,27 +1,29 @@
 ---
 created: 2026-09-21
-updated: 2026-09-27
-last_updated_session: codex/01a0e437-0dda-7ca2-9704-2c37c71f8d11
+updated: 2026-10-05
+last_updated_session: codex/01a0cf72-6985-7712-ba92-d8cc32470f24
 ---
 
 # Container publication flow
 
 ## Overview
 
-Manual Enterprise container publication builds controller and runtime OCI archives
-for Linux amd64 and arm64, checks both variants, and transfers the tested bytes
-to private GHCR packages. Each package receives one multi-platform index digest.
-This flow ends with verified remote digests and a publication receipt; it does
-not deploy workloads or change package visibility.
+Manual Enterprise publication builds controller and runtime OCI archives for
+Linux amd64 and arm64, checks both variants, and transfers the tested bytes to
+public GHCR packages. Each package receives one multi-platform index digest.
+With `publish_chart: true`, a separate protected job tags those digests with the
+OCE version and publishes a Helm chart. Image-only publication is the default.
 
 ## Entry Points
 
 - `.github/workflows/container-publish.yml:jobs.validate`: manual dispatch on
   `main` with its exact source SHA, successful main-push CI run ID, publish flag,
-  and optional mutable image tag.
+  optional mutable image tag, and opt-in chart flag.
 - `scripts/ci/container-release.mjs:main`: validation, smoke, seal, and publication
   commands called by the workflow.
-- Publication requires pre-existing private packages. The manual dispatch
+- `scripts/ci/chart-release.mjs:publish`: version-tag and chart publication after
+  the image receipt exists.
+- Publication requires pre-existing public packages. The manual dispatch
   authorizes publication without a separate environment approval. GitHub grants
   manual dispatch to repository writers, including maintainers.
 
@@ -37,14 +39,16 @@ graph TD
   H -->|either fails| X["Stop before publication"]
   H -->|both pass| F["Seal and upload each archive"]
   F -->|publish false| G["Finish with retained artifacts"]
-  F -->|publish true| I["Recheck source, CI, seals and private packages"]
+  F -->|publish true| I["Recheck source, CI, seals and public packages"]
   I --> J["Copy and verify both immutable source tags"]
   J --> K["Copy and verify selected mutable aliases"]
-  K --> L["Recheck digests and write receipt"]
+  K --> L["Recheck digests and write image receipt"]
+  L -->|publish_chart false| O["Finish image publication"]
+  L -->|publish_chart true| M["Separate job tags image digests and pushes chart"]
+  M --> N["Pull chart, verify bytes and write release receipt"]
 ```
 
-The workflow implements these gates; source review alone does not prove that a
-particular hosted build or registry transfer succeeded.
+Source review does not prove a hosted build or registry transfer succeeded.
 
 ## Execution Trace
 
@@ -53,9 +57,11 @@ particular hosted build or registry transfer succeeded.
 `scripts/ci/container-release.mjs:validate` verifies the trusted workflow, exact
 main source and successful CI identity, approved Node base digest, and the optional
 image tag. An empty tag selects `latest`; invalid or reserved tags fail before
-preparation. Publication also checks the main-only environment branch policy.
-No-push preparation has no package write permission or protected-environment
-credentials.
+preparation. No-push preparation accepts private or public source only when
+`PUBLISH` is the exact string `"false"`. Publication and recovery require the
+public Enterprise repository and public packages. Publication also checks the
+main-only environment branch policy. No-push preparation has no package write
+permission or protected-environment credentials.
 
 `.github/workflows/container-publish.yml:jobs.prepare` calls the reusable
 `.github/workflows/container-check.yml:jobs.prepare` image/architecture matrix. Controller and runtime each build on native AMD64 and ARM64 Linux runners.
@@ -65,15 +71,16 @@ The defaults are `blacksmith-16vcpu-ubuntu-2404` and
 Each job checks its architecture and logs CPU, memory, and available disk.
 Jobs require at least four CPUs and 12 GiB RAM; the reported runner label alone
 is not evidence of allocated capacity.
-The standard AMD64 override retains guarded toolchain cleanup: required roots
-are checked, unsafe optional paths are skipped, and 36 GiB free is required.
+`scripts/ci/setup-tools.sh` installs checksum-pinned kubectl, k3d, Helm, and yq
+for both native Linux architectures before runtime smoke tests.
+The standard AMD64 override requires 36 GiB free and, only below that, runs
+guarded toolchain cleanup that checks required roots and skips unsafe paths.
 Larger runners do not depend on deleting preinstalled SDKs.
 
 Each Buildx builder runs at most two steps concurrently. The default Blacksmith
 runners retain BuildKit layers on a sticky disk scoped by image and architecture,
 so builds do not export the large intermediate cache over the network. A custom
 non-Blacksmith runner uses the GitHub Actions cache with the same scope.
-The main-only publication gate and read-only build jobs remain unchanged.
 Maintainers can also dispatch `container-check.yml` on a branch for native image
 verification; manual `CI` dispatches call the same workflow so branches can be
 verified before the workflow first lands on main. It has no publication job or
@@ -84,15 +91,21 @@ Before Buildx runs, the workflow derives `SOURCE_DATE_EPOCH` from the exact
 source commit. BuildKit rewrites image and filesystem timestamps to that epoch,
 so wall-clock time does not change the image manifests on a cold-cache rebuild.
 
-`deploy/runtime/Dockerfile:openclaw-source` verifies the pinned source archive,
-applies the Codex 0.156.0 dependency/lockfile patch, and applies the temporary
-OpenClaw read-only-paths compatibility patch. The build verifies the latter's
-hash and records it in runtime provenance. The OpenClaw bridge forwards the bound
+`deploy/runtime/Dockerfile:openclaw-source` verifies the pinned OpenClaw main source archive,
+uses its stock Codex 0.160.0 dependency/lockfile selection, and applies the temporary
+OpenClaw read-only-paths compatibility patch and the `connect --ephemeral`
+expired-setup patch. The build verifies both patch hashes and records them in
+runtime provenance. The OpenClaw bridge forwards the bound
 Agent's stock network settings without modifying the Codex binary. Both installs use
 frozen lockfiles and upstream's selected-plugin manifests, retaining required
 bundled plugins plus Codex and Slack. The standalone Codex command links to the
 plugin's installation. Build tools remain in full Bookworm stages; final images
 use a separately pinned Node 24 Bookworm slim base.
+
+`deploy/runtime/Dockerfile:runtime` disables npm's background update notifier in
+the final image environment. Harness child processes inherit that default, so
+local npm scripts do not trigger a separate version-check network request.
+See the [runtime defaults](../../deploy/runtime/README.md) for scope.
 
 `scripts/build-runtime-assets.mjs` removes development/QA source, extension tests,
 and documentation media, while retaining runtime templates, skills, and help.
@@ -143,9 +156,8 @@ run attempt, CI identity, and approved base. Both prepared artifacts must exist
 before `.github/workflows/container-publish.yml:jobs.publish` can start. The
 publish job runs only when the operator selected `publish: true`.
 
-No-push runs end with artifacts. Publishing runs proceed directly to automated
-validation. Archive retention and package access requirements are owned
-by the [operator instructions](../../.github/containers.md).
+No-push runs end with artifacts. See [operator instructions](../../.github/containers.md)
+for retention and package access.
 
 ### 4. Publish and hand off immutable references
 
@@ -160,8 +172,8 @@ The custom alias replaces `latest` for that dispatch; recovery does not move an
 alias. The two aliases are updated separately, so a failed run can leave them on
 different digests. The receipt is written only after both verify.
 
-Package metadata must report the expected name and private visibility. Reported
-repository linkage must match the private Enterprise repository. Omitted linkage
+Package metadata must report the expected name and public visibility. Reported
+repository linkage must match the public Enterprise repository. Omitted linkage
 is accepted without review-history lookups; package setup owns that connection.
 
 Each remote index digest must match before the receipt is written. Deployment
@@ -169,6 +181,32 @@ uses that index digest, letting the container runtime select its architecture.
 A partial failure leaves existing published bytes intact. Recovery consumes the
 same retained multi-platform archives and original producer identity; it does
 not rebuild them. Old amd64-only seals cannot satisfy this platform contract.
+
+The optional `jobs.publish-chart` downloads this run/attempt's image receipt only
+after `jobs.publish` succeeds. `scripts/ci/chart-release.mjs` requires
+both entries to match the current source, producer run, CI run, package names,
+and immutable digests. Root `package.json`, the chart version, and appVersion
+must agree before a version tag is written. The staged chart carries the source
+SHA and both digest references in annotations; its default controller image is
+the verified controller digest. Operator values can override that default.
+
+Both jobs share the protected environment. Workflow-level concurrency retains
+the publication lock across preparation and both writes; jobs never reacquire it.
+The chart publisher checks image version tags and any existing chart before writing. Existing tags must resolve to the receipt's digests;
+an existing chart version must have identical packaged files. It rechecks the trusted
+source, CI, environment, and public chart package before each write. After
+`helm push`, it pulls the chart, compares its packaged files and new-push archive bytes, inspects the remote
+manifest digest, and writes a separate `chart-publication.json`. A partial
+failure requires a new full dispatch with identical source; chart-only reruns
+lack the new attempt's image receipt. Chart failure leaves image success intact
+but fails the combined run. `jobs.summary` reports both outcomes.
+The receipt binds the chart manifest digest observed after the pull. This
+assumes the protected publication workflows and trusted package administrators
+are the only package writers; their workflow concurrency group does not exclude
+independent GHCR writers. A tag change between the pull and digest lookup could
+make the receipt refer to a different manifest. The operator's
+[single-writer requirement](../../.github/chart-publication.md#choose-one-release-version)
+owns package-write access and coordination.
 
 ## Debugging and Verification
 
@@ -192,12 +230,31 @@ not rebuild them. Old amd64-only seals cannot satisfy this platform contract.
 ## Related docs
 
 - [Publication and recovery instructions](../../.github/containers.md)
+- [Chart publication and pull](../../.github/chart-publication.md)
 - [Package bootstrap flow](container-package-bootstrap.md)
 - [Image startup checks](../testing/images.md)
 
 ## Manual Notes
 
 ## Changelog
+
+- 2026-10-05 12:10: Update the OpenClaw pin, workspace templates, and Codex sandbox qualification to 0.160.0. (codex/01a0cf72-6985-7712-ba92-d8cc32470f24 - dd344a97)
+
+- 2026-10-03 16:19: Refresh the OpenClaw main pin to `6f91eda9c72` (openclaw/openclaw#162156), its archive checksum, the rebased read-only-paths bridge patch checksum, and the matching workspace-template version; bridge behavior is unchanged. (authoring-run/264cfb8c-8627-40cb-8ac4-0b67ef3134dc - 8193ad3cadec560e3f97401fb999e672b1517aec)
+
+- 2026-09-30 11:18: Change publication and recovery policy to public source with public GHCR packages; no-push preparation remains allowed only with literal `PUBLISH=false`. (authoring-run/ccc78f8c-ca87-4c18-bf6e-f06120699584 - 76e9de599a1c5b1319af4f9003f86ecbf53aa9ec)
+
+- 2026-09-29 10:10: Make chart publication opt-in with separate image/chart jobs and outcomes. (01a0eda8-1144-78e3-a1f7-82e8562e5125 - 2d251975fba5b05bd83e96f95ee89c2c67635d50)
+
+- 2026-09-29 08:03: Refresh the OpenClaw main pin, archive and bridge-patch checksums, and matching workspace-template version; bridge behavior is unchanged. (authoring-run/5e3ebbae-97b8-4709-8c03-6a032657e102 - 8f3fc12cca3cb2e2a387aefb2be4d1c1eb2b39b6)
+
+- 2026-09-29 12:00: Apply a verified OpenClaw bridge patch so a dedicated native worker reconnects with its saved device token after its replayed setup code expires; record its hash in runtime provenance. (fix/native-worker-restart-expired-setup)
+
+- 2026-09-29 10:00: Update the runtime source to OpenClaw `01d7131999ca4805242ed8b0d8037f4544a9d7b0` (release/2026.9.7 head) with its verified archive checksum; the read-only-paths bridge patch applies unchanged. (chore/openclaw-pin-01d7131999)
+
+- 2026-09-28 14:51: Use upstream Codex 0.158.0 dependencies and remove the old version override. (codex/01a0cf72-6985-7712-ba92-d8cc32470f24 - 6c56149f)
+
+- 2026-09-28 03:13: Disable npm background update checks in the runtime image. (codex/01a0cf72-6985-7712-ba92-d8cc32470f24 - 587b3096b2b5de9c5575a13b36133be99a93ebe2)
 
 - 2026-09-27 20:26: Build the selected upstream commit with a verified temporary read-only-paths compatibility patch and record its hash. (codex/01a0e437-0dda-7ca2-9704-2c37c71f8d11 - 5d906bf9ad82bca1ec4f05d5958250607e185c6d)
 

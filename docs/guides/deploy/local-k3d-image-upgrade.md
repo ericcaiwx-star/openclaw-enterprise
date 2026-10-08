@@ -6,7 +6,9 @@ Namespaces, Agents, revision history, Secrets, and Agent workspace and gateway
 PersistentVolumeClaims (PVCs). Take verified backups first: retaining a volume is
 not a backup, and migrations or runtime changes can make rollback unsafe.
 Complete the [upgrade migration checklist](upgrade-checklist.md) before using
-this procedure.
+this procedure. Its [legacy RWX prerequisite](upgrade-checklist.md#remove-legacy-rwx-workspaces)
+is an exception: explicitly discarded Agents lose their workspace and Gateway
+state and must be recreated if needed. Retention checks apply to the remaining Agents.
 
 This path requires the production Helm chart, Kubernetes Compute, and a trusted
 HTTPS OCC endpoint. The [production image upgrade](production-upgrade.md) owns
@@ -38,10 +40,26 @@ upgrade or preserve a demo. See the [demo lifecycle](../../testing/kubernetes.md
   Do not replace the live Installation ID with another ID. Follow
   [binding the Installation](production-upgrade.md#bind-the-installation-once)
   if its Secret lacks the required annotation.
+- Run the [split-layout check](../../reference/drivers/kubernetes-compute.md#existing-split-layout-installations).
+  If it reports split-layout tenants, do not upgrade: keep the existing release.
+  The script's startup preflight also refuses split-layout tenants and stops
+  before it scales the API and worker to zero.
 - Meet the [upgrade permissions and concurrency requirements](production-upgrade.md#prepare-the-release).
   For runtime upgrades, review saved drafts and stop other deployments and edits:
   new revisions use the current drafts. Schedule an interruption window and
   capacity for old and new workloads to overlap.
+- For an installation with repository credentials enabled, run the upgrade from
+  a native Linux operator environment that uses UID 1000 and the same architecture
+  as every eligible control-plane node. The compatibility probe starts the staged
+  controller and broker images through that environment's Docker daemon. A macOS
+  shell cannot run this repository-enabled path directly; use a reviewed Linux
+  operator host or container with protected access to the existing cluster and
+  Docker daemon. Do not bypass the probe. Repository-disabled installations do
+  not have this host requirement.
+- If the bundled Collector is enabled, including the [observability demo](../observability/demo.md)'s
+  `occ-demo-collector-config`, [refresh the Secret named by `logging.collector.configSecretName`](../observability.md#refresh-the-collector-configuration-on-upgrade)
+  from the `RELEASE_SOURCE_SHA` checkout and restart the Collector. Helm does not
+  update it, and the script stops while it differs from that checkout.
 
 From a secure operator shell, replace placeholders with the existing paths and
 names. The evidence parent must exist; the final directory must be new.
@@ -95,6 +113,51 @@ before and after the change; that operation requires the runtime upgrade permiss
 Keep inventories private. Check data and backups with the database and storage
 owners; object names alone do not prove retention.
 
+### Apply Installation changes
+
+This procedure keeps the existing Installation and refuses every Installation
+change except the Plugin Driver selection. A release that changes launcher or
+profile Installation values, such as the Gateway and Harness memory sizes, does
+not change an existing installation. Diff `internal/occdev/kubernetes.go`,
+`scripts/render-installation-profile.mjs` and
+`deploy/examples/production/installation.yaml` between the deployed and candidate
+source. Apply the changes you adopt before or after the upgrade as in
+[apply other Installation changes](production-upgrade.md#apply-other-installation-changes),
+with this page's `INSTALLATION`, `VALUES`, kubeconfig, context, release and
+namespace, including for an installation created by `dev-up`. Do not apply with
+the launcher state's `helm-values.json` after this page has upgraded the
+installation: it still names the bring-up images and lacks the upgraded values,
+such as the selected images and checksum, so Helm would roll the controller back. Gateway and Harness resources apply when
+an Agent is next deployed.
+
+It also never adds fields that `scripts/dev-up` writes only at bring-up. An installation created by `dev-up`
+before `network.pluginStatusProxySourceCidrs` existed still lacks it after an
+upgrade: plugin status and diagnostics stay unavailable, and each dedicated Codex
+first deploy starts its Gateway twice. Check the live Installation:
+
+```bash
+yq -er '.drivers.compute.configuration.network.pluginStatusProxySourceCidrs' "$INSTALLATION"
+```
+
+If it is missing, find the address the API server proxies from: the k3d server
+node's `cni0` bridge. Use the node's Pod CIDR plus 2 (`10.42.0.2` for
+`10.42.0.0/24`), and `podman exec` for a Podman-backed cluster:
+
+```bash
+export K3D_SERVER='<existing-k3d-server-0-container>'
+kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" \
+  get node "$K3D_SERVER" -o jsonpath='{.spec.podCIDR}{"\n"}'
+docker exec "$K3D_SERVER" ip route get 10.42.0.2
+```
+
+The route must name `dev cni0`; another device means no Pod runs on the node
+yet. Add its `src` address as a single `/32` entry, for example `10.42.0.1/32`,
+under `drivers.compute.configuration.network.pluginStatusProxySourceCidrs` in
+`INSTALLATION` and apply it as above. That leaves `INSTALLATION` and `VALUES`
+equal to the live state, so the script accepts them. Agents deployed afterward
+get the API-proxy rule. Recreating with `occ dev down` and `scripts/dev-up` also adds the
+field, but discards the database, Agents, and volumes.
+
 ## Select and make the published images available
 
 In GitHub Actions, inspect **Enterprise Containers** runs on `main` in newest
@@ -112,36 +175,61 @@ Use one verified source SHA and each full `destination@digest`; do not use
 export RELEASE_SOURCE_SHA='<full-40-character-source-commit>'
 export CONTROLLER_IMAGE='ghcr.io/openclaw/<controller-package>@sha256:<64-hex-digest>'
 export RUNTIME_IMAGE='ghcr.io/openclaw/<runtime-package>@sha256:<64-hex-digest>'
+export REPOSITORY_ENABLED="$(yq -er '.repositoryCredentials.enabled // false' "$VALUES")"
+BROKER_ARGS=()
+RUNTIME_REPOSITORY_ARGS=()
+if [ "$REPOSITORY_ENABLED" = true ]; then
+  # Select the reviewed broker artifact compatible with RELEASE_SOURCE_SHA.
+  export BROKER_IMAGE='<registry>/repository-credentials@sha256:<64-hex-digest>'
+  export CURRENT_CONTROLLER_IMAGE="$(yq -er '.images.controller' "$VALUES")"
+  BROKER_ARGS=(--broker-image "$BROKER_IMAGE")
+  RUNTIME_REPOSITORY_ARGS=(
+    --controller-image "$CURRENT_CONTROLLER_IMAGE"
+    --broker-image "$BROKER_IMAGE"
+  )
+fi
 ```
 
-Authenticate a local registry client with an authorized GitHub credential; the
-[GHCR instructions](production-installation.md#use-published-images) describe
-the required package access. For example, `skopeo login ghcr.io` prompts for
-credentials. Verify the registry's raw index bytes for each receipt digest:
+The Enterprise Containers receipt covers the controller and runtime images. A
+repository-enabled release also needs separate provenance and review evidence for
+`BROKER_IMAGE`; do not infer it from the runtime digest. The runtime-only command
+uses the live controller digest because restarting the worker also restarts its
+broker. A controller or combined release uses the selected candidate controller.
+
+Public GHCR controller and runtime pulls do not require a registry login. If
+`BROKER_IMAGE` points at a private broker package, or if you selected a private
+mirror instead of public GHCR, authenticate the local registry client for that
+registry before checking digests. Verify the registry's raw index bytes for each
+receipt digest:
 
 ```bash
-for image in "$CONTROLLER_IMAGE" "$RUNTIME_IMAGE"; do
+IMAGES=("$CONTROLLER_IMAGE" "$RUNTIME_IMAGE")
+[ "$REPOSITORY_ENABLED" = false ] || IMAGES+=("$BROKER_IMAGE")
+for image in "${IMAGES[@]}"; do
   expected="${image##*@sha256:}"
   actual="$(skopeo inspect --raw "docker://$image" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
   [ "$actual" = "$expected" ] || { echo "Registry digest mismatch: $image" >&2; exit 1; }
 done
 ```
 
-Configure approved private GHCR pull credentials on **every existing k3d node**
-that may run OCC initialization, API, worker, gateway, or Agent Pods. Host
-`docker login` alone does not authenticate those nodes. Use the existing node
-credential mechanism or [K3s private registry configuration](https://docs.k3s.io/installation/private-registry);
+Public GHCR controller and runtime pulls need no node pull credentials. Configure
+approved pull credentials on **every existing k3d node** only for a private
+broker image or private mirror that may run OCC initialization, API, worker,
+gateway, or Agent Pods. Host `docker login` alone does not authenticate those
+nodes. Use the existing node credential mechanism or
+[K3s private registry configuration](https://docs.k3s.io/installation/private-registry);
 protect credential files and avoid putting tokens in commands, logs, or shell
 history. K3s reads its registry configuration at startup: coordinate any
 required node restart with the interruption window and preserve the existing
-cluster and volumes. Check each node can pull both exact references before
-upgrading. For Docker-backed k3d, repeat with each existing node container
-name; use `podman exec` for a Podman-backed cluster:
+cluster and volumes. Check each node can pull the exact references before
+upgrading. For Docker-backed k3d, repeat with each existing node container name;
+use `podman exec` for a Podman-backed cluster:
 
 ```bash
 export K3D_NODE='<existing-k3d-node-container>'
 docker exec "$K3D_NODE" crictl pull "$CONTROLLER_IMAGE"
 docker exec "$K3D_NODE" crictl pull "$RUNTIME_IMAGE"
+[ "$REPOSITORY_ENABLED" = false ] || docker exec "$K3D_NODE" crictl pull "$BROKER_IMAGE"
 ```
 
 A successful pull by digest establishes node access to that immutable reference;
@@ -157,7 +245,8 @@ script, and a compatible installed `occ` CLI. From that checkout confirm
 contain the upgrade script, stop; this procedure cannot be run from it. Do not
 overwrite a working checkout. Install `helm`, `kubectl`, `jq`, `yq` v4, and
 Python 3. Use a fresh
-`UPGRADE_EVIDENCE` directory for each attempt. The script changes the protected
+`UPGRADE_EVIDENCE` directory for each new release; retain it when resuming an
+interrupted release. The script changes the protected
 input files as well as the cluster; it saves their previous contents in that
 private evidence directory before cluster mutation.
 
@@ -171,26 +260,28 @@ scripts/upgrade-production-images \
   --namespace "$NAMESPACE" --release "$RELEASE" \
   --values "$VALUES" --installation "$INSTALLATION" \
   --source-revision "$RELEASE_SOURCE_SHA" --evidence-dir "$UPGRADE_EVIDENCE" \
-  --controller-image "$CONTROLLER_IMAGE"
+  --controller-image "$CONTROLLER_IMAGE" "${BROKER_ARGS[@]}"
 
-# Runtime only: use a fresh UPGRADE_EVIDENCE if another attempt was made.
+# Runtime only: use a fresh UPGRADE_EVIDENCE for a new release.
 scripts/upgrade-production-images \
   --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" \
   --namespace "$NAMESPACE" --release "$RELEASE" \
   --values "$VALUES" --installation "$INSTALLATION" \
   --source-revision "$RELEASE_SOURCE_SHA" --evidence-dir "$UPGRADE_EVIDENCE" \
-  --runtime-image "$RUNTIME_IMAGE"
+  --runtime-image "$RUNTIME_IMAGE" "${RUNTIME_REPOSITORY_ARGS[@]}"
 
-# Combined: use a fresh UPGRADE_EVIDENCE if another attempt was made.
+# Combined: use a fresh UPGRADE_EVIDENCE for a new release.
 scripts/upgrade-production-images \
   --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" \
   --namespace "$NAMESPACE" --release "$RELEASE" \
   --values "$VALUES" --installation "$INSTALLATION" \
   --source-revision "$RELEASE_SOURCE_SHA" --evidence-dir "$UPGRADE_EVIDENCE" \
-  --controller-image "$CONTROLLER_IMAGE" --runtime-image "$RUNTIME_IMAGE"
+  --controller-image "$CONTROLLER_IMAGE" --runtime-image "$RUNTIME_IMAGE" \
+  "${BROKER_ARGS[@]}"
 ```
 
-Helm runs initialization, including database migration with the migrator role,
+The helper stops the API and worker and waits for their Pods to terminate. Helm
+then runs initialization, including database migration with the migrator role,
 before rolling out OCC. Runtime-only also restarts OCC on its existing controller
 image to load the updated Installation. The script deploys all recorded running
 Agents concurrently; stopped and deleting Agents are left alone. See the
@@ -244,6 +335,6 @@ database migrations. If OCC succeeds but a runtime deployment fails, the fleet
 can be mixed: runtime rollout is **not transactional**. Inspect each dispatch,
 deployment status, and revision before retrying; an uncertain request may have
 already created a revision. Check compatibility before selecting an older image
-or restoring state, and follow [partial-failure recovery](production-upgrade.md#recover-from-a-partial-failure).
+or restoring state, and follow [partial-failure recovery](production-upgrade-recovery.md).
 Do not delete the cluster, database volume, Namespaces, Agents, revisions,
 Secrets, bootstrap volume, or Agent PVCs to force an upgrade or recovery.

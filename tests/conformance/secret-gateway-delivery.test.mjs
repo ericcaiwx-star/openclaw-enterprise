@@ -7,9 +7,8 @@ import {
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
+import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
 
-const kubeconfigPath = "/tmp/openclaw-enterprise-conformance/kubeconfig";
-const contextName = "openclaw-enterprise-local";
 const tenant = {
   id: "ns_00000000-0000-4000-8000-000000000014",
   name: "Secret gateway delivery tenant",
@@ -18,39 +17,11 @@ const tenant = {
 };
 
 function options(overrides = {}) {
-  const resources = {
-    requests: { cpu: "100m", memory: "64Mi" },
-    limits: { cpu: "250m", memory: "128Mi" },
-  };
-
   return {
-    authentication: { mode: "kubeconfig", kubeconfigPath, context: contextName },
-    images: {
-      gateway: "openclaw-enterprise/gateway-fixture:local",
-      agent: "openclaw-enterprise/agent-fixture:local",
-      requireImmutableDigest: false,
-    },
-    resources: {
-      gateway: resources,
-      agent: resources,
-      namespace: {
-        quota: { pods: "10", "requests.cpu": "2", "requests.memory": "1Gi" },
-        containerDefaults: resources,
-      },
-    },
-    network: {
-      dns: { namespace: "kube-system", podLabels: { "k8s-app": "kube-dns" } },
-      gatewayPort: 8080,
+    ...conformanceKubernetesOptions({
       gatewayTrustedProxyCidrs: ["127.0.0.1/32"],
-      gatewayClients: [
-        { namespace: "openclaw-controller", podLabels: { "app.kubernetes.io/name": "controller" } },
-      ],
-    },
-    servicePrincipalCredentials: { mode: "disabled" },
-    runtime: {
-      transportSecretPrefix: "transport",
-      gatewayStorageClassName: "local-path",
-    },
+      runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
+    }),
     ...overrides,
   };
 }
@@ -124,13 +95,13 @@ test("secret-gateway-delivery renders exact bound Namespace Secret env only into
     {
       secretEnvironment: [projection()],
     },
-    namespace,
+    { name: namespace, plane: "execution" },
   );
 
   const gateway = driver.deployment(
     `gateway-${suffix}`,
     { namespaceId: tenant.id, agentId: candidate.agentId },
-    namespace,
+    { name: namespace, plane: "execution" },
     "openclaw-enterprise/gateway-fixture:local",
     `agent-${suffix}`,
     "gateway",
@@ -147,7 +118,7 @@ test("secret-gateway-delivery renders exact bound Namespace Secret env only into
           backendRef: { ...projection().backendRef, name: "stored-model-key" },
         },
       },
-      namespace,
+      { name: namespace, plane: "execution" },
     ),
     [],
     secretEnvironment,
@@ -171,7 +142,7 @@ test("secret-gateway-delivery renders exact bound Namespace Secret env only into
       driver.deployment(
         `agent-${suffix}`,
         { namespaceId: tenant.id, agentId: candidate.agentId, revisionId: candidate.id },
-        namespace,
+        { name: namespace, plane: "execution" },
         "openclaw-enterprise/agent-fixture:local",
         `agent-${suffix}`,
         "agent",
@@ -198,7 +169,7 @@ test("secret-gateway-delivery renders exact bound Namespace Secret env only into
       {
         secretEnvironment: [projection({ agentId: sharedConsumer.agentId })],
       },
-      namespace,
+      { name: namespace, plane: "execution" },
     ),
     [projection({ agentId: sharedConsumer.agentId })],
   );
@@ -210,7 +181,11 @@ test("secret-gateway-delivery rejects missing, foreign, and reserved model proje
   const namespace = kubernetesNamespaceName(tenant.id);
 
   assert.throws(
-    () => driver.secretEnvironmentForRevision(candidate, undefined, namespace),
+    () =>
+      driver.secretEnvironmentForRevision(candidate, undefined, {
+        name: namespace,
+        plane: "execution",
+      }),
     /does not match AgentRevision bindings/i,
   );
   assert.throws(
@@ -220,7 +195,7 @@ test("secret-gateway-delivery rejects missing, foreign, and reserved model proje
         {
           secretEnvironment: [projection({ agentId: "another-agent" })],
         },
-        namespace,
+        { name: namespace, plane: "execution" },
       ),
     /does not match AgentRevision bindings/i,
   );
@@ -231,7 +206,7 @@ test("secret-gateway-delivery rejects missing, foreign, and reserved model proje
         {
           secretEnvironment: [projection({ backendRef: { ...projection().backendRef, name: "" } })],
         },
-        namespace,
+        { name: namespace, plane: "execution" },
       ),
     /does not match AgentRevision bindings/i,
   );
@@ -242,7 +217,7 @@ test("secret-gateway-delivery rejects missing, foreign, and reserved model proje
           secretBindings: { OPENAI_API_KEY: candidate.secretBindings.EXTERNAL_SERVICE_TOKEN },
         }),
         { secretEnvironment: [projection({ name: "OPENAI_API_KEY" })] },
-        namespace,
+        { name: namespace, plane: "execution" },
       ),
     /Secret bindings are invalid|Model authentication must use/i,
   );
@@ -261,7 +236,7 @@ test("secret-gateway-delivery rejects missing, foreign, and reserved model proje
           },
         }),
         { secretEnvironment: [projection({ name: "APP_SERVER_TOKEN" })] },
-        namespace,
+        { name: namespace, plane: "execution" },
       ),
     /Secret bindings are invalid/i,
   );

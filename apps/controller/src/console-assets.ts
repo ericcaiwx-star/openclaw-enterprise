@@ -19,6 +19,7 @@ const CONSOLE_ASSETS = new Map([
       "shell.mjs",
       "runtime-images.mjs",
       "agents/list.mjs",
+      "agents/logs.mjs",
       "agents/presets.mjs",
       "agents/create.mjs",
       "agents/plugin-discovery.mjs",
@@ -30,11 +31,13 @@ const CONSOLE_ASSETS = new Map([
       "agents/repository-profiles.mjs",
       "agents/starter-model.mjs",
       "agents/workspace.mjs",
+      "agents/access.mjs",
       "agents/detail.mjs",
       "agents/deletion.mjs",
       "agents/stop.mjs",
       "agents/native-admin.mjs",
       "agents/harness-auth.mjs",
+      "agents/device-login.mjs",
       "agents/secret-access.mjs",
       "agents/secret-picker.mjs",
       "agents/credentials.mjs",
@@ -92,6 +95,19 @@ export const CONSOLE_CONTENT_SECURITY_POLICY = [
 ].join("; ");
 
 export async function readConsoleAsset(pathname: string): Promise<ConsoleAsset> {
+  if (pathname === "/console/default-codex-preset.mjs") {
+    const preset = JSON.parse(
+      await readFile(
+        new URL("../../../deploy/presets/default-codex.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    return {
+      body: Buffer.from(`export default ${JSON.stringify(preset)};\n`),
+      contentType: "text/javascript; charset=utf-8",
+      statusCode: 200,
+    };
+  }
   const asset = CONSOLE_ASSETS.get(pathname);
   if (asset !== undefined) {
     return {

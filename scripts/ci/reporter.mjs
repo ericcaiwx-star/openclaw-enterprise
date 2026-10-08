@@ -1,3 +1,5 @@
+import { failureInputLimit } from "./failure-redaction.mjs";
+
 const safeOccErrorCodes = new Set([
   "INVALID_REQUEST",
   "UNAUTHENTICATED",
@@ -38,8 +40,50 @@ const safeRepositoryPlatformSetupStages = new Set([
   "controller-restart",
 ]);
 
+const safeCredentialServiceFailures = new Set([
+  "gateway-listener",
+  "child-exited",
+  "child-deadline",
+  "other",
+]);
+
 const postTestAsyncActivityPrefix =
   "Error: A resource generated asynchronous activity after the test ended.";
+
+// Tests publish timings with t.diagnostic(`${measurementPrefix}${JSON}`). Only the
+// allowlisted shape below survives; anything else is dropped like other diagnostics.
+const measurementPrefix = "openclaw-ci-measurement ";
+
+function safeMeasurement(message) {
+  let value;
+  try {
+    value = JSON.parse(message.slice(measurementPrefix.length));
+  } catch {
+    return undefined;
+  }
+  if (
+    !isRecord(value) ||
+    value.kind !== "kubelet-volume-refresh" ||
+    !["secret", "configmap"].includes(value.volume) ||
+    !["none", "pod-annotation"].includes(value.nudge) ||
+    !Number.isInteger(value.sample) ||
+    value.sample < 0 ||
+    value.sample > 99 ||
+    typeof value.seconds !== "number" ||
+    !Number.isFinite(value.seconds) ||
+    value.seconds < -60 ||
+    value.seconds > 3_600
+  ) {
+    return undefined;
+  }
+  return {
+    kind: value.kind,
+    volume: value.volume,
+    nudge: value.nudge,
+    sample: value.sample,
+    seconds: Math.round(value.seconds * 10) / 10,
+  };
+}
 
 const safeRuntimeImageStockBrokerStages = new Set([
   "material-init",
@@ -288,6 +332,84 @@ function failureDiagnostic(error) {
   if (!isRecord(diagnostic)) {
     return undefined;
   }
+  if (diagnostic.kind === "runtime-model-probe") {
+    if (
+      !["outer-timeout", "wrapper-exited", "classification"].includes(diagnostic.reason) ||
+      ![
+        "not-observed",
+        "READY",
+        "AUTHENTICATION_FAILED",
+        "MODEL_PROBE_CPU_STARVED",
+        "MODEL_PROBE_FAILED",
+        "MODEL_PROBE_TIMEOUT",
+        "UNAVAILABLE",
+        "other",
+      ].includes(diagnostic.probe) ||
+      !["not-observed", "ok", "failed", "other"].includes(diagnostic.modelPhase)
+    ) {
+      return undefined;
+    }
+    const result = {
+      kind: "runtime-model-probe",
+      reason: diagnostic.reason,
+      probe: diagnostic.probe,
+      modelPhase: diagnostic.modelPhase,
+    };
+    for (const key of [
+      "running",
+      "readyObserved",
+      "pluginReadyObserved",
+      "nativeSpawnPhaseObserved",
+      "failureObserved",
+    ]) {
+      if (typeof diagnostic[key] !== "boolean") {
+        return undefined;
+      }
+      result[key] = diagnostic[key];
+    }
+    for (const key of [
+      "loadClientsSubmitted",
+      "loadClientsStarted",
+      "loadClientsSettled",
+      "loadClientsRejected",
+    ]) {
+      if (!Number.isInteger(diagnostic[key]) || diagnostic[key] < 0 || diagnostic[key] > 8) {
+        return undefined;
+      }
+      result[key] = diagnostic[key];
+    }
+    if (
+      result.loadClientsSettled > result.loadClientsSubmitted ||
+      result.loadClientsStarted > result.loadClientsSubmitted ||
+      result.loadClientsRejected > result.loadClientsSettled
+    ) {
+      return undefined;
+    }
+    for (const key of ["capMs", "elapsedMs", "cpuWaitMs"]) {
+      if (diagnostic[key] === undefined || (key === "cpuWaitMs" && diagnostic[key] === null)) {
+        result[key] = diagnostic[key];
+      } else if (
+        Number.isSafeInteger(diagnostic[key]) &&
+        diagnostic[key] >= 0 &&
+        diagnostic[key] <= 3_600_000
+      ) {
+        result[key] = diagnostic[key];
+      } else {
+        return undefined;
+      }
+    }
+    result.probeStage = [
+      "prepare",
+      "preflight",
+      "spawn",
+      "returned",
+      "cleanup",
+      "complete",
+    ].includes(diagnostic.probeStage)
+      ? diagnostic.probeStage
+      : "not-observed";
+    return result;
+  }
   if (diagnostic.kind === "network-policy") {
     return [
       "Agent outbound platform traffic",
@@ -296,6 +418,8 @@ function failureDiagnostic(error) {
       "cross-tenant Agent traffic",
       "same-tenant Agent-to-Agent traffic",
       "gateway-to-candidate Agent traffic",
+      "same-tenant gateway-to-Agent traffic",
+      "cross-tenant gateway-to-Agent traffic",
     ].includes(diagnostic.stage)
       ? { kind: "network-policy", stage: diagnostic.stage }
       : undefined;
@@ -321,6 +445,11 @@ function failureDiagnostic(error) {
             stage === "relay-readiness" ? relayPodDiagnostic(diagnostic.relayPod) : undefined,
           relayNode:
             stage === "relay-readiness" ? relayNodeDiagnostic(diagnostic.relayNode) : undefined,
+          credentialService:
+            stage === "credential-service-startup" &&
+            safeCredentialServiceFailures.has(diagnostic.credentialService)
+              ? diagnostic.credentialService
+              : undefined,
         }
       : undefined;
   }
@@ -328,6 +457,34 @@ function failureDiagnostic(error) {
     const stage = diagnostic.stage;
     return typeof stage === "string" && safeRuntimeImageStockBrokerStages.has(stage)
       ? { kind: "runtime-image-stock-broker", stage }
+      : undefined;
+  }
+  if (diagnostic.kind === "metrics-monitoring") {
+    const stages = ["prometheus-up", "occ-request", "grafana-health", "grafana-datasource"];
+    const reasons = ["timeout", "container-exited", "query-error"];
+    if (!stages.includes(diagnostic.stage) || !reasons.includes(diagnostic.reason)) {
+      return undefined;
+    }
+    return {
+      kind: "metrics-monitoring",
+      stage: diagnostic.stage,
+      reason: diagnostic.reason,
+      container: ["server", "agent", "grafana"].includes(diagnostic.container)
+        ? diagnostic.container
+        : undefined,
+      exitCode:
+        Number.isInteger(diagnostic.exitCode) &&
+        diagnostic.exitCode >= 0 &&
+        diagnostic.exitCode <= 255
+          ? diagnostic.exitCode
+          : undefined,
+      lastHttpStatus: safeStatus(diagnostic.lastHttpStatus),
+    };
+  }
+  if (diagnostic.kind === "observability-log-export") {
+    // Which attributed source never reached the OTLP receiver; no record content.
+    return typeof diagnostic.api === "boolean" && typeof diagnostic.worker === "boolean"
+      ? { kind: "observability-log-export", api: diagnostic.api, worker: diagnostic.worker }
       : undefined;
   }
   if (diagnostic.kind !== "controller-http") {
@@ -367,6 +524,28 @@ function upstreamDiagnostic(value) {
     return undefined;
   }
   return { kind: "chatgpt-admin-http", operation, status };
+}
+
+// Failure messages and the top stack frame make flakes attributable. They are
+// raw here and travel only over the pipe to run-tests, which redacts and
+// truncates them (failure-redaction.mjs) before anything reaches an artifact
+// or the job log.
+function failureText(cause) {
+  const message =
+    typeof cause === "string" ? cause : typeof cause?.message === "string" ? cause.message : "";
+  const stack = typeof cause?.stack === "string" ? cause.stack : "";
+  // The stack starts with the message, which can quote another process's stack.
+  const messageEnd =
+    message && stack.includes(message) ? stack.indexOf(message) + message.length : 0;
+  const frame = stack
+    .slice(messageEnd)
+    .split("\n")
+    .find((line) => /^\s+at\s/u.test(line))
+    ?.trim();
+  return {
+    message: message ? message.slice(0, failureInputLimit) : undefined,
+    frame: frame ? frame.slice(0, failureInputLimit) : undefined,
+  };
 }
 
 function location(data = {}) {
@@ -418,6 +597,7 @@ function location(data = {}) {
               : undefined,
           location: failureLocation,
           diagnostic: failureDiagnostic(cause),
+          ...failureText(cause),
         }
       : undefined,
     durationMs:
@@ -426,6 +606,8 @@ function location(data = {}) {
   };
 }
 
+// Only for scripts/ci/run-tests.mjs: failure text here is unredacted, so never
+// point a step whose stdout reaches a log or artifact at this reporter directly.
 export default async function* jsonLinesReporter(source) {
   for await (const event of source) {
     if (event.type === "test:diagnostic") {
@@ -435,6 +617,17 @@ export default async function* jsonLinesReporter(source) {
         event.data.message.startsWith(postTestAsyncActivityPrefix)
       ) {
         yield '{"type":"test:diagnostic","data":{"kind":"post-test-async-activity"}}\n';
+      } else if (
+        typeof event.data?.message === "string" &&
+        event.data.message.startsWith(measurementPrefix)
+      ) {
+        const measurement = safeMeasurement(event.data.message);
+        if (measurement) {
+          yield `${JSON.stringify({
+            type: "test:diagnostic",
+            data: { kind: "measurement", measurement },
+          })}\n`;
+        }
       }
       continue;
     }

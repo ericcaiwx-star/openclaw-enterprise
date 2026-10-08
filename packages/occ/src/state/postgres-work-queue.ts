@@ -2,12 +2,14 @@ import { isNonEmptyString, isPositiveSafeInteger } from "@openclaw-enterprise/ut
 import { createHash, randomUUID } from "node:crypto";
 import { ResourceConflictError, ScopeViolationError } from "../errors.ts";
 import {
+  CREDENTIAL_WITHDRAWAL_TARGET,
   nonempty,
   safeFailureCode,
   validateFailureData,
   validateSuccessResultData,
   type ClaimedWork,
   type ControllerWork,
+  type ControllerWorkAttempt,
   type ControllerWorkKind,
   type ControllerWorkState,
   type EnqueueWork,
@@ -67,7 +69,8 @@ interface WorkRow {
   readonly revision_id: string | null;
   readonly actor_id: string;
   readonly namespace_target: "ready" | "deleted" | null;
-  readonly agent_target: "stopped" | "deleted" | "provisioned" | null;
+  readonly agent_target:
+    "stopped" | "deleted" | "provisioned" | typeof CREDENTIAL_WITHDRAWAL_TARGET | null;
   readonly state: ControllerWorkState;
   readonly available_at: Date | string;
   readonly attempt_count: number;
@@ -97,22 +100,32 @@ const REPOSITORY_CLEANUP_KEY = new RegExp(
 const MAINTENANCE_KEY = new RegExp(
   `^agent_revision:(${REVISION_ID_PATTERN}):maintenance:(0|[1-9][0-9]*)$`,
 );
+const REVISION_RECONCILE_KEY = new RegExp(`^agent_revision:${REVISION_ID_PATTERN}:reconcile$`);
+/** Recovery evidence that a published deployment got its one extra attempt. */
+const ACTIVE_REVISION_RECOVERY = "ACTIVE_REVISION_RECOVERY";
 
-/** Cleanup dispatch and retry exemption require the complete immutable revision target. */
+/** Cleanup dispatch and retry exemption require an exact immutable revision target. */
+export function repositoryCleanupRevisionId(
+  work: Pick<ControllerWork, "idempotencyKey" | "namespaceTarget" | "agentTarget">,
+): string | undefined {
+  if (work.namespaceTarget !== undefined || work.agentTarget !== undefined) {
+    return undefined;
+  }
+  const key = REPOSITORY_CLEANUP_KEY.exec(work.idempotencyKey);
+  return key?.[0] === work.idempotencyKey ? key[1] : undefined;
+}
+
 export function isRepositoryCleanupWork(
   work: Pick<
     ControllerWork,
     "idempotencyKey" | "agentId" | "revisionId" | "namespaceTarget" | "agentTarget"
   >,
 ): boolean {
-  const key = REPOSITORY_CLEANUP_KEY.exec(work.idempotencyKey);
+  const revisionId = repositoryCleanupRevisionId(work);
   return (
-    key !== null &&
-    key[0] === work.idempotencyKey &&
-    key[1] === work.revisionId &&
-    isNonEmptyString(work.agentId) &&
-    work.namespaceTarget === undefined &&
-    work.agentTarget === undefined
+    revisionId !== undefined &&
+    ((work.revisionId === revisionId && isNonEmptyString(work.agentId)) ||
+      (work.revisionId === undefined && work.agentId === undefined))
   );
 }
 
@@ -127,23 +140,28 @@ export function isRepositoryRuntimeRetirementWork(
 }
 
 function repositoryCleanupSql(alias: string): string {
-  return `(${alias}.agent_id IS NOT NULL
-    AND ${alias}.revision_id IS NOT NULL
-    AND ${alias}.namespace_target IS NULL AND ${alias}.agent_target IS NULL
-    AND ${alias}.revision_id ~ '^${REVISION_ID_PATTERN}$'
-    AND ${alias}.idempotency_key ~
-      ('^agent_revision:' || ${alias}.revision_id || ':repository_cleanup:(retire:)?[0-9a-f]{64}$'))`;
+  return `(${alias}.namespace_target IS NULL AND ${alias}.agent_target IS NULL
+    AND (
+      (${alias}.agent_id IS NOT NULL
+        AND ${alias}.revision_id IS NOT NULL
+        AND ${alias}.revision_id ~ '^${REVISION_ID_PATTERN}$'
+        AND ${alias}.idempotency_key ~
+          ('^agent_revision:' || ${alias}.revision_id || ':repository_cleanup:(retire:)?[0-9a-f]{64}$'))
+      OR (${alias}.agent_id IS NULL
+        AND ${alias}.revision_id IS NULL
+        AND ${alias}.idempotency_key ~
+          '^agent_revision:${REVISION_ID_PATTERN}:repository_cleanup:(retire:)?[0-9a-f]{64}$')
+    ))`;
 }
 
-// Only lifecycle columns are writable by occ_app. An identity collision must
-// violate the existing attempt-count constraint and roll back the entire transfer.
+// Keep the creating source actor for audit attribution. Only lifecycle columns
+// are writable by occ_app; an owner collision must roll back the transfer.
 const CLEANUP_CONFLICT_SQL = `
   ON CONFLICT (idempotency_key) DO UPDATE
   SET attempt_count = CASE
         WHEN controller_work.namespace_id = EXCLUDED.namespace_id
           AND controller_work.agent_id = EXCLUDED.agent_id
           AND controller_work.revision_id = EXCLUDED.revision_id
-          AND controller_work.actor_id = EXCLUDED.actor_id
           AND controller_work.namespace_target IS NULL
           AND controller_work.agent_target IS NULL
           AND controller_work.state <> 'failed_permanent'
@@ -202,7 +220,10 @@ function transferRepositoryCleanupSql(continuingRevision = "false"): string {
       JOIN cleanup_agents AS agent
         ON agent.namespace_id = revision.namespace_id AND agent.id = revision.agent_id
       JOIN cleanup_namespaces AS namespace ON namespace.id = source.namespace_id
-      WHERE (source.revision_id = revision.id AND source.agent_id = revision.agent_id)
+      -- Credential withdrawal work (agent_target = 'credentials_withdrawn', see
+      -- CREDENTIAL_WITHDRAWAL_TARGET) leaves its active revision running, so it owns no cleanup.
+      WHERE (source.revision_id = revision.id AND source.agent_id = revision.agent_id
+          AND source.agent_target IS NULL)
         OR (source.agent_target = 'stopped' AND source.revision_id IS NULL
           AND source.agent_id = revision.agent_id AND revision.admitted_at <= source.created_at)
         OR (source.agent_target = 'deleted' AND source.revision_id IS NULL
@@ -245,10 +266,11 @@ function transferRepositoryCleanupSql(continuingRevision = "false"): string {
         idempotency_key, namespace_id, agent_id, revision_id, actor_id,
         namespace_target, agent_target, state, available_at, attempt_count, created_at, updated_at
       )
-      SELECT DISTINCT
+      SELECT DISTINCT ON (revision.namespace_id, revision.agent_id, revision.revision_id,
+        COALESCE(revision.retire_runtime, false))
         'agent_revision:' || revision.revision_id || ':repository_cleanup:' ||
           CASE WHEN revision.retire_runtime THEN 'retire:' ELSE '' END ||
-          encode(sha256(convert_to(revision.source_key, 'UTF8')), 'hex'),
+          encode(sha256(convert_to(revision.revision_id, 'UTF8')), 'hex'),
         revision.namespace_id, revision.agent_id, revision.revision_id, revision.actor_id,
         NULL, NULL, 'queued', statement_timestamp(), 0, statement_timestamp(), statement_timestamp()
       FROM cleanup_revisions AS revision
@@ -256,10 +278,116 @@ function transferRepositoryCleanupSql(continuingRevision = "false"): string {
         ON obligation.namespace_id = revision.namespace_id AND obligation.agent_id = revision.agent_id
         AND obligation.revision_id = revision.revision_id
       WHERE revision.retire_runtime OR obligation.revision_id IS NOT NULL
+      ORDER BY revision.namespace_id, revision.agent_id, revision.revision_id,
+        COALESCE(revision.retire_runtime, false), revision.source_key
       ${CLEANUP_CONFLICT_SQL}
       RETURNING idempotency_key
     ),`;
 }
+
+// Recovery counterpart of fail(..., { continuingRevision: true }): an exhausted
+// maintenance item of the active running revision whose worker lost its lease
+// (crash or restart) must not retire that runtime or end its maintenance
+// chain. The same holds for the revision's own deployment (`:reconcile`) when its
+// worker lost the lease after publishing the active pointer: see
+// RECOVERING_ACTIVATIONS_SQL. `candidates` holds locked work keys; `$2` is
+// maxAttempts. Locks follow the cleanup transfer's order (Namespace, then Agent).
+function continuingMaintenanceSql(candidates: string): string {
+  return `
+    continuing_sources AS MATERIALIZED (
+      SELECT work.idempotency_key, work.namespace_id, work.agent_id, work.revision_id
+      FROM occ.controller_work AS work
+      JOIN ${candidates} AS candidate ON candidate.idempotency_key = work.idempotency_key
+      WHERE work.attempt_count >= $2::integer
+        AND work.namespace_target IS NULL AND work.agent_target IS NULL
+        AND work.agent_id IS NOT NULL AND work.revision_id IS NOT NULL
+        AND (work.idempotency_key ~
+            ('^agent_revision:' || work.revision_id || ':maintenance:(0|[1-9][0-9]*)$')
+          OR work.idempotency_key = 'agent_revision:' || work.revision_id || ':reconcile')
+    ), continuing_namespaces AS MATERIALIZED (
+      SELECT namespace.id, namespace.status, namespace.deleted_at
+      FROM occ.namespaces AS namespace
+      WHERE namespace.id IN (SELECT namespace_id FROM continuing_sources)
+      ORDER BY namespace.id
+      FOR UPDATE OF namespace
+    ), continuing_agents AS MATERIALIZED (
+      SELECT agent.namespace_id, agent.id, agent.active_revision_id, agent.desired_runtime_state
+      FROM occ.agents AS agent
+      WHERE (agent.namespace_id, agent.id) IN (
+        SELECT namespace_id, agent_id FROM continuing_sources
+      )
+      ORDER BY agent.namespace_id, agent.id
+      FOR UPDATE OF agent
+    ), continuing_maintenance AS MATERIALIZED (
+      SELECT source.idempotency_key
+      FROM continuing_sources AS source
+      JOIN continuing_agents AS agent
+        ON agent.namespace_id = source.namespace_id AND agent.id = source.agent_id
+        AND agent.active_revision_id = source.revision_id
+      JOIN occ.agent_revisions AS revision
+        ON revision.namespace_id = agent.namespace_id AND revision.agent_id = agent.id
+        AND revision.id = agent.active_revision_id
+      JOIN continuing_namespaces AS namespace ON namespace.id = agent.namespace_id
+      WHERE agent.desired_runtime_state = 'running'
+        AND namespace.status = 'ready' AND namespace.deleted_at IS NULL
+        AND (revision.admitted_spec->'repository_credentials' IS NULL OR
+          (revision.admitted_spec #>> '{repository_credentials,deadlineWallMs}')::bigint >
+            EXTRACT(EPOCH FROM clock_timestamp()) * 1000)
+    ),`;
+}
+
+// Enqueue the next maintenance bucket for each continued item, deferred by the
+// maximum retry backoff (`delayParameter`, in milliseconds). The worker derives
+// later buckets from this key, so the chain stays strictly increasing.
+function continueMaintenanceSql(delayParameter: string): string {
+  return `
+    continued_maintenance AS (
+      INSERT INTO occ.controller_work (
+        idempotency_key, namespace_id, agent_id, revision_id, actor_id,
+        namespace_target, agent_target, state, available_at, attempt_count, created_at, updated_at
+      )
+      SELECT 'agent_revision:' || source.revision_id || ':maintenance:' ||
+          (substring(source.idempotency_key from ':maintenance:([0-9]+)$')::numeric + 1)::text,
+        source.namespace_id, source.agent_id, source.revision_id, source.actor_id,
+        NULL, NULL, 'queued',
+        clock_timestamp() + ${delayParameter}::double precision * interval '1 millisecond',
+        0, clock_timestamp(), clock_timestamp()
+      FROM transitioned AS source
+      WHERE source.state = 'failed_permanent'
+        AND source.idempotency_key ~ ':maintenance:(0|[1-9][0-9]*)$'
+        AND source.idempotency_key IN (SELECT idempotency_key FROM continuing_maintenance)
+      ON CONFLICT (idempotency_key) DO NOTHING
+      RETURNING idempotency_key
+    ),`;
+}
+
+const CONTINUING_MAINTENANCE_SOURCE_SQL =
+  "source.idempotency_key IN (SELECT idempotency_key FROM continuing_maintenance)";
+
+// A deployment whose worker lost its lease on the last counted attempt after publishing the
+// active pointer has an active, running revision but has not activated it, retired its
+// predecessors, or completed. Failing it would report a failed deployment for the active
+// revision. Recovery instead requeues it once with one more attempt, so a worker finishes it
+// through the already-active path; ACTIVE_REVISION_RECOVERY evidence bounds this to once per
+// deployment, after which an expired claim fails without retiring the active runtime.
+// Requires continuingMaintenanceSql; the evidence lookup matches audit_events_work_attempt_idx.
+const RECOVERING_ACTIVATIONS_SQL = `
+    recovering_activations AS MATERIALIZED (
+      SELECT work.idempotency_key
+      FROM occ.controller_work AS work
+      JOIN continuing_maintenance AS continuing
+        ON continuing.idempotency_key = work.idempotency_key
+      WHERE work.idempotency_key = 'agent_revision:' || work.revision_id || ':reconcile'
+        AND NOT EXISTS (
+          SELECT 1 FROM occ.audit_events AS prior
+          WHERE prior.kind = 'mutation' AND prior.action = 'reconcile'
+            AND prior.resource_kind = 'agent_revision'
+            AND prior.details->>'workId' = work.idempotency_key
+            AND prior.namespace_id = work.namespace_id
+            AND prior.occurred_at >= work.created_at
+            AND prior.details->>'reasonCode' = '${ACTIVE_REVISION_RECOVERY}'
+        )
+    ),`;
 
 export class WorkClaimLostError extends Error {
   constructor() {
@@ -290,7 +418,7 @@ function asRow(value: unknown): WorkRow {
   return value as WorkRow;
 }
 
-function asWork(value: unknown): ControllerWork {
+export function asWork(value: unknown): ControllerWork {
   const row = asRow(value);
   return Object.freeze({
     kind: row.work_kind ?? "lifecycle",
@@ -362,8 +490,24 @@ const FAIL_EXHAUSTED_NAMESPACES_SQL = `
     RETURNING namespace.id
   )`;
 
-const INSERT_EVIDENCE_CTE_SQL = `
-  evidence AS (
+/**
+ * Queue transitions append `reconcile` evidence in the same statement. `filter` narrows which
+ * transitioned rows get a row; it is appended to the evidence SELECT's WHERE clause. A failure
+ * that ends the work item (`failed_permanent`) also carries `final: true`, so it differs from a
+ * retry with the same reason code.
+ * `reasonCode` is a raw SQL expression: pass parameters or constants, never input.
+ */
+const insertEvidenceCteSql = (filter = "", reasonCode = "$4::text") => `
+  evidence_targets AS (
+    SELECT transitioned.*,
+      CASE WHEN ${repositoryCleanupSql("transitioned")} THEN
+        substring(
+          transitioned.idempotency_key
+          from '^agent_revision:(${REVISION_ID_PATTERN}):repository_cleanup:(retire:)?[0-9a-f]{64}$'
+        )
+      END AS repository_cleanup_revision_id
+    FROM transitioned
+  ), evidence AS (
     INSERT INTO occ.audit_events (
       id, occurred_at, kind, actor_id, action, namespace_id,
       resource_kind, resource_id, outcome, details
@@ -376,17 +520,53 @@ const INSERT_EVIDENCE_CTE_SQL = `
       'reconcile',
       transitioned.namespace_id,
       CASE
-        WHEN transitioned.revision_id IS NOT NULL THEN 'agent_revision'
+        WHEN transitioned.revision_id IS NOT NULL
+          OR transitioned.repository_cleanup_revision_id IS NOT NULL THEN 'agent_revision'
         WHEN transitioned.agent_id IS NOT NULL THEN 'agent'
         ELSE 'namespace'
       END,
-      COALESCE(transitioned.revision_id, transitioned.agent_id, transitioned.namespace_id),
+      COALESCE(
+        transitioned.revision_id,
+        transitioned.repository_cleanup_revision_id,
+        transitioned.agent_id,
+        transitioned.namespace_id
+      ),
       $3::text,
-      jsonb_build_object('reasonCode', $4::text, 'attemptCount', transitioned.attempt_count)
-    FROM transitioned
+      jsonb_build_object('reasonCode', ${reasonCode}, 'attemptCount', transitioned.attempt_count,
+        'workId', transitioned.idempotency_key)
+        || CASE WHEN transitioned.state = 'failed_permanent'
+             THEN jsonb_build_object('final', true) ELSE '{}'::jsonb END
+    FROM evidence_targets AS transitioned
+    WHERE true ${filter}
     RETURNING id
   )`;
+const INSERT_EVIDENCE_CTE_SQL = insertEvidenceCteSql();
 const INSERT_EVIDENCE_SQL = `${INSERT_EVIDENCE_CTE_SQL}
+  SELECT transitioned.* FROM transitioned`;
+/**
+ * A deployment waiting for its runtime defers every few seconds with the same code. Only a
+ * change is recorded: a deferral whose outcome and reason code match the latest evidence for the
+ * same revision work item adds no row. Retries, failures, and completions are always recorded.
+ * The lookup matches the `audit_events_work_attempt_idx` partial index, which covers revision
+ * work only; other callers that know a deferral repeats one already recorded pass `$9` false.
+ */
+const INSERT_DEFER_EVIDENCE_SQL = `${insertEvidenceCteSql(`
+      AND $9::boolean
+      AND NOT EXISTS (
+        SELECT 1 FROM (
+          SELECT prior.outcome, prior.details->>'reasonCode' AS reason_code
+          FROM occ.audit_events AS prior
+          WHERE prior.kind = 'mutation' AND prior.action = 'reconcile'
+            AND prior.resource_kind = 'agent_revision'
+            AND prior.details->>'workId' = transitioned.idempotency_key
+            AND prior.namespace_id = transitioned.namespace_id
+            AND prior.actor_id = transitioned.actor_id
+            AND prior.occurred_at >= transitioned.created_at
+          ORDER BY prior.occurred_at DESC, prior.id DESC
+          LIMIT 1
+        ) AS latest
+        WHERE latest.outcome = $3::text AND latest.reason_code = $4::text
+      )`)}
   SELECT transitioned.* FROM transitioned`;
 const SETTLE_PROVISIONING_FAILURE_SQL = `
   settled_provisioning_failures AS (
@@ -474,7 +654,9 @@ export class PostgresWorkQueue {
         (agentId !== null &&
           revisionId === null &&
           (namespaceTarget !== null || (agentTarget !== "stopped" && agentTarget !== "deleted"))) ||
-        (revisionId !== null && (namespaceTarget !== null || agentTarget !== null)))
+        (revisionId !== null &&
+          (namespaceTarget !== null ||
+            (agentTarget !== null && agentTarget !== CREDENTIAL_WITHDRAWAL_TARGET))))
     ) {
       throw new ScopeViolationError(
         "Controller work requires one exact Namespace, Agent, or revision target shape.",
@@ -571,7 +753,7 @@ export class PostgresWorkQueue {
     const key = `agent_revision:${revisionId}:repository_cleanup:${retireRuntime ? "retire:" : ""}${createHash(
       "sha256",
     )
-      .update(claim.idempotencyKey, "utf8")
+      .update(revisionId, "utf8")
       .digest("hex")}`;
     const result = await this.client.query(
       `WITH source AS MATERIALIZED (
@@ -604,6 +786,8 @@ export class PostgresWorkQueue {
              AND revision.admitted_spec->'repository_credentials' IS NOT NULL))
            AND (
              (source.agent_id = revision.agent_id AND source.revision_id IS NOT NULL
+               -- Excludes credential withdrawal work; see CREDENTIAL_WITHDRAWAL_TARGET.
+               AND source.agent_target IS NULL
                AND revision.revision_number <= source_revision.revision_number)
              OR (source.agent_target = 'stopped' AND source.revision_id IS NULL
                AND source.agent_id = revision.agent_id AND revision.admitted_at <= source.created_at)
@@ -666,17 +850,7 @@ export class PostgresWorkQueue {
           `WITH candidate AS (
              SELECT work.idempotency_key
              FROM occ.controller_work AS work
-             WHERE work.state = 'queued'
-               AND work.available_at <= clock_timestamp()
-               AND (work.attempt_count < $2::integer OR ${repositoryCleanupSql("work")})
-               ${this.namespaceFilter("work")}
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM occ.controller_work AS in_flight
-                 WHERE in_flight.state = 'claimed'
-                   AND COALESCE(in_flight.agent_id, in_flight.namespace_id) =
-                       COALESCE(work.agent_id, work.namespace_id)
-               )
+             WHERE ${this.claimablePredicate("$2")}
              ORDER BY work.available_at, work.created_at, work.idempotency_key
              FOR UPDATE OF work SKIP LOCKED
              LIMIT 1
@@ -724,6 +898,27 @@ export class PostgresWorkQueue {
     return renewed.rows[0] === undefined ? undefined : asClaimedWork(renewed.rows[0]);
   }
 
+  /**
+   * Whether some Work could be claimed now. Work for an Agent or Namespace that
+   * already has a claim (the caller's own included) does not count: no worker
+   * could take it.
+   */
+  async claimableWorkWaiting(): Promise<boolean> {
+    const waiting = await this.client.query(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM occ.controller_work AS work
+         WHERE ${this.claimablePredicate("$1")}
+       ) AS waiting`,
+      [this.maxAttempts],
+    );
+    const value = (waiting.rows[0] as { waiting?: unknown } | undefined)?.waiting;
+    if (typeof value !== "boolean") {
+      throw new ScopeViolationError("The controller work backlog returned an invalid answer.");
+    }
+    return value;
+  }
+
   async pending(): Promise<number> {
     const pending = await this.client.query(
       `SELECT count(*)::integer AS count
@@ -744,6 +939,28 @@ export class PostgresWorkQueue {
       [nonempty(idempotencyKey, "Controller work idempotency key")],
     );
     return found.rows[0] === undefined ? undefined : asWork(found.rows[0]);
+  }
+
+  async findWorkAttempt(idempotencyKey: string): Promise<ControllerWorkAttempt | undefined> {
+    // A revision can also have maintenance and cleanup work. Only evidence bound
+    // to this exact work item can explain its progress; unbound history is unknown.
+    const found = await this.client.query(
+      `SELECT event.occurred_at, event.details->>'reasonCode' AS reason_code
+       FROM occ.controller_work AS work
+       JOIN occ.audit_events AS event
+         ON event.namespace_id = work.namespace_id AND event.actor_id = work.actor_id
+         AND event.resource_kind = 'agent_revision' AND event.resource_id = work.revision_id
+         AND event.kind = 'mutation' AND event.action = 'reconcile'
+         AND event.details->>'workId' = work.idempotency_key
+         AND event.occurred_at >= work.created_at
+       WHERE work.idempotency_key = $1
+       ORDER BY event.occurred_at DESC, event.id DESC LIMIT 1`,
+      [nonempty(idempotencyKey, "Controller work idempotency key")],
+    );
+    const row = found.rows[0] as { occurred_at: Date | string; reason_code: string } | undefined;
+    return row === undefined
+      ? undefined
+      : Object.freeze({ at: asDate(row.occurred_at), code: row.reason_code });
   }
 
   async complete(claim: WorkClaim, result: WorkResult = {}): Promise<void> {
@@ -802,14 +1019,21 @@ export class PostgresWorkQueue {
     return "completed";
   }
 
+  /**
+   * `recordEvidence: false` is for a caller that knows this deferral repeats the waiting state it
+   * already recorded for the same work item (the evidence lookup covers revision work only).
+   */
   async defer(
     claim: WorkClaim,
     pending: RetryableFailure,
-    options: { readonly delayMs?: number } = {},
+    options: { readonly delayMs?: number; readonly recordEvidence?: boolean } = {},
   ): Promise<void> {
     validateClaim(claim);
     if (options.delayMs !== undefined && !isPositiveSafeInteger(options.delayMs)) {
       throw new ScopeViolationError("The deferred Work delay is invalid.");
+    }
+    if (options.recordEvidence !== undefined && typeof options.recordEvidence !== "boolean") {
+      throw new ScopeViolationError("The deferred Work evidence option is invalid.");
     }
     const deferred = await this.client.query(
       `WITH transitioned AS (
@@ -830,7 +1054,7 @@ export class PostgresWorkQueue {
            AND claim_token = $2::uuid
            AND lease_expires_at > clock_timestamp()
          RETURNING *
-       ), ${INSERT_EVIDENCE_SQL}`,
+       ), ${INSERT_DEFER_EVIDENCE_SQL}`,
       [
         claim.idempotencyKey,
         claim.claimToken,
@@ -840,6 +1064,7 @@ export class PostgresWorkQueue {
         INITIAL_BACKOFF_MS,
         this.nextRandom(),
         options.delayMs ?? null,
+        options.recordEvidence ?? true,
       ],
     );
     if (deferred.rows.length === 0) {
@@ -914,12 +1139,16 @@ export class PostgresWorkQueue {
     const maintenanceKey = MAINTENANCE_KEY.exec(claim.idempotencyKey);
     if (
       continuingRevision &&
-      (maintenanceKey === null || maintenanceKey[0] !== claim.idempotencyKey)
+      (maintenanceKey === null || maintenanceKey[0] !== claim.idempotencyKey) &&
+      !REVISION_RECONCILE_KEY.test(claim.idempotencyKey)
     ) {
       throw new ScopeViolationError(
-        "Only ordinary revision maintenance can continue after failure.",
+        "Only an active revision's deployment or maintenance can continue after failure.",
       );
     }
+    // continuing_agent locks the Agent without its Namespace. Callers that continue a
+    // revision must already hold the Namespace (then the Agent) in this transaction, as
+    // the worker does, or this deadlocks with admission's Namespace-then-Agent order.
     const failed = await this.client.query(
       `WITH source AS MATERIALIZED (
          SELECT * FROM occ.controller_work AS work
@@ -944,8 +1173,9 @@ export class PostgresWorkQueue {
              WHERE source.revision_id = revision.id AND source.namespace_target IS NULL
                AND source.agent_target IS NULL AND agent.desired_runtime_state = 'running'
                AND namespace.status = 'ready' AND namespace.deleted_at IS NULL
-               AND source.idempotency_key ~
+               AND (source.idempotency_key ~
                  ('^agent_revision:' || revision.id || ':maintenance:(0|[1-9][0-9]*)$')
+                 OR source.idempotency_key = 'agent_revision:' || revision.id || ':reconcile')
                AND (revision.admitted_spec->'repository_credentials' IS NULL OR
                  (revision.admitted_spec #>> '{repository_credentials,deadlineWallMs}')::bigint >
                    EXTRACT(EPOCH FROM clock_timestamp()) * 1000)
@@ -993,7 +1223,9 @@ export class PostgresWorkQueue {
     if (requestedLimit > MAX_RECOVERY_LIMIT) {
       throw new ScopeViolationError(`Recovery limit cannot exceed ${MAX_RECOVERY_LIMIT}.`);
     }
-    const exhaustedClaim = `(work.attempt_count >= $2::integer AND NOT ${repositoryCleanupSql("work")})`;
+    const recovering =
+      "work.idempotency_key IN (SELECT idempotency_key FROM recovering_activations)";
+    const exhaustedClaim = `(work.attempt_count >= $2::integer AND NOT ${repositoryCleanupSql("work")} AND NOT ${recovering})`;
     const stale = await this.client.query(
       `WITH candidates AS (
          SELECT idempotency_key
@@ -1004,14 +1236,21 @@ export class PostgresWorkQueue {
          ORDER BY lease_expires_at, idempotency_key
          FOR UPDATE SKIP LOCKED
          LIMIT $1::integer
-       ), transitioned AS (
+       ), ${continuingMaintenanceSql("candidates")} ${RECOVERING_ACTIVATIONS_SQL} transitioned AS (
          UPDATE occ.controller_work AS work
          SET state = CASE
                WHEN ${exhaustedClaim} THEN 'failed_permanent'
                ELSE 'queued'
              END,
+             attempt_count = CASE
+               WHEN ${recovering} THEN GREATEST($2::integer - 1, 0)
+               ELSE work.attempt_count
+             END,
              available_at = CASE
                WHEN ${exhaustedClaim} THEN work.available_at
+               -- The runtime already runs: nothing to back off from.
+               WHEN ${recovering} THEN clock_timestamp() +
+                 $6::double precision * $7::double precision * interval '1 millisecond'
                ELSE clock_timestamp() +
                  LEAST($5::double precision,
                    $6::double precision * POWER(2::double precision,
@@ -1033,9 +1272,15 @@ export class PostgresWorkQueue {
          FROM candidates
          WHERE work.idempotency_key = candidates.idempotency_key
          RETURNING work.*
-       ), ${FAIL_EXHAUSTED_NAMESPACES_SQL},
-       ${transferRepositoryCleanupSql()} ${SETTLE_PROVISIONING_FAILURE_SQL}
-       ${INSERT_EVIDENCE_SQL}`,
+       ), ${continueMaintenanceSql("$5")} ${FAIL_EXHAUSTED_NAMESPACES_SQL},
+       ${transferRepositoryCleanupSql(CONTINUING_MAINTENANCE_SOURCE_SQL)}
+       ${SETTLE_PROVISIONING_FAILURE_SQL}
+       ${insertEvidenceCteSql(
+         "",
+         `CASE WHEN transitioned.idempotency_key IN (SELECT idempotency_key FROM recovering_activations)
+            THEN '${ACTIVE_REVISION_RECOVERY}' ELSE $4::text END`,
+       )}
+       SELECT transitioned.* FROM transitioned`,
       [
         requestedLimit,
         this.maxAttempts,
@@ -1058,7 +1303,7 @@ export class PostgresWorkQueue {
          ORDER BY available_at, created_at, idempotency_key
          FOR UPDATE SKIP LOCKED
          LIMIT $1::integer
-       ), transitioned AS (
+       ), ${continuingMaintenanceSql("candidates")} transitioned AS (
          UPDATE occ.controller_work AS work
          SET state = 'failed_permanent',
              completed_at = clock_timestamp(),
@@ -1068,10 +1313,11 @@ export class PostgresWorkQueue {
          FROM candidates
          WHERE work.idempotency_key = candidates.idempotency_key
          RETURNING work.*
-       ), ${FAIL_EXHAUSTED_NAMESPACES_SQL},
-       ${transferRepositoryCleanupSql()} ${SETTLE_PROVISIONING_FAILURE_SQL}
+       ), ${continueMaintenanceSql("$5")} ${FAIL_EXHAUSTED_NAMESPACES_SQL},
+       ${transferRepositoryCleanupSql(CONTINUING_MAINTENANCE_SOURCE_SQL)}
+       ${SETTLE_PROVISIONING_FAILURE_SQL}
        ${INSERT_EVIDENCE_SQL}`,
-      [requestedLimit, this.maxAttempts, "failure", "MAX_ATTEMPTS_EXHAUSTED"],
+      [requestedLimit, this.maxAttempts, "failure", "MAX_ATTEMPTS_EXHAUSTED", MAX_BACKOFF_MS],
     );
 
     let requeued = 0;
@@ -1097,6 +1343,21 @@ export class PostgresWorkQueue {
       throw new ScopeViolationError("Controller work retry jitter must be in the range [0, 1).");
     }
     return value;
+  }
+
+  // Queued Work a worker may claim now; `maxAttempts` names the bound parameter.
+  private claimablePredicate(maxAttempts: string): string {
+    return `work.state = 'queued'
+               AND work.available_at <= clock_timestamp()
+               AND (work.attempt_count < ${maxAttempts}::integer OR ${repositoryCleanupSql("work")})
+               ${this.namespaceFilter("work")}
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM occ.controller_work AS in_flight
+                 WHERE in_flight.state = 'claimed'
+                   AND COALESCE(in_flight.agent_id, in_flight.namespace_id) =
+                       COALESCE(work.agent_id, work.namespace_id)
+               )`;
   }
 
   private namespaceFilter(alias?: string): string {

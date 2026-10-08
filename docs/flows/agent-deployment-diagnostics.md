@@ -1,7 +1,7 @@
 ---
 created: 2026-09-27
-updated: 2026-09-27
-last_updated_session: authoring-run/d4a7cf04-5ef8-46a6-8a29-814f0292bf66
+updated: 2026-10-01
+last_updated_session: authoring-run/24df37c6-7eef-483a-a31c-d2c14a51ca6c
 ---
 
 # Agent deployment diagnostics flow
@@ -64,13 +64,23 @@ or replaced Pods produce `unknown` checks. Invalid endpoint data fails the
 request. Collection has a ten-second deadline and a 64 KiB response limit.
 
 `apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts:PLUGIN_RUNTIME_HELPERS`
-runs the native Slack channel status probe on demand in the Gateway container.
-It maps configuration, authentication, and connectivity to safe codes without
-sending a message. The Agent container currently returns no channel checks.
+calls `channels.status` through OpenClaw's public Gateway SDK on demand in the
+Gateway container. It maps live configuration, authentication, and connectivity
+to safe codes without sending a message. The call cancels after six seconds or
+when the HTTP caller disconnects. OpenClaw loads the Slack plugin only for a
+Configuration with a Slack channel, so for an Agent without one the Gateway
+refuses the call as an unknown channel; that refusal maps to configuration
+`failed` with `NOT_CONFIGURED`. The probe code is part of the Gateway Pod
+specification, so a revision deployed by an earlier controller keeps the
+earlier mapping (three unknown `PROBE_FAILED` checks) until the Agent is
+redeployed. Transport failures return `UNAVAILABLE`; other RPC failures return
+`PROBE_FAILED`. Both produce unknown checks; local configuration is not
+substituted for the live response. The Agent container
+currently returns no channel checks.
 
 ### 3. Return validated evidence
 
-`packages/occ/src/index.ts:OpenClawController.deploymentDiagnostics` requires
+`packages/occ/src/deployment-diagnostics.ts:deploymentDiagnostics` requires
 the requested revision ID, valid timestamps, and at most 32 bounded checks.
 OCC converts native Driver errors to `DEPENDENCY_UNAVAILABLE` without returning
 their messages. The API returns the observation and leaves persisted deployment
@@ -81,6 +91,10 @@ status, startup evidence, plugin warnings, and Agent state unchanged.
 - `403` indicates missing exact permission; `404` indicates the path does not
   identify that Agent revision. `503 DEPENDENCY_UNAVAILABLE` indicates missing
   Driver support, collection failure, or invalid evidence.
+- Checks that are all `unknown` with code `UNAVAILABLE` mean the runtime did
+  not answer, usually because the Gateway is stopped, starting, or failed to
+  start. The console says so and names a failed deployment's recorded error
+  code, because these checks do not test model credentials.
 - The focused API test covers exact permissions and sanitized Driver failures.
   The Kubernetes conformance test covers Pod proxy placement, revision and Pod
   identity, and missing-Pod behavior. These tests do not prove a live Slack
@@ -97,5 +111,13 @@ status, startup evidence, plugin warnings, and Agent state unchanged.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-07 12:00: Say that a revision deployed by an older controller keeps its diagnostics mapping until the Agent is redeployed. (dogfood-r43)
+
+- 2026-10-07 11:30: An Agent without a Slack channel reports `NOT_CONFIGURED` instead of three `PROBE_FAILED` checks. (fix-member-1007/d531)
+
+- 2026-10-01 15:14: Use bounded SDK queries for live channel diagnostics. (authoring-run/24df37c6-7eef-483a-a31c-d2c14a51ca6c - 521549df)
+
+- 2026-10-01 15:22: Point validation to its private deployment diagnostics module. (authoring-run/089c3e66-9284-44a0-9e60-285ac7f50ab9 - 28debe57)
 
 - 2026-09-27 06:34: Document the exact-revision diagnostics request and its Compute observation boundary. (authoring-run/d4a7cf04-5ef8-46a6-8a29-814f0292bf66 - ab37f9b)

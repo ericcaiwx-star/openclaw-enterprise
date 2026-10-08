@@ -13,7 +13,10 @@ import { InMemoryPlatformState } from "../../packages/occ/src/index.ts";
 import { createConsoleAppFixture } from "./console-app.mjs";
 
 /** Real Console/API/Drivers with passive storage, but no cluster or external providers. */
-export async function createConsoleRepositoryLaunchFixture(t) {
+export async function createConsoleRepositoryLaunchFixture(
+  t,
+  { secretDriver: suppliedSecretDriver, filesystemConfiguration } = {},
+) {
   const resources = {
     requests: { cpu: "100m", memory: "64Mi" },
     limits: { cpu: "250m", memory: "128Mi" },
@@ -60,10 +63,10 @@ export async function createConsoleRepositoryLaunchFixture(t) {
   const clients = {
     core: {
       async listNamespace({ labelSelector }) {
-        const namespaceId = labelSelector.slice("openclaw.dev/namespace=".length);
+        const [label, value] = labelSelector.split("=");
         return {
           items: [...namespaces.values()].filter(
-            ({ metadata }) => metadata.labels["openclaw.dev/namespace"] === namespaceId,
+            ({ metadata }) => metadata.labels[label] === value,
           ),
         };
       },
@@ -106,8 +109,11 @@ export async function createConsoleRepositoryLaunchFixture(t) {
     },
   };
   compute.apiClients = Promise.resolve(clients);
-  const secretDriver = new KubernetesSecretDriver({ authentication: { mode: "inCluster" } });
-  secretDriver.client = Promise.resolve(clients.core);
+  const secretDriver =
+    suppliedSecretDriver ?? new KubernetesSecretDriver({ authentication: { mode: "inCluster" } });
+  if (suppliedSecretDriver === undefined) {
+    secretDriver.client = Promise.resolve(clients.core);
+  }
   const state = new InMemoryPlatformState();
   let managedPolicy = { identities: [], roles: [], bindings: [] };
   const storage = {
@@ -149,6 +155,7 @@ export async function createConsoleRepositoryLaunchFixture(t) {
     computeDriver: compute,
     secretDriver,
     recordOperations: true,
+    filesystemConfiguration,
     // Credential provisioning requires a configured browser CSRF origin.
     publicOrigin: true,
   });
@@ -160,13 +167,10 @@ export async function createConsoleRepositoryLaunchFixture(t) {
     unit.namespaces.transitionNamespaceStatus(namespace.id, "provisioning", "ready"),
   );
   const namespaceName = kubernetesNamespaceName(namespace.id);
-  namespaces.set(namespaceName, {
-    ...compute.manifest("v1", "Namespace", namespaceName, { namespaceId: namespace.id }),
-    status: { phase: "Active" },
-  });
-  // Canonical Secrets live in the control-plane tenant, separate from workloads.
-  // Seed completed Namespace provisioning with the real Driver's ownership labels.
+  // Single-cluster workloads and canonical storage use the same tenant namespace.
+  // Seed completed provisioning with the real Driver's ownership and storage labels.
   const controlNamespace = compute.gatewayNamespaceManifest({ namespaceId: namespace.id });
+  assert.equal(controlNamespace.metadata.name, namespaceName);
   namespaces.set(controlNamespace.metadata.name, {
     ...controlNamespace,
     status: { phase: "Active" },

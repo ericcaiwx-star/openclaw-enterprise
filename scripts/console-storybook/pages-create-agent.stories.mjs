@@ -53,6 +53,8 @@ export const CreateProvisioningSecrets = {
   ...story("createProvisioningSecrets"),
   name: "Provisioning with saved Secrets",
 };
+export const CreateDeploymentPending = story("createDeploymentPending");
+export const CreateDeploymentFailed = story("createDeploymentFailed");
 export const CreateUnsupportedProvisioning = {
   ...story("createUnsupportedProvisioning"),
   name: "Unsupported provisioning",
@@ -62,11 +64,18 @@ export const CreatePresetWorkspaceFiles = {
   name: "Preset workspace files",
 };
 export const CreateWorkspaceFiles = { ...story("createWorkspaceFiles"), name: "Workspace files" };
-export const CreateEmbedded = { ...story("createEmbedded"), name: "OpenAI with OpenClaw harness" };
+export const CreateDedicatedOpenclaw = story("createDedicatedOpenclaw");
+export const CreateEmbedded = { ...story("createEmbedded"), name: "Embedded OpenClaw" };
+export const CreateDedicatedOpenclawExperimental = {
+  ...story("createDedicatedOpenclawExperimental"),
+  name: "Experimental Dedicated OpenClaw",
+};
 export const RepositorySelection = {
   ...story("createRepositoriesSelected"),
-  name: "Approved repositories and shared access",
+  name: "Repositories using the Agent default",
 };
+export const RepositoryDetails = story("createRepositoriesDetails");
+export const RepositoryDescriptionsPending = story("createRepositoriesDescriptionsPending");
 export const RepositoryContributor = {
   ...story("createRepositoriesContributor"),
   name: "Contributor without issue management",
@@ -105,11 +114,22 @@ export const CreateBoundCredentialPreset = {
   name: "Preset with saved model credential",
 };
 export const CreateNoPresets = { ...story("createNoPresets"), name: "No Presets" };
+export const CreateWithoutPreset = {
+  ...story("createWithoutPreset"),
+  name: "Start without Preset",
+};
 export const CreateAnthropic = {
   ...story("createAnthropic"),
   name: "Anthropic with OpenClaw harness",
 };
 export const CreateCodexPat = { ...story("createCodexPat"), name: "Service Accounts" };
+export const CreateOAuth = story("createOAuth");
+export const CreateOAuthPending = story("createOAuthPending");
+export const CreateOAuthReady = story("createOAuthReady");
+export const CreateOAuthDenied = story("createOAuthDenied");
+export const CreateOAuthUnavailable = story("createOAuthUnavailable");
+export const CreateOAuthError = story("createOAuthError");
+export const CreateOAuthExpired = story("createOAuthExpired");
 export const CreatePatToOpenClaw = {
   ...story("createPatToOpenClaw"),
   name: "Switch from Service Accounts to OpenClaw",
@@ -136,6 +156,10 @@ export const CreatePasswordPreset = {
   ...story("createPasswordPreset"),
   name: "Standard Codex password variable",
 };
+export const CreatePasswordPresetMissingModel = {
+  ...story("createPasswordPresetMissingModel"),
+  name: "Standard Codex missing model",
+};
 export const CreatePasswordPresetDraft = {
   ...story("createPasswordPresetDraft"),
   name: "Standard Codex password draft",
@@ -144,6 +168,14 @@ export const CreatePasswordPresetDenied = {
   ...story("createPasswordPresetDenied"),
   name: "Password Secret creation denied",
 };
+
+export const RepositoryOne = story("createRepositories1");
+export const RepositoryFive = story("createRepositories5");
+export const RepositoryTwentyFive = story("createRepositories25");
+export const RepositoryLargeCatalog = story("createRepositories140");
+export const RepositoryExactSearch = story("createRepositoriesExactSearch");
+export const RepositoryCustom = story("createRepositoriesCustom");
+export const RepositoryPolicyConflict = story("createRepositoriesPolicyConflict");
 
 export const CreateStandardOpenclawPreset = {
   ...story("createStandardOpenclawPreset"),
@@ -172,3 +204,6 @@ export const CreatePresetNavigation = story("createPresetNavigation");
 export const PresetVariableNavigation = story("presetVariableNavigation");
 
 export const RepositoryNavigationOutage = story("createRepositoryNavigationOutage");
+
+export const DefaultPresetLoading = story("createDefaultPresetLoading");
+export const DefaultPresetDenied = story("createDefaultPresetDenied");

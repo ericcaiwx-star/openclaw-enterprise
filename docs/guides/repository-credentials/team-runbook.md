@@ -21,9 +21,10 @@ in Agent configuration, images, examples, or logs.
 ## Register and install the GitHub App
 
 A GitHub organization owner or authorized App manager prepares the App; an OCC
-administrator configures the platform and Namespace policy. Team members then
-create and deploy Agents through their existing OCC permissions. GitHub App
-installation does not grant a person OCC access.
+administrator configures the platform and Namespace policy, creates each Agent,
+and [grants team members access](../topics/iam.md#let-a-person-run-an-existing-agent)
+to deploy and operate it. GitHub App installation does not grant a person OCC
+access.
 
 1. In the organization's **Settings → Developer settings → GitHub Apps**, create
    an App with a descriptive team name and your team's homepage. For an App used
@@ -35,9 +36,11 @@ installation does not grant a person OCC access.
    **Issues** to **Read and write**, with **Metadata**, **Checks** and **Commit
    statuses** at **Read-only** to support all three
    [access levels](../../reference/repository-credentials/access-levels.md).
-   OCE narrows each token to its selected level. This PR workflow uses Contributor,
-   so its token requests Issues read, not write. Leave other permissions
-   unselected; workflow editing is not part of these levels.
+   OCE narrows each token to its selected level. This PR workflow uses
+   Contributor with issue management off (`git-write`), so its token requests
+   Issues read, not write. In the Console, choose **Contributor**, open
+   **Customize access**, and turn off **Create and manage issues**. Leave other
+   permissions unselected; workflow editing is not part of these levels.
 3. [Install the App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app)
    on the organization and select **Only select repositories**, including the
    intended repository. For an existing installation, have its administrator
@@ -159,13 +162,13 @@ commit, immutable images, Agent/revision IDs, commit SHA, and PR URL without
 credentials. A ready Pod or valid configuration does not prove this workflow;
 repeat the installed check after changing controller/runtime images.
 
-| Symptom                                                 | First check and recovery                                                                                                                                                 |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Admission rejected                                      | Compare the actual OCC Namespace ID, repository reference, selected profile, Backend IDs, and immutable registry across API, worker, and service.                        |
-| TLS error or connection timeout                         | Check DNS, certificate SAN/public CA, Service 443 → 8443, and effective DNS/HTTPS NetworkPolicies. Keep certificate verification enabled.                                |
-| GitHub access denied                                    | Check repository selection, approved App permissions, numeric repository identity, repository rules and the selected access level. Use Contributor for this PR workflow. |
-| Push or PR response uncertain                           | Inspect GitHub's branch/PR state before retrying; do not blindly repeat a possible write.                                                                                |
-| Session lost after service restart, or deadline reached | Inspect retained cleanup obligations, then explicitly deploy a new authorized revision. Its deployment does not settle earlier cleanup or replay operations.             |
+| Symptom                                                 | First check and recovery                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Admission rejected                                      | Compare the actual OCC Namespace ID, repository reference, selected profile, Backend IDs, and immutable registry across API, worker, and service.                                                                                                                                                                              |
+| TLS error or connection timeout                         | Check DNS, certificate SAN/public CA, Service 443 → 8443, and effective DNS/HTTPS NetworkPolicies. Keep certificate verification enabled.                                                                                                                                                                                      |
+| GitHub access denied                                    | Check repository selection, approved App permissions, numeric repository identity, repository rules and the selected access level. For this PR workflow, use Contributor with issue management off (`git-write`); in the Console choose **Contributor**, open **Customize access**, and turn off **Create and manage issues**. |
+| Push or PR response uncertain                           | Inspect GitHub's branch/PR state before retrying; do not blindly repeat a possible write.                                                                                                                                                                                                                                      |
+| Session lost after service restart, or deadline reached | Inspect retained cleanup obligations, then explicitly deploy a new authorized revision. Its deployment does not settle earlier cleanup or replay operations.                                                                                                                                                                   |
 
 When finished, stop the Agent through its normal lifecycle. Confirm runtime
 retirement and [credential cleanup](../../reference/repository-credentials.md#sessions-and-closure);

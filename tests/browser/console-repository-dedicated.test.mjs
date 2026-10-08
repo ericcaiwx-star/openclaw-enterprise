@@ -1,28 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
-import { chromium } from "playwright";
-import { FilesystemConfigurationDriver } from "../../apps/controller/src/drivers/configuration/filesystem/index.ts";
 import { createConsoleRepositoryLaunchFixture } from "../helpers/console-repository-launch.mjs";
-import { setSlackSelection } from "./console-agents-browser-helpers.mjs";
+import {
+  login,
+  newPage,
+  repositoryCheckbox,
+  setSlackSelection,
+} from "./console-agents-browser-helpers.mjs";
+import { openCreateSecretDialog } from "./console-agents-test-support.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
-
-async function openCreateSecretDialog(scope, label) {
-  await scope.getByLabel(label, { exact: true }).fill("Create a new Secret");
-  await scope.getByRole("option", { name: "Create new Secret...", exact: true }).click();
-}
 
 for (const issuesEnabled of [true, false]) {
   test(`one Dedicated Agent retains repository scope through Slack setup, credentials and deployment admission (issues ${issuesEnabled ? "on" : "off"})`, async (t) => {
     const { fixture, namespace, modelSecret, grantModelAccess } =
-      await createConsoleRepositoryLaunchFixture(t);
-    const root = await mkdtemp(join(tmpdir(), "occ-repository-preset-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    const configurationDriver = new FilesystemConfigurationDriver(root);
-    fixture.controller.registerDriver(configurationDriver);
-    fixture.controller.selectDriver("configuration", configurationDriver.id);
+      await createConsoleRepositoryLaunchFixture(t, { filesystemConfiguration: true });
     const preset = await fixture.request("POST", `/namespaces/${namespace.id}/presets`, {
       body: {
         name: "Repository teammate",
@@ -30,6 +21,7 @@ for (const issuesEnabled of [true, false]) {
           agent: {
             name: "Repository teammate",
             executionMode: "dedicated",
+            repositoryBindings: [{ repositoryRef: "application" }],
             harnessAuth: { method: "api_key", source: modelSecret.ref },
           },
           configuration: { values: createHarnessConfiguration("codex", "gpt-5.1") },
@@ -37,33 +29,18 @@ for (const issuesEnabled of [true, false]) {
       },
     });
     assert.equal(preset.status, 201, JSON.stringify(preset));
-    const browser = await chromium.launch({
-      headless: true,
-      ...(process.env.OCC_TEST_BROWSER_EXECUTABLE
-        ? { executablePath: process.env.OCC_TEST_BROWSER_EXECUTABLE }
-        : {}),
-    });
-    let context;
-    fixture.registerCleanupBeforeAppClose(async () => {
-      try {
-        await context?.close();
-      } finally {
-        await browser.close();
-      }
-    });
-    context = await browser.newContext();
-    const page = await context.newPage();
-    page.setDefaultTimeout(10_000);
-    await page.goto(`${fixture.origin}/console/agents/new?namespace=${namespace.id}`);
-    await page.getByLabel("Username").fill(fixture.credentials.email);
-    await page.getByLabel("Password").fill(fixture.credentials.password);
-    await page.getByRole("button", { name: "Login" }).click();
+    const { page } = await newPage(t, fixture);
+    await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
     await page.getByLabel("Preset template").selectOption(preset.data.id);
     await page.getByRole("button", { name: "Use Preset" }).click();
     await page.getByLabel("Agent name").fill("Repository teammate");
     await page.getByLabel("Harness", { exact: true }).selectOption("codex");
-    await page.locator("#repository-application").check();
-    await page.locator("#repository-documentation").check();
+    // An omitted profile in a legacy Preset retains the API's git-write default as Custom.
+    await page.getByText("Contributor · no issue management · Custom", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Access for example/application" }).click();
+    await page.locator("#repository-inherit-application").check();
+    await page.getByRole("button", { name: "Access for example/application" }).click();
+    await repositoryCheckbox(page, "example/documentation").click();
     await page.getByRole("radio", { name: /^Contributor / }).check();
     assert.equal(await page.locator(".repository-write-access").isVisible(), false);
     const customize = page.getByText("Customize access", { exact: true });
@@ -74,10 +51,22 @@ for (const issuesEnabled of [true, false]) {
       true,
     );
     await page.getByRole("checkbox", { name: /^Create and manage issues/ }).uncheck();
+    assert.equal(
+      await page
+        .getByRole("radio", {
+          name: "Contributor Push code and work with pull requests.",
+          exact: true,
+        })
+        .isChecked(),
+      true,
+    );
     await page
-      .getByText("Contributor · push code and work with pull requests. Issue management is off.", {
-        exact: true,
-      })
+      .getByText(
+        "Contributor · no issue management applies to repositories using the Agent default.",
+        {
+          exact: true,
+        },
+      )
       .waitFor();
     await page.getByRole("checkbox", { name: /^Create and manage issues/ }).check();
     await customize.press("Enter");
@@ -90,8 +79,8 @@ for (const issuesEnabled of [true, false]) {
       await customize.press("Enter");
       await page.getByRole("checkbox", { name: /^Create and manage issues/ }).uncheck();
       // Changing the repository set must not silently restore issue management.
-      await page.locator("#repository-documentation").uncheck();
-      await page.locator("#repository-documentation").check();
+      await page.getByRole("button", { name: "Remove example/documentation" }).click();
+      await repositoryCheckbox(page, "example/documentation").click();
       assert.equal(
         await page.getByRole("checkbox", { name: /^Create and manage issues/ }).isChecked(),
         false,

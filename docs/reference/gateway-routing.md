@@ -28,8 +28,9 @@ Envoy Gateway and cert-manager controllers on trusted nodes as well.
 
 The shared Gateway and certificate resources are in the Helm release namespace.
 Envoy's proxy Service and Pods are in `envoyNamespace`. Each Agent's HTTPRoute
-and gateway Service are in its Gateway runtime namespace for dedicated execution,
-or its tenant data-plane namespace for embedded execution. The installer needs
+and gateway Service are in its tenant namespace, or for a dedicated Agent in the
+two-cluster profile, its `oce-gateways-<hash>` namespace in the control cluster.
+The installer needs
 permission to create the shared resources, including the NetworkPolicy in the
 Envoy namespace. The worker needs tenant HTTPRoute and SecurityPolicy permissions; the API does
 not need to write routes or execute commands in gateway Pods.
@@ -71,19 +72,43 @@ a revision. There is no separate periodic repair.
 
 ### Native node endpoint
 
-Runtime-enabled dedicated revisions also receive an exact `/node` route under
-the same Agent URL, hostname and `https` listener. It uses the same backend
-Service and path rewrite. The route removes `x-occ-identity`, `x-api-key`,
+Runtime-enabled dedicated revisions also receive an exact `/node` route and an
+exact `/node/__openclaw__/worker` route under the same Agent URL, hostname and
+`https` listener, plus `/node/__openclaw__/worker-bundle/v1/` and
+`/node/__openclaw__/worker-transfer/v1/` prefix routes. All use the same backend
+Service; the worker routes rewrite to OpenClaw's `/__openclaw__/` ingress paths.
+The route removes `x-occ-identity`, `x-api-key`, `authorization`, `cookie`,
 forwarded identity and scope headers, and Tailscale identity headers while
 setting `x-real-ip` from Envoy's downstream socket. This preserves trusted
-proxy attribution without granting the OCC administrative identity.
+proxy attribution without granting the OCC administrative identity. The bundle
+and transfer routes keep `authorization`, because those worker requests carry
+their own one-time bearer tokens.
 
 Compute attaches a tenant-local SecurityPolicy with no authentication fields
 to this node HTTPRoute. Envoy Gateway v1.6.7 replaces the entire inherited
 Gateway policy at this more specific scope, so the node route does not require
 the OCC service key. Native OpenClaw verifies the signed device identity and
 node-only bootstrap or device token. Invalid credentials and attempts to use
-node credentials as an operator fail at the native Gateway.
+node credentials as an operator fail at the native Gateway. Worker callbacks
+authenticate their first WebSocket frame with the Gateway-minted, session-bound
+worker admission credential; the Harness never receives the OCC service key.
+
+Dedicated Codex also receives a POST-only
+`/node/__openclaw__/native-hook/` prefix, rewritten to
+`/__openclaw__/native-hook/`. It preserves the Authorization header while
+removing the administrative identity headers listed above. OpenClaw authenticates
+each callback with its per-relay capability and generation; this route does not
+grant node or operator access. Compute derives the callback URL from this Agent's
+private endpoint and refuses a caller-selected override.
+
+The Gateway delivers each hook capability through its authenticated Codex
+app-server connection. The Harness stores it under `/home/node/.oce-native-hooks`
+with a private directory mode, outside the workspace and file-transfer roots.
+This directory is ephemeral Pod state. It is not an isolation boundary against
+compromised Harness code running as the same user. Gateway checks bind each
+capability to this Agent's live provider/relay and exact generation; it grants
+neither another Agent's callbacks nor node or operator access. Native hooks use the installation's public CA bundle
+with normal HTTPS certificate verification.
 
 Preparation creates or repairs these resources under the serving Gateway's
 revision. Preparing a replacement preserves that ownership until activation
@@ -115,14 +140,14 @@ header before forwarding.
 
 The tenant-worker role grants Secret get/create/update/delete for admitted Gateway
 credential delivery and Compute-owned node enrollment. Operators bind this role
-only in approved data-plane and Gateway namespaces; the chart creates no
+only in approved tenant runtime namespaces; the chart creates no
 cluster-wide binding for it. The worker
 is part of the trusted control plane. Harnesses receive a node-only setup code
 and public CA bundle, never this administrative service key.
 
 The HTTPRoute sets `x-occ-identity: occ-workspace-files` and sets `x-real-ip`
-from Envoy's direct downstream connection. It removes `x-forwarded-for`,
-`forwarded`, and `x-openclaw-scopes`. Kubernetes Compute renders native
+from Envoy's direct downstream connection. It removes `authorization`, `cookie`,
+`x-forwarded-for`, `forwarded`, and `x-openclaw-scopes`. Kubernetes Compute renders native
 trusted-proxy auth from the operator's `network.gatewayTrustedProxyCidrs`, enables
 `allowRealIpFallback`, and grants the fixed identity `operator.admin`. Agent
 Configuration cannot override that trust boundary. A direct loopback connection
@@ -188,7 +213,9 @@ Helm's `gatewayRouting` settings configure shared infrastructure:
 
 The Installation's `drivers.compute.configuration.gatewayRouting` separately
 requires `gatewayName`, `gatewayNamespace`, and `envoyNamespace`; `hostname` is
-optional. `envoyHttpsTargetPort` defaults to `10443` and must match Helm's value,
+optional. `endpointPort` defaults to `443`. Set it only when the external load
+balancer exposes the Gateway listener on another port; Helm does not configure
+that external mapping. `envoyHttpsTargetPort` defaults to `10443` and must match Helm's value,
 so the Harness egress rule permits the listener's actual Pod port.
 Match the Helm values and use the release namespace for
 `gatewayNamespace`. Helm does not rewrite the Installation Secret. Remove
@@ -250,6 +277,32 @@ continues to use the original WSS endpoint. Native-host requests are
 intercepted before the normal API not-found path, resolved to the exact Agent
 represented by the host, and checked against the current active revision before
 the API proxies HTTP or WebSocket traffic through the private route.
+
+## Public preview routing
+
+Optional `gatewayRouting.sandbox` in Kubernetes Compute adds a stable per-Agent
+HTTPS origin for dedicated execution under the operator's preview domain.
+Embedded OpenClaw retains its native preview configuration. Compute owns the native
+`sandboxOrigin` and `sandboxPort` values and rejects conflicting Agent settings.
+The sandbox backend port is `network.gatewayPort + 1`, so the main port must be
+below 65535. The selected runtime must support the dedicated sandbox listener.
+
+The Agent's `-sandbox` HTTPRoute attaches only to the shared Gateway's separate
+`sandbox` listener. It accepts GET and HEAD and forwards to the sandbox port,
+never the administrative Gateway port. Cookies, authorization, API keys and
+native identity headers are removed. A route-specific SecurityPolicy permits
+public shell and renderer assets without granting the OCC administrative identity.
+The runtime owns shell CSP, resource allowlisting and iframe isolation; private
+HTML content still arrives through the authenticated native UI.
+
+Sandbox routes and policies follow serving revision ownership. Replacing a Pod
+keeps the origin stable; stopping or deleting its serving revision removes the
+route before its policy. Retiring an older revision preserves newer resources.
+An Agent-owned ingress policy and the Envoy egress policy admit the additional
+backend port only when configured. Agent deployment reconciles preview ingress
+even when the tenant namespace already exists. Helm requires explicit ingress peers on the separate listener,
+a wildcard certificate, and a domain outside the shared session cookie scope.
+See [HTML preview setup](../guides/deploy/native-admin.md#enable-html-previews).
 
 ## Source and verification
 

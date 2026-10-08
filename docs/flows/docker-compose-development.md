@@ -1,7 +1,7 @@
 ---
 created: 2026-08-24
-updated: 2026-09-25
-last_updated_session: authoring-run/a81f3e71-1c8e-4692-8e2e-d462ddacc10b
+updated: 2026-10-01
+last_updated_session: authoring-run/53c6746c-9551-4f70-9d1f-e0540ce29868
 ---
 
 # Compose development flow
@@ -9,20 +9,17 @@ last_updated_session: authoring-run/a81f3e71-1c8e-4692-8e2e-d462ddacc10b
 ## Overview
 
 `./bin/occ dev up` starts local OpenClaw Enterprise development from a checkout.
-The `scripts/dev-up` entry point selects the same profile. Docker Compute is
-selected by default. Setting `OCC_DEVELOPMENT_COMPUTE_DRIVER=kubernetes` keeps
-OCC in Compose but dispatches Compute to the
-[local k3d profile](../guides/deploy/local-kubernetes-development.md).
-That profile can select the OpenShell Sandbox Driver for its supported
-fail-closed path. OpenShell runs the complete control plane in k3d by default;
-`OCC_DEVELOPMENT_CONTROL_PLANE=compose` instead keeps PostgreSQL, the API, and
-the worker in Compose. Both modes prepare pinned OpenShell infrastructure and
-give the Sandbox Driver rendered workspace-chart resources to reconcile before
-reporting readiness.
+The `scripts/dev-up` entry point selects the same profile. By default OCC and
+PostgreSQL run in Compose with Docker Compute. Operators can explicitly select
+Kubernetes Compute with either the Compose control plane or the
+[local k3d-only profile](../guides/deploy/local-kubernetes-development.md). The
+Kubernetes profile can select the OpenShell Sandbox Driver for its fail-closed
+path; it prepares pinned OpenShell infrastructure and reconciles rendered
+workspace-chart resources before reporting readiness.
 Compose-backed profiles perform host preflight, select Docker Engine or Podman,
 prepare runtime images, start Compose, and wait for PostgreSQL migration,
-Installation bootstrap, API health, and worker readiness. Kubernetes-only
-OpenShell performs the equivalent readiness checks inside its owned cluster.
+Installation bootstrap, API health, and worker readiness. The Kubernetes-only
+profile performs the equivalent readiness checks inside its owned cluster.
 Startup proves authenticated Installation access with a protected local
 bootstrap service key; it does not create an Agent or prove model execution.
 
@@ -64,7 +61,9 @@ graph TD
   KReady --> KSandbox{"Sandbox profile"}
   KSandbox -->|none| KProof
   KSandbox -->|OpenShell| KOpenShell["Install pinned Agent Sandbox, RuntimeClass,<br/>Gateway, and render workspace resources"]
-  KOpenShell --> KWorkspace["Driver applies workspace resources and creates<br/>the default Namespace's owned Workspace"]
+  KOpenShell -->|Compose| KRouting["Install private Envoy route and project<br/>its service key and public CA"]
+  KRouting --> KWorkspace["Driver applies workspace resources and creates<br/>the default Namespace's owned Workspace"]
+  KOpenShell -->|Kubernetes| KWorkspace
   KWorkspace --> KFailClosed["Default Namespace ready;<br/>Agent projection remains fail closed"]
   KFailClosed --> KProof
   KProof["Prove authenticated<br/>Installation access"]
@@ -135,19 +134,25 @@ import, authenticated readiness, and cleanup through the recorded engine.
 
 ### 5. Prepare the optional OpenShell development profile
 
-`internal/occdev/openshell_k3d.go:upOpenShellK3d`,
+`internal/occdev/openshell_k3d.go:upK3d`,
 `internal/occdev/openshell.go:prepareOpenShell`,
 `apps/controller/src/drivers/sandbox/openshell.ts:ensureNamespace`
 
-OpenShell defaults to the Kubernetes-only lifecycle before Compose rendering.
-It pins K3s and OpenShell inputs, installs PostgreSQL, OCE, and one central
-Gateway in `oce-system`, and publishes only an admitted API proxy on host
-loopback.
+With `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`, OpenShell uses the
+Kubernetes-only lifecycle before Compose rendering. It pins K3s and OpenShell
+inputs, installs PostgreSQL, OCE, and one central Gateway in `oce-system`, and
+publishes only an admitted API proxy on host loopback.
 
-With `OCC_DEVELOPMENT_CONTROL_PLANE=compose`, the common Kubernetes lifecycle
-instead starts PostgreSQL, migration, bootstrap, the API, and the worker in
-Compose. It installs the central Gateway in `openshell-system` and exposes its
-fixed NodePort only to the owned container network. In both modes, the worker
+By default, the Kubernetes lifecycle starts PostgreSQL, migration, bootstrap,
+the API, and the worker in Compose. It installs the central Gateway in
+`openshell-system` and exposes its fixed NodePort only to the owned container
+network. Before starting the API and worker, the launcher installs pinned
+cert-manager and Envoy Gateway controllers, renders only the Helm-owned private
+routing resources, and copies the generated public CA and a dedicated service
+key into the private state directory. The Installation uses the k3d node name
+and Envoy HTTPS NodePort. After Compose starts, the launcher reapplies Envoy
+ingress with the controller, Kubernetes worker, and k3d node `/32` addresses.
+In both modes, the worker
 creates the bootstrap Namespace through the regular Compute workflow. The
 Sandbox Driver applies rendered workspace resources and the operator label
 before creating the corresponding Gateway Workspace. Startup waits until the
@@ -164,17 +169,21 @@ OCC Namespace becomes ready. See the
 - With `OCC_DEVELOPMENT_COMPUTE_DRIVER=kubernetes`, startup should instead
   report Kubernetes Compute, a private kubeconfig, and the disposable k3d
   context; it does not mount the engine socket into the Kubernetes worker.
-- With `OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell`, startup should also report
+- With `OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell` and
+  `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`, startup should also report
   Kubernetes-only deployment, one ready `oce-system/openshell-gateway` Service, the
   `openshell-sandbox` RuntimeClass, the Agent Sandbox CRD, and workspace
   resources in the bootstrap Namespace. The selected real dev-up case also
   reads the owned Workspace through the Gateway API. This proves infrastructure
   readiness, not a model turn. The expected Agent result is the explicit
   unsupported `secretKeyRef` projection failure with no Sandbox or Agent Pod.
-- With `OCC_DEVELOPMENT_CONTROL_PLANE=compose`, OpenShell startup should report
+- With the default Compose control plane, OpenShell startup should report
   `Control plane: Compose`, retain a private Compose snapshot, install the
-  Gateway in `openshell-system`, and still create the bootstrap Namespace's
-  operator-mode Workspace.
+  Gateway in `openshell-system`, program
+  `oce-system/openclaw-enterprise-agent-gateways`, and create the bootstrap
+  Namespace's operator-mode Workspace. `installation.yaml` must contain the
+  Envoy NodePort endpoint, while only the controller and `worker-kubernetes`
+  receive `gateway-api-key` and `gateway-ca.crt` mounts.
 - Docker Compute on Podman startup verification should show Podman as the
   selected engine, mount only its reported API socket into the worker, and
   complete the same authenticated Installation proof without a `docker` alias.
@@ -206,6 +215,10 @@ OCC Namespace becomes ready. See the
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-01 16:58: Added automatic private Envoy routing for the Compose-backed OpenShell profile. (authoring-run/53c6746c-9551-4f70-9d1f-e0540ce29868 - 987c8c2b4ace1e152262ef6920b6d0f9ff26a086)
+
+- 2026-09-28 00:34: Restored Compose as the default control plane and made Kubernetes-only startup explicit. (01a0e441-02f9-70b2-ad45-0a1a5049954a - 201f31d511464133f06e0526bb5545ed1cb27e25)
 
 - 2026-09-25 12:23: Added the selectable Compose control-plane path for Kubernetes Compute with OpenShell while retaining the Kubernetes-only default. (authoring-run/a81f3e71-1c8e-4692-8e2e-d462ddacc10b - 64ab72aed5c4926e4a2080ade91d785e531801a2)
 

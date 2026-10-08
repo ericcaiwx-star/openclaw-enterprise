@@ -12,7 +12,9 @@ Sandbox Driver.
 
 Create `registry.json` using the [canonical registry schema](../../reference/repository-credentials.md#canonical-platform-registry).
 Use the real GitHub App, installation and numeric repository IDs, and the
-server-assigned OCC Namespace IDs. One App installation can serve several
+server-assigned OCC Namespace IDs. Installations always use a GitHub App; the
+[development token authority](../../reference/repository-credentials/development-token.md)
+is standalone and development-only. One App installation can serve several
 repository entries; each Agent binding still admits a separate single-repository
 session. The example below uses Backend ID `repository-backend`, registry
 maximum duration `86400`, and all three profiles.
@@ -67,6 +69,17 @@ from the Helm-derived origin and rejects a serving certificate that does not
 cover that host. For direct standalone startup, use the
 [standalone configuration](../../reference/repository-credentials.md#standalone-service-inputs)
 with explicit file paths instead.
+
+Plan session capacity before enabling many Agents. The single sidecar holds
+every repository session in the installation: one per binding of each deployed
+revision. A closing session keeps its slot until disposal, so stopped or
+replaced revisions can hold slots for a while. The default limit is 16
+sessions, and one Agent may have up to 16 bindings. When the limit is reached, new sessions
+fail with a retryable `overloaded` error until slots free. To raise it, add
+`"limits": { "sessions": 64 }` (any positive integer) to `config.json`. Other
+[service bounds](../../reference/repository-credentials.md#client-routing-and-limits),
+such as 32 concurrent exchanges, stay unchanged; raise them only with measured
+load.
 
 ```bash
 chmod 700 /secure/occ/repositories
@@ -215,17 +228,18 @@ name or the deliberate cutover name.
 
 ## Install and verify
 
-Update the operator-owned startup Secret from the edited Installation YAML; use
-your configured Secret name/key if they differ from the defaults below. The
-command reads the file and does not print its contents. Render and review the
+Update the operator-owned startup Secret from the edited Installation YAML. The
+command replaces only the Installation key, which keeps the Secret's
+`openclaw.dev/installation-id` annotation, and does not print the file. Render and review the
 complete chart, then apply the values through the existing release:
 
 ```bash
-kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
-  create secret generic occ-installation-startup \
-  --from-file=installation.yaml="$OCC_INPUT_DIRECTORY/installation.yaml" \
-  --dry-run=client -o yaml | \
-  kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" apply -f -
+export OCC_INSTALLATION_SECRET="$(yq -er '.installation.secretName // "occ-installation-startup"' "$OCC_INPUT_DIRECTORY/values.yaml")"
+export OCC_INSTALLATION_KEY="$(yq -er '.installation.key // "installation.yaml"' "$OCC_INPUT_DIRECTORY/values.yaml")"
+jq -n --arg key "$OCC_INSTALLATION_KEY" --rawfile document "$OCC_INPUT_DIRECTORY/installation.yaml" \
+  '{data: {($key): ($document | @base64)}}' |
+  kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
+    patch secret "$OCC_INSTALLATION_SECRET" --type merge --patch-file /dev/stdin
 helm template oce deploy/helm/openclaw-enterprise --namespace openclaw-system \
   -f "$OCC_INPUT_DIRECTORY/values.yaml" > /tmp/oce-rendered.yaml
 helm upgrade --install oce deploy/helm/openclaw-enterprise \
@@ -239,9 +253,10 @@ kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system 
 Expect one worker Pod containing worker and credential-service containers, a
 `Recreate` deployment, and the internal HTTPS Service. The API mounts only the
 registry and public CA; the worker additionally mounts the private control
-socket; App/TLS private inputs stay in the service container. Kubernetes API
-service-account token projection is worker-only. Confirm those mounts from the
-rendered manifests before deploying an Agent.
+socket; App/TLS private inputs stay in the service container. In the worker
+Pod, only the worker container receives a Kubernetes API service-account token;
+the credential-service container (`repository-credentials`) gets none. Confirm
+those mounts from the rendered manifests before deploying an Agent.
 
 A ready sidecar confirms protected startup and the control listener. Continue
 with [Agent creation, deployment and a repository task](../repository-credentials.md#create-and-deploy-an-agent)

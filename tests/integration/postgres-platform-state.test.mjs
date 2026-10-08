@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { Agent, request as httpRequest } from "node:http";
 import test from "node:test";
 import {
   adminEmail,
+  adminPassword,
+  createConfiguredAgent,
   createDurableController,
   databaseUrl,
   parseJsonLines,
@@ -577,6 +580,31 @@ test(
       });
     });
 
+    // The Namespace-unique name constraint surfaces as an actionable duplicate-name conflict.
+    const duplicateAgentId = `agt_${randomUUID()}`;
+    await assert.rejects(
+      state.transact((unit) =>
+        unit.agents.createAgent({
+          id: duplicateAgentId,
+          namespaceId,
+          name: "Provisioning success",
+          configurationId,
+          backendId: null,
+          harnessAuth: { method: "runtime" },
+          executionMode: "embedded",
+          servicePrincipalId: `service-agent-${duplicateAgentId}`,
+          desiredRuntimeState: "stopped",
+          status: "active",
+          createdAt,
+        }),
+      ),
+      {
+        name: "ResourceStateConflictError",
+        message:
+          "An Agent with this name already exists in this Namespace. Choose a different name.",
+      },
+    );
+
     const queue = new PostgresWorkQueue(pool);
     await queue.enqueue({
       kind: "provisioning",
@@ -830,7 +858,14 @@ test(
         "agents_harness_auth_secret_owner",
       ],
       [
-        { method: "chatgpt_service_account", serviceAccountId: fixture.serviceAccount.id },
+        {
+          method: "codex_pat",
+          source: {
+            kind: "service_account",
+            namespaceId: fixture.namespace.id,
+            id: fixture.serviceAccount.id,
+          },
+        },
         "23503",
         "agents_harness_auth_service_account_owner",
       ],
@@ -1278,13 +1313,19 @@ test(
     const [
       { Pool },
       { OCCPluginDriver },
+      { createControllerWorker },
+      { createDevelopmentComputeDriver },
       { PostgresPlatformState },
       { createTestConfigurationDriver },
+      { createBackendWorkerDrivers },
     ] = await Promise.all([
       import("pg"),
       import("../../apps/controller/src/drivers/plugin/index.ts"),
+      import("../../apps/controller/src/worker.ts"),
+      import("../helpers/development.mjs"),
       import("../../packages/occ/src/state/postgres-state.ts"),
       import("../helpers/configuration-driver.mjs"),
+      import("../helpers/postgres-backend-state.mjs"),
     ]);
     const pool = new Pool({ connectionString: databaseUrl });
     context.after(() => pool.end());
@@ -1500,17 +1541,19 @@ test(
         tools: { diffs: { approval: "none" } },
       },
     };
+    const rawSlackApprovers = [
+      { channel: "slack", id: "U456" },
+      { channel: "slack", id: "W789" },
+    ];
     const replacedPlugins = await controller.updateAgent(principalId, {
       namespaceId: namespace.id,
       agentId: agent.id,
       configurationId: replacementConfiguration.id,
       plugins: replacementPlugins,
-      pluginApprovers: [{ channel: "slack", id: "team:T123:user:U456" }],
+      pluginApprovers: rawSlackApprovers,
     });
     assert.deepEqual(replacedPlugins.plugins, replacementPlugins);
-    assert.deepEqual(replacedPlugins.pluginApprovers, [
-      { channel: "slack", id: "team:T123:user:U456" },
-    ]);
+    assert.deepEqual(replacedPlugins.pluginApprovers, rawSlackApprovers);
     const clearedPlugins = await controller.updateAgent(principalId, {
       namespaceId: namespace.id,
       agentId: agent.id,
@@ -1518,18 +1561,14 @@ test(
       plugins: {},
     });
     assert.deepEqual(clearedPlugins.plugins, {});
-    assert.deepEqual(clearedPlugins.pluginApprovers, [
-      { channel: "slack", id: "team:T123:user:U456" },
-    ]);
+    assert.deepEqual(clearedPlugins.pluginApprovers, rawSlackApprovers);
 
     const [reloadedAgent, reloadedRevision] = await state.read(async (view) => [
       await view.agents.findAgent(namespace.id, agent.id),
       await view.revisions.findRevision(namespace.id, agent.id, revision.id),
     ]);
     assert.deepEqual(reloadedAgent.plugins, {});
-    assert.deepEqual(reloadedAgent.pluginApprovers, [
-      { channel: "slack", id: "team:T123:user:U456" },
-    ]);
+    assert.deepEqual(reloadedAgent.pluginApprovers, rawSlackApprovers);
     assert.deepEqual(reloadedRevision.plugins.plugins, initialPlugins);
     assert.deepEqual(reloadedRevision.pluginApprovers, []);
 
@@ -1539,6 +1578,72 @@ test(
     );
     assert.deepEqual(durableRevision.rows[0].admitted_spec.plugins, revision.plugins);
     assert.deepEqual(durableRevision.rows[0].admitted_spec.plugin_approvers, []);
+
+    const pluginFreeRevision = await controller.deployAgent(
+      principalId,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveHarness,
+    );
+    assert.equal(Object.hasOwn(pluginFreeRevision, "plugins"), false);
+    assert.deepEqual(pluginFreeRevision.pluginApprovers, rawSlackApprovers);
+
+    const durablePluginFreeRevision = await pool.query(
+      "SELECT admitted_spec FROM occ.agent_revisions WHERE id = $1",
+      [pluginFreeRevision.id],
+    );
+    assert.deepEqual(
+      durablePluginFreeRevision.rows[0].admitted_spec.plugin_approvers,
+      rawSlackApprovers,
+    );
+
+    const workerPool = new Pool({ connectionString: databaseUrl, max: 1 });
+    let worker;
+    let workerPoolClosed = false;
+    context.after(async () => {
+      if (workerPoolClosed) {
+        return;
+      }
+      if (worker === undefined) {
+        await workerPool.end();
+      } else {
+        await worker.stop();
+      }
+    });
+    const developmentCompute = createDevelopmentComputeDriver();
+    const observedRawApproverHandoffs = [];
+    const workerDrivers = createBackendWorkerDrivers(
+      {
+        ...developmentCompute,
+        async prepareRevision(candidate, deploymentContext) {
+          if (candidate.id === pluginFreeRevision.id) {
+            assert.deepEqual(candidate.pluginApprovers, rawSlackApprovers);
+            observedRawApproverHandoffs.push(candidate.pluginApprovers);
+          }
+          return developmentCompute.prepareRevision(candidate, deploymentContext);
+        },
+      },
+      [],
+      { secretDriver: harnessSecretDriver },
+    );
+    worker = createControllerWorker({
+      pool: workerPool,
+      pollIntervalMs: 20,
+      drivers: { ...workerDrivers, pluginDriver },
+      emit() {},
+    });
+    await worker.start();
+    await pollUntil("raw Slack approver AgentRevision deployment to reach Compute", async () => {
+      const work = await pool.query(
+        "SELECT state FROM occ.controller_work WHERE revision_id = $1",
+        [pluginFreeRevision.id],
+      );
+      assert.equal(work.rowCount, 1);
+      return work.rows[0].state === "succeeded" ? work.rows[0] : undefined;
+    });
+    await worker.stop();
+    workerPoolClosed = true;
+    worker = undefined;
+    assert.deepEqual(observedRawApproverHandoffs, [rawSlackApprovers]);
 
     const clearedApprovers = await controller.updateAgent(principalId, {
       namespaceId: namespace.id,
@@ -1627,6 +1732,293 @@ test(
       await client.query("ROLLBACK");
       client.release();
     }
+  },
+);
+
+test(
+  "PostgreSQL browsing isolates unreadable saved Agent and revision configuration",
+  requiresPostgres,
+  async (context) => {
+    const { Pool } = await import("pg");
+    const pool = new Pool({ connectionString: databaseUrl });
+    context.after(() => pool.end());
+    const api = await startController(context);
+    const { state } = await createDurableController(pool);
+    const namespace = await request(api, "POST", "/namespaces", {
+      name: `unreadable-configuration-${randomUUID()}`,
+    });
+    assert.equal(namespace.status, 201);
+    const namespaceId = namespace.data.id;
+    const plugins = {
+      "occ-plugin:diffs": { enabled: true, toolDefaults: { approval: "provider_default" } },
+    };
+    const { agent, configuration } = await createConfiguredAgent(
+      api,
+      namespaceId,
+      "Unreadable saved configuration",
+      undefined,
+      { harnessAuth: { method: "runtime" } },
+    );
+    const { agent: healthyAgent } = await createConfiguredAgent(
+      api,
+      namespaceId,
+      "Healthy saved configuration",
+    );
+    const agentPath = `/namespaces/${namespaceId}/agents/${agent.id}`;
+    const revisionPath = `${agentPath}/revisions`;
+
+    // Seed an admitted snapshot through its persistence owner. This test proves
+    // browsing saved state, not Compute execution or runtime readiness.
+    const revision = await state.transact((unit) =>
+      unit.revisions.createRevision({
+        id: `rev_${randomUUID()}`,
+        namespaceId,
+        agentId: agent.id,
+        revision: 1,
+        backendId: null,
+        configurationId: configuration.id,
+        configurationKind: "agent",
+        configurationGeneration: 1,
+        configuration: configuration.values,
+        harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
+        compute: {
+          id: "compute-local-development",
+          implementation: "deterministic-local-development",
+        },
+        harnessAuth: { method: "runtime" },
+        servicePrincipalId: agent.servicePrincipalId,
+        plugins: { driver: { id: "occ-plugin", implementation: "occ/openclaw-plugin" }, plugins },
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const healthyRevision = await request(api, "GET", `${revisionPath}/${revision.id}`);
+    assert.equal(healthyRevision.status, 200);
+
+    // A previously accepted approval enum survives in PostgreSQL after the
+    // application contract changes. Preserve the valid immutable snapshot.
+    const malformedPlugins = {
+      "occ-plugin:diffs": { enabled: true, toolDefaults: { approval: "prompt" } },
+    };
+    await pool.query("UPDATE occ.agents SET plugins = $2::jsonb WHERE id = $1", [
+      agent.id,
+      JSON.stringify(malformedPlugins),
+    ]);
+    const malformedRevisionId = `rev_${randomUUID()}`;
+    await pool.query(
+      `INSERT INTO occ.agent_revisions
+         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
+       SELECT $1, namespace_id, agent_id, revision_number + 1, backend_id,
+              jsonb_set(admitted_spec, '{plugins,plugins}', $2::jsonb, false), admitted_at
+       FROM occ.agent_revisions WHERE id = $3`,
+      [malformedRevisionId, JSON.stringify(malformedPlugins), revision.id],
+    );
+    const readError = { code: "SAVED_CONFIGURATION_UNREADABLE", field: "plugins" };
+    const { plugins: _plugins, harnessAuth: _harnessAuth, ...agentMetadata } = agent;
+    const degradedAgent = { ...agentMetadata, configurationReadError: readError };
+    const degradedRevision = {
+      id: malformedRevisionId,
+      namespaceId,
+      agentId: agent.id,
+      revision: 2,
+      backendId: null,
+      createdAt: healthyRevision.data.createdAt,
+      configurationReadError: readError,
+    };
+
+    const listed = await request(api, "GET", `/namespaces/${namespaceId}/agents`);
+    assert.equal(listed.status, 200);
+    assert.equal(listed.data.length, 2);
+    assert.deepEqual(
+      listed.data.find(({ id }) => id === agent.id),
+      degradedAgent,
+    );
+    assert.deepEqual(
+      listed.data.find(({ id }) => id === healthyAgent.id),
+      healthyAgent,
+    );
+    const detail = await request(api, "GET", agentPath);
+    assert.equal(detail.status, 200);
+    assert.deepEqual(detail.data, degradedAgent);
+
+    const revisions = await request(api, "GET", revisionPath);
+    assert.equal(revisions.status, 200);
+    assert.deepEqual(revisions.data, [healthyRevision.data, degradedRevision]);
+    const validDetail = await request(api, "GET", `${revisionPath}/${revision.id}`);
+    assert.equal(validDetail.status, 200);
+    assert.deepEqual(validDetail.data, healthyRevision.data);
+    const invalidDetail = await request(api, "GET", `${revisionPath}/${malformedRevisionId}`);
+    assert.equal(invalidDetail.status, 200);
+    assert.deepEqual(invalidDetail.data, degradedRevision);
+
+    // Browsing must not admit partially decoded records to mutation or runtime
+    // paths, and a failed edit must not turn unreadable plugin state into {}.
+    for (const read of [
+      (view) => view.agents.findAgent(namespaceId, agent.id),
+      (view) => view.agents.listAgents(namespaceId),
+      (view) => view.revisions.findRevision(namespaceId, agent.id, malformedRevisionId),
+      (view) => view.revisions.listRevisions(namespaceId, agent.id),
+    ]) {
+      await assert.rejects(state.read(read), { name: "DependencyUnavailableError" });
+    }
+    const beforeMutation = await pool.query(
+      `SELECT plugins,
+              (SELECT count(*)::integer FROM occ.agent_revisions WHERE agent_id = $1) AS revisions,
+              (SELECT count(*)::integer FROM occ.controller_work WHERE agent_id = $1) AS work
+       FROM occ.agents WHERE id = $1`,
+      [agent.id],
+    );
+    for (const [method, path, body] of [
+      ["PATCH", agentPath, { configurationId: configuration.id }],
+      ["POST", `${agentPath}/deploy`, undefined],
+    ]) {
+      const rejected = await request(api, method, path, body);
+      assert.equal(rejected.status, 503);
+      assert.equal(rejected.error.code, "DEPENDENCY_UNAVAILABLE");
+      assert.equal(rejected.data, undefined);
+    }
+    const afterMutation = await pool.query(
+      `SELECT plugins,
+              (SELECT count(*)::integer FROM occ.agent_revisions WHERE agent_id = $1) AS revisions,
+              (SELECT count(*)::integer FROM occ.controller_work WHERE agent_id = $1) AS work
+       FROM occ.agents WHERE id = $1`,
+      [agent.id],
+    );
+    assert.deepEqual(afterMutation.rows, beforeMutation.rows);
+
+    // The degraded response has the same exact-resource IAM boundary as a
+    // healthy response; neither metadata nor decode errors may leak on denial.
+    for (const [resourceKind, resourceId, listPath, detailPath, visible] of [
+      [
+        "agent_revision",
+        malformedRevisionId,
+        revisionPath,
+        `${revisionPath}/${malformedRevisionId}`,
+        [healthyRevision.data],
+      ],
+      ["agent", agent.id, `/namespaces/${namespaceId}/agents`, agentPath, [healthyAgent]],
+    ]) {
+      await pool.query(
+        `INSERT INTO occ.iam_restrictions
+           (id, namespace_id, action, resource_kind, resource_id, effect)
+         VALUES ($1, $2, 'read', $3, $4, 'deny')`,
+        [`restriction-${randomUUID()}`, namespaceId, resourceKind, resourceId],
+      );
+      const filtered = await request(api, "GET", listPath);
+      assert.equal(filtered.status, 200);
+      assert.deepEqual(filtered.data, visible);
+      const denied = await request(api, "GET", detailPath);
+      assert.equal(denied.status, 403);
+      assert.deepEqual(denied.error, {
+        code: "FORBIDDEN",
+        message: "The exact platform operation was not authorized.",
+      });
+      assert.equal(denied.data, undefined);
+    }
+  },
+);
+
+test(
+  "PostgreSQL native admin ignores unreadable older revisions when checking for a successor",
+  requiresPostgres,
+  async (context) => {
+    const { Pool } = await import("pg");
+    const pool = new Pool({ connectionString: databaseUrl });
+    context.after(() => pool.end());
+    const api = await startController(context);
+    const { controller, state } = await createDurableController(pool);
+    const actor = await pool.query(
+      `SELECT identity.id
+       FROM occ.iam_identities AS identity
+       JOIN occ."user" AS auth_user ON auth_user.id = identity.subject
+       WHERE auth_user.email = $1`,
+      [adminEmail],
+    );
+    assert.equal(actor.rowCount, 1);
+    const principalId = actor.rows[0].id;
+    const namespace = await request(api, "POST", "/namespaces", {
+      name: `native-admin-successor-${randomUUID()}`,
+    });
+    assert.equal(namespace.status, 201);
+    const namespaceId = namespace.data.id;
+    const { agent, configuration } = await createConfiguredAgent(
+      api,
+      namespaceId,
+      "Native admin successor",
+      undefined,
+      { harnessAuth: { method: "runtime" } },
+    );
+    const plugins = {
+      "occ-plugin:diffs": { enabled: true, toolDefaults: { approval: "provider_default" } },
+    };
+    // A previously accepted approval enum that the current contract no longer decodes.
+    const malformedPlugins = {
+      "occ-plugin:diffs": { enabled: true, toolDefaults: { approval: "prompt" } },
+    };
+    const createRevision = (revision) =>
+      state.transact((unit) =>
+        unit.revisions.createRevision({
+          id: `rev_${randomUUID()}`,
+          namespaceId,
+          agentId: agent.id,
+          revision,
+          backendId: null,
+          configurationId: configuration.id,
+          configurationKind: "agent",
+          configurationGeneration: 1,
+          configuration: configuration.values,
+          harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
+          compute: {
+            id: "compute-local-development",
+            implementation: "deterministic-local-development",
+          },
+          harnessAuth: { method: "runtime" },
+          servicePrincipalId: agent.servicePrincipalId,
+          plugins: { driver: { id: "occ-plugin", implementation: "occ/openclaw-plugin" }, plugins },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    // Revisions are immutable to the application role, so seed unreadable rows as copies.
+    const insertUnreadable = async (template, revision) => {
+      const id = `rev_${randomUUID()}`;
+      await pool.query(
+        `INSERT INTO occ.agent_revisions
+           (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
+         SELECT $1, namespace_id, agent_id, $2, backend_id,
+                jsonb_set(admitted_spec, '{plugins,plugins}', $4::jsonb, false), admitted_at
+         FROM occ.agent_revisions WHERE id = $3`,
+        [id, revision, template.id, JSON.stringify(malformedPlugins)],
+      );
+      return id;
+    };
+    const active = await createRevision(2);
+    await insertUnreadable(active, 1);
+    await pool.query("UPDATE occ.agents SET active_revision_id = $2 WHERE id = $1", [
+      agent.id,
+      active.id,
+    ]);
+
+    // An unreadable older snapshot must not make a healthy active revision unavailable.
+    const selection = await controller.getAdministerableActiveAgentRevision(
+      principalId,
+      namespaceId,
+      agent.id,
+    );
+    assert.equal(selection.revision.id, active.id);
+    assert.equal(selection.successor, undefined);
+
+    // Only the newest later revision is decoded strictly, and it fails closed when unreadable.
+    const newer = await createRevision(3);
+    const withSuccessor = await controller.getAdministerableActiveAgentRevision(
+      principalId,
+      namespaceId,
+      agent.id,
+    );
+    assert.equal(withSuccessor.successor?.id, newer.id);
+    await insertUnreadable(active, 4);
+    await assert.rejects(
+      controller.getAdministerableActiveAgentRevision(principalId, namespaceId, agent.id),
+      { name: "DependencyUnavailableError" },
+    );
   },
 );
 
@@ -1750,5 +2142,106 @@ test(
       [namespace.data.id, principalId],
     );
     assert.ok(denial.rowCount > 0, "revocation must produce attributable durable failure evidence");
+  },
+);
+
+test(
+  "API SIGTERM finishes an in-flight keep-alive request and exits within the Pod grace",
+  requiresPostgres,
+  async (context) => {
+    const api = await startController(context);
+    const agent = new Agent({ keepAlive: true });
+    context.after(() => agent.destroy());
+    const body = JSON.stringify({ email: adminEmail, password: adminPassword });
+    // `expect: 100-continue` makes the server answer as it admits the request, before the
+    // body. The request is then in flight on a keep-alive socket when shutdown begins.
+    const signIn = httpRequest(`${api.origin}/api/auth/sign-in/email`, {
+      method: "POST",
+      agent,
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        expect: "100-continue",
+      },
+    });
+    const responded = once(signIn, "response");
+    const admitted = await Promise.race([
+      once(signIn, "continue").then(() => true),
+      responded.then(() => false),
+    ]);
+    assert.ok(admitted, "the API must admit the request before its body arrives");
+
+    // "close" also waits for stdio to end, so the last log lines are read before parsing.
+    const exited = once(api.child, "close");
+    api.child.kill("SIGTERM");
+    // Finish the request only after the listener has closed, so it completes during the drain.
+    const deadline = Date.now() + 5_000;
+    while (
+      await fetch(api.origin).then(
+        () => true,
+        () => false,
+      )
+    ) {
+      assert.ok(Date.now() < deadline, "the API never stopped accepting connections");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    signIn.end(body);
+
+    // Admitted work still completes during the drain.
+    const [response] = await responded;
+    response.resume();
+    assert.equal(response.statusCode, 200);
+
+    // The drained response's socket must not hold shutdown open until the keep-alive
+    // timeout (about 72 s), past the API Pod's 30 s default termination grace.
+    let timer;
+    const [code, signal] = await Promise.race([
+      exited,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("the API did not exit within 10 s of the drained response")),
+          10_000,
+        );
+      }),
+    ]).finally(() => clearTimeout(timer));
+    assert.deepEqual({ code, signal }, { code: 0, signal: null });
+
+    // The Pod log alone must show that the drain began on SIGTERM and that every onClose
+    // hook finished; otherwise only the exit code tells a clean drain from a cut-off one.
+    const events = api
+      .output()
+      .split("\n")
+      .flatMap((line) => {
+        // stdout and stderr share one buffer, so skip anything that is not a whole JSON line.
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          return [];
+        }
+      });
+    const started = events.findIndex(({ event }) => event === "shutdown.started");
+    const completed = events.findIndex(({ event }) => event === "shutdown.completed");
+    // startController's readiness sign-in logs first; the drained request is the last one.
+    const drained = events.findLastIndex(
+      ({ event, route }) => event === "http.completed" && route === "/api/auth/sign-in/email",
+    );
+    assert.ok(started >= 0, `no shutdown.started event:\n${api.output()}`);
+    assert.ok(completed >= 0, `no shutdown.completed event:\n${api.output()}`);
+    assert.ok(started < drained && drained < completed, "the drained request logs between them");
+    assert.equal(events[started].severity, "INFO");
+    assert.equal(events[started].signal, "SIGTERM");
+    assert.equal(events[completed].severity, "INFO");
+    assert.equal(typeof events[completed].durationMs, "number");
+
+    // The listening line times the boot from process start and names each phase.
+    const listening = events.find(({ event }) => event === "listening");
+    assert.ok(Number.isSafeInteger(listening?.startupMs), `no startup time:\n${api.output()}`);
+    assert.deepEqual(Object.keys(listening.phasesMs), [
+      "modules",
+      "configuration",
+      "composition",
+      "ready",
+      "listen",
+    ]);
   },
 );

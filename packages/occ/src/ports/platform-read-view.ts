@@ -8,7 +8,12 @@ export function createPlatformReadView(
   lifetime: RepositoryTransactionLifetime,
 ): PlatformReadView {
   return Object.freeze({
-    operations: bindRepository(repositories.operations, lifetime, ["list", "findWork"]),
+    operations: bindRepository(repositories.operations, lifetime, [
+      "list",
+      "findWork",
+      "findWorkAttempt",
+      "hasOutstandingCredentialWithdrawalWork",
+    ]),
     installations: bindRepository(repositories.installations, lifetime, [
       "findInstallation",
       "getInstallation",
@@ -19,10 +24,16 @@ export function createPlatformReadView(
     ]),
     configurations: bindRepository(repositories.configurations, lifetime, ["findConfiguration"]),
     presets: bindRepository(repositories.presets, lifetime, ["findPreset", "listPresets"]),
-    secrets: bindRepository(repositories.secrets, lifetime, ["findSecret", "listSecrets"]),
+    secrets: bindRepository(repositories.secrets, lifetime, [
+      "findSecret",
+      "listSecrets",
+      "listReferences",
+    ]),
     credentialSources: bindRepository(repositories.credentialSources, lifetime, [
       "findCredentialSource",
       "listCredentialSources",
+      "findCredentialWithdrawal",
+      "listCredentialWithdrawals",
     ]),
     serviceAccounts: bindRepository(repositories.serviceAccounts, lifetime, [
       "findServiceAccount",
@@ -30,21 +41,37 @@ export function createPlatformReadView(
       "findServiceAccountBackendBinding",
     ]),
     workspaceSetups: bindRepository(repositories.workspaceSetups, lifetime, ["find"]),
-    agents: bindRepository(repositories.agents, lifetime, ["findAgent", "listAgents"]),
-    revisions: bindRepository(repositories.revisions, lifetime, ["findRevision", "listRevisions"]),
+    agents: bindRepository(repositories.agents, lifetime, [
+      "findAgent",
+      "listAgents",
+      "findAgentForBrowsing",
+      "listAgentsForBrowsing",
+    ]),
+    revisions: bindRepository(repositories.revisions, lifetime, [
+      "findRevision",
+      "listRevisions",
+      "findRevisionForBrowsing",
+      "listRevisionsForBrowsing",
+    ]),
     iamPolicy: bindRepository(repositories.iamPolicy, lifetime, [
       "listRoles",
       "getRole",
       "listAccessBindings",
       "getAccessBinding",
+      "listRestrictionsTargeting",
+      "listServicePrincipals",
+      "getServicePrincipal",
     ]),
     repositorySessions: bindRepository(repositories.repositorySessions, lifetime, [
       "findAttempt",
+      "findBrokerReceipt",
+      "findBrokerReceiptBySession",
       "listRevisionAttempts",
       "listNamespaceAttempts",
     ]),
     provisioning: bindRepository(repositories.provisioning, lifetime, [
       "findByWorkId",
+      "findWithWork",
       "hasPendingNamespaceProvisioning",
       "findByAgent",
       "findByConfiguration",

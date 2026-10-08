@@ -6,6 +6,7 @@ const json = (status, body, headers = {}) => ({ status, body, headers });
 export function createRepositoryResources({
   repository = fixtureRepository,
   repositoryId = fixtureRepositoryId,
+  description = null,
 } = {}) {
   const [owner, name] = repository.split("/");
   const issues = new Map();
@@ -20,6 +21,7 @@ export function createRepositoryResources({
     full_name: repository,
     owner: { login: owner, id: 1, type: "Organization" },
     private: true,
+    description,
     default_branch: "main",
     html_url: `https://github.com/${repository}`,
     clone_url: `https://github.com/${repository}.git`,
@@ -237,6 +239,10 @@ export function createRepositoryResources({
         issue: graphItem(issues.get(number)),
         issueOrPullRequest: graphItem(issues.get(number) ?? pulls.get(number), pulls.has(number)),
         ref: { name: "native-feature", target: { oid: "a".repeat(40) } },
+        // GitHub fills this clone credential for private repositories when selected.
+        ...(query.includes("tempCloneToken")
+          ? { tempCloneToken: "synthetic-graphql-cloning-credential" }
+          : {}),
       };
       return json(200, {
         data: {

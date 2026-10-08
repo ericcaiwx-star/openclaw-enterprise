@@ -1,20 +1,14 @@
 import type {
   AdmittedRepositoryBinding,
+  RepositoryAccess,
   RepositoryBindingSelection,
   RepositoryRevisionState,
 } from "@openclaw-enterprise/contracts";
-import { immutableCopy } from "@openclaw-enterprise/utils";
+import { hasControlCharacter, immutableCopy } from "@openclaw-enterprise/utils";
 import { ScopeViolationError } from "../errors.ts";
 
 const token = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const backendIdentifier = /^(?!\s)(?!.*\s$).{1,200}$/;
-
-function hasControlCharacters(value: string): boolean {
-  return [...value].some((character) => {
-    const code = character.charCodeAt(0);
-    return code <= 0x1f || code === 0x7f;
-  });
-}
 
 function boundedToken(value: unknown): value is string {
   return typeof value === "string" && token.exec(value)?.[0] === value;
@@ -36,7 +30,7 @@ function opaqueIdentity(value: unknown): value is string {
     value.length > 0 &&
     Buffer.byteLength(value, "utf8") <= 512 &&
     Buffer.from(value, "utf8").toString("utf8") === value &&
-    !hasControlCharacters(value)
+    !hasControlCharacter(value)
   );
 }
 
@@ -55,7 +49,7 @@ function selection(value: unknown, admitted: boolean): boolean {
     !admitted ||
     (typeof value.backendId === "string" &&
       backendIdentifier.test(value.backendId) &&
-      !hasControlCharacters(value.backendId) &&
+      !hasControlCharacter(value.backendId) &&
       Buffer.from(value.backendId, "utf8").toString("utf8") === value.backendId &&
       exactObject(value.grant, ["providerInstanceId", "repositoryId", "grantId"]) &&
       opaqueIdentity(value.grant.providerInstanceId) &&
@@ -83,6 +77,58 @@ export function validRepositoryBindingSelections(
   value: unknown,
 ): value is readonly RepositoryBindingSelection[] {
   return bindingArray(value, false);
+}
+
+export function validRepositoryAccess(value: unknown): value is RepositoryAccess {
+  if (
+    !exactObject(value, ["defaultProfile", "repositories"]) ||
+    !boundedToken(value.defaultProfile) ||
+    !Array.isArray(value.repositories) ||
+    value.repositories.length > 16
+  ) {
+    return false;
+  }
+  const seen = new Set<string>();
+  return value.repositories.every((entry: unknown) => {
+    if (entry === null || typeof entry !== "object") {
+      return false;
+    }
+    const keys = Object.hasOwn(entry, "profile") ? ["repositoryRef", "profile"] : ["repositoryRef"];
+    if (
+      !exactObject(entry, keys) ||
+      !boundedToken(entry.repositoryRef) ||
+      (keys.length === 2 && !boundedToken(entry.profile)) ||
+      seen.has(entry.repositoryRef)
+    ) {
+      return false;
+    }
+    seen.add(entry.repositoryRef);
+    return true;
+  });
+}
+
+/** Persist intent only alongside the exact profiles it resolves to. */
+export function normalizedRepositoryAccess(
+  value: unknown,
+  bindings: readonly RepositoryBindingSelection[] | undefined,
+): RepositoryAccess | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (
+    !validRepositoryAccess(value) ||
+    value.repositories.length !== (bindings?.length ?? 0) ||
+    value.repositories.some(
+      (entry, index) =>
+        entry.repositoryRef !== bindings?.[index]?.repositoryRef ||
+        (entry.profile ?? value.defaultProfile) !== bindings?.[index]?.profile,
+    )
+  ) {
+    throw new ScopeViolationError(
+      "The Agent repository access intent does not match its bindings.",
+    );
+  }
+  return immutableCopy(value);
 }
 
 export function validAdmittedRepositoryBindings(

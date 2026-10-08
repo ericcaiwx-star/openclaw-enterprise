@@ -8,18 +8,21 @@ after the command exits.
 ## Before you start
 
 - Complete [Local setup](quickstart.md) and leave the installation running.
-- Start Local setup without the OpenShell Sandbox Driver. The first-Agent
-  workflow supports the Compose-backed Kubernetes profile with
-  `OCC_DEVELOPMENT_SANDBOX_DRIVER=none`.
+- Select either `OCC_DEVELOPMENT_SANDBOX_DRIVER=none` for the default embedded
+  OpenClaw Agent or `openshell` for the experimental dedicated Codex path.
+- For the default path, leave about 1.75 GiB of cluster memory free: the Agent's
+  Gateway Pod requests `1792Mi` ([sizing](deploy/installation-profiles.md)).
 - Use the same checkout and development state directory. If you set
   `OCC_DEVELOPMENT_STATE_DIRECTORY` during setup, use the same value here.
 - Have an OpenAI API key that can use [`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra), the default model. To use a
   different model available to your project, set `OPENCLAW_FIRST_AGENT_MODEL`
   to its plain ID, without `openai/`.
-- Keep the key out of commands, Configuration JSON, and chat. The interactive
-  command prompts for it without echoing it. For automation, set
-  `OPENAI_API_KEY_FILE` to a private file containing the key, or supply
-  `OPENAI_API_KEY` through your environment's secret manager.
+- Keep the key out of commands, Configuration JSON, and chat. For automation,
+  set `OPENAI_API_KEY_FILE` to a private file containing the key, or supply
+  `OPENAI_API_KEY` through your environment's secret manager; setting both
+  fails. The command prompts for the key without echoing it only when neither
+  is set. An exported key is used as is, so clear a stale one with
+  `env -u OPENAI_API_KEY` to be prompted instead.
 
 The walkthrough runs from the repository root on your own development
 installation. If you followed [Kubernetes Setup](kubernetes-setup.md) on an
@@ -61,17 +64,29 @@ Agent access to its Secret, and requests the first deployment. It then waits
 for the gateway and sends a verification prompt before sending your own. Initial
 startup can take several minutes.
 
-This starter answers model prompts only. Tools are disabled, so it cannot read
-or edit files or run shell commands. The command refuses to reuse it if you
-change its Configuration elsewhere. For an Agent that can use tools, create a
-separate Agent; see [Agent Configuration](../reference/configuration.md) and
-[Plugins](../reference/agent-plugins.md).
+This starter answers model prompts only. Tools and the native admin UI are
+disabled. The command refuses to reuse it if you change its Configuration
+elsewhere. For an Agent that can use tools or the native admin UI, create a
+separate console-managed Agent; see [Agent Configuration](../reference/configuration.md),
+[Plugins](../reference/agent-plugins.md), and [local native admin setup](quickstart.md#open-an-agents-native-admin-ui).
+
+If Local setup selected OpenShell, add `--harness codex`:
+
+```bash
+node scripts/first-agent.mjs my-agent --harness codex --prompt 'What is 2 + 2?'
+```
+
+That path stores the key in the same platform Secret, registers an OpenAI
+CredentialSource, and grants the Agent access to the source—not the Secret. It
+uses OpenShell's experimental provider-file and bearer-passthrough APIs, so it
+is a development workflow rather than production qualification. Reuse the same
+`--harness` selection with that Agent name.
 
 Keep the command running until it prints `Model response verified:` followed by
 the phrase it asked the model to repeat. Under `Agent response:`, it then prints
 the model's answer to your question. It also prints the Agent ID, active
-revision, and console URL. A deployment being accepted or a revision showing
-as active does not establish that the model responded; the returned answer does.
+revision, and console URL. These returned responses complete the model check; see
+[what each check establishes](operate/model-verification.md#what-each-check-establishes).
 
 <span id="4-check-what-actually-deployed"></span>
 <span id="4.-check-what-actually-deployed"></span>
@@ -81,21 +96,57 @@ as active does not establish that the model responded; the returned answer does.
 Open the console link from the command and sign in with the local credentials
 from [Local setup](quickstart.md#open-the-platform-console). **Current version**
 shows the revision selected by OCC; **Deployment activity** shows persisted
-deployment progress. The console has no browser chat or live health view; use the
-model response printed by the command as verification. This local setup does not
-configure browser access to workspace files. For that capability, use
-[Kubernetes Setup](kubernetes-setup.md), which includes private routing and a
-workspace-file verification step.
+deployment progress. Use the terminal command for further model prompts. For
+browser access to the Agent's files, follow
+[workspace verification](deploy/workspace-routing.md#verify-routing-and-file-access).
 
 The Agent remains available after the command exits. Run the same command with
 the same Agent name and a different `--prompt` to ask another question; you do
 not need to enter the model key again. Stopping the local stack
 with `dev down` [deletes the installation and its Agents](quickstart.md#clean-up-and-stop).
 
+## Clean up
+
+To remove only this Agent and keep the installation, delete the Agent and then
+the Configuration, Secret, and Role the command created for it. Set
+`OCC_NAMESPACE` to the `ID` shown for `default` in step 1, and `AGENT_ID` to the
+Agent ID the command printed. If the command stopped before printing it, run the
+`export` line first, then find the ID with `./bin/occ agent list`:
+
+```bash
+export OCC_NAMESPACE=<default-namespace-id>
+AGENT_ID=<agent-id>
+AGENT_JSON="$(./bin/occ agent get "$AGENT_ID" -o json)"
+CONFIGURATION_ID="$(jq -r .configurationId <<<"$AGENT_JSON")"
+SECRET_ID="$(jq -r .harnessAuth.source.id <<<"$AGENT_JSON")"
+ROLE_ID="role_local_first_agent_secret_$(printf '%s\0%s' "$AGENT_ID" "$SECRET_ID" |
+  sha256sum | cut -d' ' -f1)"
+./bin/occ agent delete "$AGENT_ID"
+./bin/occ agent get "$AGENT_ID"
+```
+
+Repeat `agent get` until it returns `404`, then delete the rest:
+
+```bash
+./bin/occ configuration delete "$CONFIGURATION_ID"
+./bin/occ secret delete "$SECRET_ID"
+./bin/occ iam role delete "$ROLE_ID"
+```
+
+Each run creates a separate Role named `Local first Agent Secret access`, so
+`occ iam role list` shows one per first Agent until you delete it. The command
+remembers the Agent name; use a new name for the next run.
+
 <span id="troubleshooting"></span>
 
 ## Troubleshoot
 
+- **`No Namespace named default exists`:** the command creates its Agent only in
+  the `default` Namespace from Local setup. After that Namespace is deleted, its
+  name [cannot be reused](../reference/namespaces.md#deletion-and-tombstones), so
+  the command cannot run on that installation. Start a new
+  [Local setup](quickstart.md); [cleanup](quickstart.md#clean-up-and-stop)
+  deletes the current installation and its Agents.
 - **`default` stays in `provisioning` or fails:** [check that OCC and Kubernetes are reachable](deploy/local-kubernetes-development.md#verify-the-local-boundary),
   then check the [Namespace status](../reference/namespaces.md#lifecycle).
 - **A name is already in use:** use a new name if the existing Agent was
@@ -108,6 +159,8 @@ with `dev down` [deletes the installation and its Agents](quickstart.md#clean-up
   supply the new key when prompted. An active revision without
   `Model response verified` is not a successful model check. See
   [Troubleshoot Agents](topics/agent-troubleshoot.md).
-- **The selected setup uses OpenShell:** stop that development environment and
-  start [Local setup](quickstart.md) without OpenShell. The current OpenShell
-  development profile does not support this first-Agent model-turn workflow.
+- **OpenShell rejects the default Harness:** rerun with `--harness codex` and a
+  new Agent name. Embedded OpenClaw remains unsupported with OpenShell.
+  Contributors reproducing the Compose-plus-k3d path can use the
+  [OpenShell first-Agent handoff](../testing/openshell-first-agent.md) for exact
+  setup and recovery checks.

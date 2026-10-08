@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createFastifyApp } from "../../apps/controller/src/index.ts";
 import { resolveApprovedHarness } from "../../apps/controller/src/composition/production-harness.ts";
 import { KubernetesComputeDriver } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { SshComputeDriver } from "../../apps/controller/src/drivers/compute/ssh/index.ts";
+import { OCCPluginDriver } from "../../apps/controller/src/drivers/plugin/index.ts";
 import { GitHubRepoDriver } from "../../apps/controller/src/drivers/repo/github/driver.ts";
 import { UnixRepositoryCredentialControlClient } from "../../apps/controller/src/backends/repository-credentials/control-client.ts";
 import { validateGitHubRepositoryRegistry } from "../../apps/controller/src/drivers/repo/github/credentials/registry.ts";
@@ -18,6 +23,7 @@ import {
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
+import { grantRole } from "../helpers/iam-grants.mjs";
 
 const driverId = "repository-credentials";
 const backendId = "repository-provider";
@@ -109,8 +115,8 @@ function registryFor(namespaceId) {
   };
 }
 
-function repositoryDriver(registry) {
-  return new GitHubRepoDriver(
+function repositoryDriver(registry, Driver = GitHubRepoDriver) {
+  return new Driver(
     {
       id: backendId,
       // Admission must complete without contacting the service or obtaining credentials.
@@ -171,14 +177,14 @@ async function fixture(
       ]
     : [];
 
-  async function compose(registry) {
+  async function compose(registry, Driver) {
     const controller = new OpenClawController(installation, { state, backends });
     for (const driver of [iam, compute, configurationDriver, secretDriver]) {
       controller.registerDriver(driver);
       controller.selectDriver(driver.capability, driver.id);
     }
     if (registry !== undefined) {
-      const driver = repositoryDriver(registry);
+      const driver = repositoryDriver(registry, Driver);
       controller.registerDriver(driver);
       controller.selectDriver(driver.capability, driver.id);
     }
@@ -249,19 +255,11 @@ async function fixture(
       id: internal.servicePrincipalId,
       namespaceId: namespace.id,
     });
-    iamState.roles.push({
+    grantRole(iamState, internal.servicePrincipalId, {
       id: roleId,
       namespaceId: namespace.id,
-      permissions: [{ action: "operate", resourceKind: "secret" }],
-    });
-    iamState.bindings.push({
-      id: roleId,
-      namespaceId: namespace.id,
-      subjectKind: "identity",
-      subjectId: internal.servicePrincipalId,
-      roleId,
-      resourceKind: "secret",
-      resourceId: secret.data.id,
+      permissions: { secret: ["operate"] },
+      resource: { kind: "secret", id: secret.data.id },
     });
     const updated = await composed.request("PATCH", `${collection}/${agent.id}`, {
       configurationId: configuration.id,
@@ -307,8 +305,23 @@ test("Repository options expose only Namespace-approved display choices behind A
   ]);
   assert.doesNotMatch(
     JSON.stringify(options.data),
-    /provider|installation|repositoryId|grant|duration|token|key|credential/i,
+    /provider|backend|installation|repositoryId|grant|duration|token|key|credential/i,
   );
+
+  // Metadata is advisory: an unavailable service must leave authorized choices usable.
+  const unavailableMetadata = await f.request("GET", `${path}?descriptionRefs=project`);
+  assert.equal(unavailableMetadata.status, 200, JSON.stringify(unavailableMetadata));
+  assert.deepEqual(unavailableMetadata.data, options.data);
+  assert.equal(unavailableMetadata.meta.descriptionsPending, false);
+  for (const query of [
+    "descriptionRefs=project,project",
+    "descriptionRefs=project,invalid%2Fref",
+    `descriptionRefs=${Array.from({ length: 21 }, (_, index) => `repo-${index}`).join(",")}`,
+    "descriptionRefs=project&extra=value",
+  ]) {
+    const malformed = await f.request("GET", `${path}?${query}`);
+    assert.equal(malformed.status, 400, JSON.stringify(malformed));
+  }
 
   f.iamState.restrictions.push({
     id: "deny-repository-options",
@@ -347,6 +360,75 @@ test("Repository options expose only Namespace-approved display choices behind A
   assert.equal(conflict.error.code, "RESOURCE_CONFLICT");
 });
 
+test("Denied Agent discovery cannot start repository metadata lookups", async (t) => {
+  const f = await fixture(t);
+  const directory = await mkdtemp(join(tmpdir(), "repository-options-auth-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const socket = join(directory, "control.sock");
+  let lookups = 0;
+  // The independent socket peer observes actual metadata requests; IAM and Driver policy are real.
+  const server = createServer((request, response) => {
+    lookups++;
+    request.resume();
+    request.once("end", () => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          providerInstanceId: f.registry.providerInstanceId,
+          appId: f.registry.appId,
+          githubInstallationId: f.registry.githubInstallationId,
+          descriptions: [{ repositoryRef: "project", repositoryId: "789", description: "Project" }],
+          pending: false,
+        }),
+      );
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socket, resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  class ObservedRepositoryDriver extends GitHubRepoDriver {
+    constructor(backend, registry, options) {
+      super(
+        {
+          ...backend,
+          client: new UnixRepositoryCredentialControlClient({ controlSocket: socket }),
+        },
+        registry,
+        options,
+      );
+    }
+  }
+  const observed = await f.compose(f.registry, ObservedRepositoryDriver);
+  const agent = await f.createAgent();
+  const createPath = `${f.collection}/repository-options?descriptionRefs=project`;
+  const updatePath = `${f.collection}/${agent.id}/repository-options?descriptionRefs=project`;
+  for (const path of [createPath, updatePath]) {
+    const allowed = await observed.request("GET", path);
+    assert.equal(allowed.status, 200, JSON.stringify(allowed));
+    assert.equal(allowed.data[0].description, "Project");
+  }
+  assert.equal(lookups, 2);
+
+  for (const action of ["create", "update"]) {
+    f.iamState.restrictions.push({
+      id: `deny-metadata-${action}`,
+      namespaceId: f.namespace.id,
+      resourceKind: "agent",
+      action,
+      effect: "deny",
+    });
+  }
+  for (const path of [createPath, updatePath]) {
+    const denied = await observed.request("GET", path);
+    assert.equal(denied.status, 403, JSON.stringify(denied));
+    assert.equal(denied.error.code, "FORBIDDEN");
+  }
+  assert.equal(lookups, 2);
+});
+
 test("Repository options preserve an empty successful discovery", async (t) => {
   const f = await fixture(t);
   const registry = structuredClone(f.registry);
@@ -357,6 +439,38 @@ test("Repository options preserve an empty successful discovery", async (t) => {
   const options = await reconfigured.request("GET", `${f.collection}/repository-options`);
   assert.equal(options.status, 200, JSON.stringify(options));
   assert.deepEqual(options.data, []);
+});
+
+test("Repository options refuse Driver display text with C0 controls or DEL", async (t) => {
+  // The utils conformance suite pins every code unit of the shared helper; this pins its use here.
+  let override = {};
+  class CraftedRepositoryDriver extends GitHubRepoDriver {
+    async listOptions(input) {
+      const result = await super.listOptions(input);
+      return { ...result, options: result.options.map((option) => ({ ...option, ...override })) };
+    }
+  }
+  const f = await fixture(t);
+  const { controller } = await f.compose(f.registry, CraftedRepositoryDriver);
+  for (const [code, refused] of [
+    [0x1f, true],
+    [0x20, false],
+    [0x7e, false],
+    [0x7f, true],
+    [0x80, false],
+  ]) {
+    const text = `example${String.fromCharCode(code)}project`;
+    for (const field of ["displayName", "description"]) {
+      const label = `${field} U+${code.toString(16).toUpperCase().padStart(4, "0")}`;
+      override = { [field]: text };
+      const listing = controller.listRepositoryOptions(f.actorId, f.namespace.id);
+      if (refused) {
+        await assert.rejects(listing, /returned invalid repository options/, label);
+      } else {
+        assert.equal((await listing).options[0][field], text, label);
+      }
+    }
+  }
 });
 
 test("Repository discovery supports a dedicated-only Compute Driver without admitting unsupported Harnesses", async (t) => {
@@ -531,6 +645,169 @@ test("Repository policy rejects invalid create and PATCH before changing stored 
   }
 });
 
+test("Agent repository access preserves inheritance intent and admits only resolved approved profiles", async (t) => {
+  const f = await fixture(t);
+  const intent = { defaultProfile: "git-full", repositories: [{ repositoryRef: "project" }] };
+  const agent = await f.createAgent({ repositoryAccess: intent });
+  const path = `${f.collection}/${agent.id}`;
+  assert.deepEqual(agent.repositoryAccess, intent);
+  assert.deepEqual(agent.repositoryBindings, [{ repositoryRef: "project", profile: "git-full" }]);
+  assert.deepEqual((await f.request("GET", path)).data.repositoryAccess, intent);
+  assert.equal((await f.request("GET", `${path}/repository-options`)).status, 200);
+  const patch = { configurationId: f.configuration.id };
+  const preserved = await f.request("PATCH", path, patch);
+  assert.deepEqual(preserved.data.repositoryAccess, intent);
+
+  // An explicit override stays explicit even while it equals the Agent default.
+  const custom = {
+    defaultProfile: "git-full",
+    repositories: [{ repositoryRef: "project", profile: "git-full" }],
+  };
+  assert.equal(
+    (await f.request("PATCH", path, { ...patch, repositoryAccess: custom })).status,
+    200,
+  );
+  custom.defaultProfile = "git-read";
+  const changed = await f.request("PATCH", path, { ...patch, repositoryAccess: custom });
+  assert.equal(changed.status, 200, JSON.stringify(changed));
+  assert.deepEqual(changed.data.repositoryAccess, custom);
+  assert.deepEqual(changed.data.repositoryBindings, agent.repositoryBindings);
+
+  // Reset to inheritance materializes the new default, without changing the saved intent.
+  const reset = { defaultProfile: "git-read", repositories: [{ repositoryRef: "project" }] };
+  const inherited = await f.request("PATCH", path, { ...patch, repositoryAccess: reset });
+  assert.equal(inherited.status, 200);
+  assert.deepEqual(inherited.data.repositoryAccess, reset);
+  assert.deepEqual(inherited.data.repositoryBindings, [
+    { repositoryRef: "project", profile: "git-read" },
+  ]);
+  const denied = await f.request("PATCH", path, {
+    ...patch,
+    repositoryAccess: { ...reset, defaultProfile: "unapproved" },
+  });
+  assert.notEqual(denied.status, 200);
+  assert.deepEqual((await f.request("GET", path)).data.repositoryAccess, reset);
+  const ambiguous = await f.request("PATCH", path, {
+    ...patch,
+    repositoryAccess: reset,
+    repositoryBindings: selection,
+  });
+  assert.notEqual(ambiguous.status, 200);
+  const legacy = await f.request("PATCH", path, { ...patch, repositoryBindings: selection });
+  assert.equal(legacy.status, 200);
+  assert.equal(Object.hasOwn(legacy.data, "repositoryAccess"), false);
+  const empty = { defaultProfile: "git-full", repositories: [] };
+  const cleared = await f.request("PATCH", path, { ...patch, repositoryAccess: empty });
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(cleared.data.repositoryAccess, empty);
+  assert.equal(Object.hasOwn(cleared.data, "repositoryBindings"), false);
+});
+
+test("Agent updates apply repository access and validate plugin policy together", async (t) => {
+  const f = await fixture(t);
+  const driver = new OCCPluginDriver();
+  f.controller.registerDriver(driver);
+  f.controller.selectDriver("plugin", driver.id);
+  const initialAccess = {
+    defaultProfile: "git-read",
+    repositories: [{ repositoryRef: "project" }],
+  };
+  const initialPlugins = { "occ-plugin:diffs": { enabled: true } };
+  const agent = await f.createAgent({ repositoryAccess: initialAccess, plugins: initialPlugins });
+  const path = `${f.collection}/${agent.id}`;
+  const nextAccess = { ...initialAccess, defaultProfile: "git-full" };
+
+  // A policy the selected Driver cannot enforce rejects the whole update, including access.
+  const denied = await f.request("PATCH", path, {
+    configurationId: f.configuration.id,
+    repositoryAccess: nextAccess,
+    plugins: { "occ-plugin:diffs": { enabled: true, toolDefaults: { approval: "all_actions" } } },
+  });
+  assert.equal(denied.status, 400, JSON.stringify(denied));
+  const unchanged = await f.request("GET", path);
+  assert.deepEqual(unchanged.data.repositoryAccess, initialAccess);
+  assert.deepEqual(unchanged.data.repositoryBindings, [
+    { repositoryRef: "project", profile: "git-read" },
+  ]);
+  assert.deepEqual(unchanged.data.plugins, initialPlugins);
+
+  const nextPlugins = {
+    "occ-plugin:diffs": { enabled: true, toolDefaults: { approval: "none" } },
+  };
+  const updated = await f.request("PATCH", path, {
+    configurationId: f.configuration.id,
+    repositoryAccess: nextAccess,
+    plugins: nextPlugins,
+  });
+  assert.equal(updated.status, 200, JSON.stringify(updated));
+  assert.deepEqual(updated.data.repositoryAccess, nextAccess);
+  assert.deepEqual(updated.data.repositoryBindings, [
+    { repositoryRef: "project", profile: "git-full" },
+  ]);
+  assert.deepEqual(updated.data.plugins, nextPlugins);
+});
+
+test("Agent repository access preserves request order when the Driver returns bindings in another order", async (t) => {
+  // Driver resolutions are keyed by reference; their order is not part of the contract.
+  class ReorderedRepositoryDriver extends GitHubRepoDriver {
+    resolve(input) {
+      const resolution = super.resolve(input);
+      return { ...resolution, bindings: [...resolution.bindings].reverse() };
+    }
+  }
+
+  const f = await fixture(t);
+  const registry = structuredClone(f.registry);
+  registry.repositories[1].namespaces.push({
+    namespaceId: f.namespace.id,
+    profiles: ["git-read", "git-write", "git-full"],
+  });
+  const { request } = await f.compose(registry, ReorderedRepositoryDriver);
+  const access = {
+    defaultProfile: "git-read",
+    repositories: [
+      { repositoryRef: "project" },
+      { repositoryRef: "foreign-project", profile: "git-write" },
+    ],
+  };
+  const created = await request("POST", f.collection, {
+    name: "Reordered repository access",
+    configurationId: f.configuration.id,
+    repositoryAccess: access,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created));
+  assert.deepEqual(created.data.repositoryAccess, access);
+  assert.deepEqual(created.data.repositoryBindings, [
+    { repositoryRef: "project", profile: "git-read" },
+    { repositoryRef: "foreign-project", profile: "git-write" },
+  ]);
+
+  const path = `${f.collection}/${created.data.id}`;
+  const updatedAccess = { ...access, defaultProfile: "git-full" };
+  const updated = await request("PATCH", path, {
+    configurationId: f.configuration.id,
+    repositoryAccess: updatedAccess,
+  });
+  assert.equal(updated.status, 200, JSON.stringify(updated));
+  assert.deepEqual(updated.data.repositoryAccess, updatedAccess);
+  assert.deepEqual(updated.data.repositoryBindings, [
+    { repositoryRef: "project", profile: "git-full" },
+    { repositoryRef: "foreign-project", profile: "git-write" },
+  ]);
+  assert.deepEqual((await request("GET", path)).data.repositoryAccess, updatedAccess);
+
+  const legacy = await request("POST", f.collection, {
+    name: "Defaulted repository bindings",
+    configurationId: f.configuration.id,
+    repositoryBindings: [{ repositoryRef: "project" }, { repositoryRef: "foreign-project" }],
+  });
+  assert.equal(legacy.status, 201, JSON.stringify(legacy));
+  assert.deepEqual(legacy.data.repositoryBindings, [
+    { repositoryRef: "project", profile: "git-write" },
+    { repositoryRef: "foreign-project", profile: "git-write" },
+  ]);
+});
+
 test("Deploy freezes public repository selection without exposing provider grants", async (t) => {
   const f = await fixture(t);
   const agent = await f.createAgent({ repositoryBindings: [{ repositoryRef: "project" }] });
@@ -610,15 +887,19 @@ test("Unsupported Compute refuses repository deployment while ordinary deploymen
 });
 
 test("Repository admission retains unknown Harness and execution-mode rejection", async (t) => {
-  for (const { harness, executionMode, status, code } of [
-    { harness: "unknown", executionMode: "embedded", status: 404, code: "NOT_FOUND" },
+  for (const { harness, executionMode, status, code, message } of [
+    // An unsupported runtime identity is Configuration content, not a missing resource.
+    { harness: "unknown", executionMode: "embedded", status: 400, code: "INVALID_REQUEST" },
+    // The pinned runtime lacks native worker support, so admission refuses first.
+    { harness: "openclaw", executionMode: "dedicated", status: 400, code: "INVALID_REQUEST" },
+    // A Harness/mode mismatch names the execution mode the Configuration needs.
     {
-      harness: "openclaw",
-      executionMode: "dedicated",
-      status: 503,
-      code: "DEPENDENCY_UNAVAILABLE",
+      harness: "codex",
+      executionMode: "embedded",
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: /selects the Codex Harness, which needs dedicated execution/,
     },
-    { harness: "codex", executionMode: "embedded", status: 503, code: "DEPENDENCY_UNAVAILABLE" },
   ]) {
     await t.test(`${harness}/${executionMode}`, async (t) => {
       const f = await fixture(t, { harness });
@@ -628,6 +909,9 @@ test("Repository admission retains unknown Harness and execution-mode rejection"
       const denied = await f.request("POST", `${path}/deploy`);
       assert.equal(denied.status, status, JSON.stringify(denied));
       assert.equal(denied.error.code, code);
+      if (message) {
+        assert.match(denied.error.message, message);
+      }
       assert.deepEqual((await f.request("GET", `${path}/revisions`)).data, []);
     });
   }

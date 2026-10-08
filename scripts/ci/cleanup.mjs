@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import { access, chmod, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withStateLock } from "./state-lock.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const composePostgresFile = join(repositoryRoot, "compose.postgres.yaml");
@@ -191,10 +192,63 @@ async function cleanupDatabase(resource, state) {
 
 async function cleanupK3dCluster(resource, state) {
   assertResourceOwner(resource, state);
-  assertOwnedName("openclaw-k8s-", resource.name, "k3d cluster");
   assertOwnedK3dFilesystem(resource);
-  await execFile(process.env.OPENCLAW_CI_K3D_BIN ?? "k3d", ["cluster", "delete", resource.name]);
+  await deleteOwnedK3dCluster(resource);
   await rm(resource.directory, { recursive: true, force: true });
+}
+
+// Delete an owned cluster and its exact cluster-labelled Docker resources, and
+// verify none remain. Preparation also calls this to discard a cluster whose
+// create timed out before it retries; it keeps the cluster's directory.
+async function deleteOwnedK3dCluster(resource, { execFile: run = execFile } = {}) {
+  assertOwnedName("openclaw-k8s-", resource.name, "k3d cluster");
+  const k3d = process.env.OPENCLAW_CI_K3D_BIN ?? "k3d";
+  const listClusters = async () => {
+    const result = await run(k3d, ["cluster", "list", "-o", "json"]);
+    const clusters = JSON.parse(result.stdout);
+    if (
+      !Array.isArray(clusters) ||
+      clusters.some((cluster) => typeof cluster?.name !== "string" || cluster.name.length === 0)
+    ) {
+      throw new Error("Cannot verify k3d cleanup from an invalid cluster inventory.");
+    }
+    return clusters;
+  };
+  if ((await listClusters()).some((cluster) => cluster.name === resource.name)) {
+    await run(k3d, ["cluster", "delete", resource.name]);
+  }
+  if ((await listClusters()).some((cluster) => cluster.name === resource.name)) {
+    throw new Error(`Owned k3d cluster remains after deletion: ${resource.name}`);
+  }
+  // k3d can leave Docker resources before a cluster appears in its inventory.
+  // Only exact cluster-labelled resources are safe to remove automatically.
+  const docker = process.env.OCC_DOCKER_BIN ?? "docker";
+  for (const [kind, command, remove, format] of [
+    ["containers", ["ps", "-a"], ["rm", "-f", "-v"], "{{.Names}}"],
+    ["networks", ["network", "ls"], ["network", "rm"], "{{.Name}}"],
+    ["volumes", ["volume", "ls"], ["volume", "rm"], "{{.Name}}"],
+  ]) {
+    const list = async (filter) =>
+      (await run(docker, [...command, "--filter", filter, "--format", format])).stdout
+        .split(/\r?\n/)
+        .filter(Boolean);
+    const labelled = await list(`label=k3d.cluster=${resource.name}`);
+    if (
+      labelled.length > 1000 ||
+      labelled.some((value) => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(value))
+    ) {
+      throw new Error(`Invalid k3d ${kind} inventory: ${resource.name}`);
+    }
+    if (labelled.length) {
+      await run(docker, [...remove, ...labelled]);
+    }
+    if (
+      (await list(`label=k3d.cluster=${resource.name}`)).length ||
+      (await list(`name=k3d-${resource.name}`)).length
+    ) {
+      throw new Error(`Possible owned k3d ${kind} remain after deletion: ${resource.name}`);
+    }
+  }
 }
 
 async function cleanupImageTag(resource, state) {
@@ -265,13 +319,28 @@ async function cleanupResourceIds(statePath, resourceIds) {
   if (!isAbsolute(path)) {
     throw new Error("Cleanup state path must resolve to an absolute path.");
   }
+  if (!(await stateExists(path))) {
+    return;
+  }
+  // A test may prepare and clean databases from its own process beside the runner.
+  await withStateLock(path, () => cleanupLockedResourceIds(path, resourceIds));
+}
+
+async function stateExists(path) {
   try {
     await access(path, constants.F_OK);
+    return true;
   } catch (error) {
     if (error.code === "ENOENT") {
-      return;
+      return false;
     }
     throw error;
+  }
+}
+
+async function cleanupLockedResourceIds(path, resourceIds) {
+  if (!(await stateExists(path))) {
+    return;
   }
   const state = await readState(path);
   const selected = new Set(resourceIds ?? state.resources.map((resource) => resource.id));
@@ -311,7 +380,7 @@ async function main() {
   await cleanupState(args.state);
 }
 
-export { cleanupResourceIds, cleanupState };
+export { cleanupResourceIds, cleanupState, deleteOwnedK3dCluster };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((error) => {

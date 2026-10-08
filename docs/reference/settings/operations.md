@@ -56,7 +56,13 @@ An exit-0 `migration.checked` record reports one reviewed history shape:
 `empty`, `prePresetsMain`, `main`, `repositoryCredentials`,
 `repositoryRetention`, `workspaceSetup`, `agentProvisioning`,
 `backendCompleted`, `providerCompleted`, `backendTerminology`, `prePluginApprovers`,
-or `completed`.
+`preBrokerReceipts`, `preAgentDeletion`, `preDeploymentProgress`,
+`preHumanAuthentication`, `preAgentDeletionTakeover`,
+`preNamespaceDeletionTakeover`, `preRepositoryAccess`, `preRestrictionReadLogs`,
+`preOAuth`, `preCredentialWithdrawals`, `preBrokerReceiptFence`,
+`preModelProbeFailureCause`, `preProvisioningConfigurationRelease`, `preAdministratorCredentialSourceGrants`,
+`preCodexPatSources`, `preAgentCredentialSources`,
+`preCredentialWithdrawalRequester`, or `completed`.
 `prePresetsMain` means
 the exact canonical history through `0023_runtime_failure_timestamp_validation`;
 `main` also includes `0024_agent_presets`. `repositoryCredentials` adds
@@ -67,8 +73,26 @@ through `0029_agent_provisioning_work`. `backendCompleted` is the exact
 migration. `providerCompleted` is the exact 31-receipt Provider terminology
 history published before the rename. `backendTerminology` has the 32 receipts
 through `0031_backend_terminology_compatibility`; `prePluginApprovers` adds
-`0032_credential_sources` for 33 receipts. `completed` is the current
-canonical history with all receipts, including the Agent plugin approver migration.
+`0032_credential_sources` for 33 receipts. `preBrokerReceipts` has 34 receipts
+through `0033_agent_plugin_approvers`; `preAgentDeletion` has 35 through
+`0034_repository_broker_receipts`; `preDeploymentProgress` has 36 through
+`0035_agent_deletion_repository_session_evidence`. `preHumanAuthentication` has
+the 37 receipts through `0036_deployment_progress`; `preAgentDeletionTakeover`
+has 38 through `0037_human_authentication`; `preNamespaceDeletionTakeover` has
+39 through `0038_agent_deletion_takeover`; `preRepositoryAccess` has 40 through
+`0039_namespace_deletion_takeover`; `preRestrictionReadLogs` has 41 through
+`0040_repository_access`; `preOAuth` has 42 through
+`0041_restriction_read_logs`; `preCredentialWithdrawals` has 43 through
+`0042_oauth_harness_auth`; `preBrokerReceiptFence` has 44 through
+`0043_credential_withdrawals`; `preModelProbeFailureCause` has 45 through
+`0045_repository_broker_receipt_fence`; `preProvisioningConfigurationRelease`
+has 46 through `0046_model_probe_failure_cause`;
+`preAdministratorCredentialSourceGrants` has 47 through
+`0047_provisioning_configuration_release`; `preCodexPatSources` has 48 through
+`0048_administrator_credential_source_grants`; `preAgentCredentialSources` has 49
+through `0049_codex_pat_sources`; `preCredentialWithdrawalRequester` has 50
+through `0050_agent_credential_sources`. `completed` is the current canonical
+history with all receipts, including `0051_credential_withdrawal_requester`.
 The source manifest is
 [`migrations/meta/canonical-history.json`](../../../migrations/meta/canonical-history.json).
 Empty schemas may be absent or have only their owner's ordinary `CREATE` and
@@ -107,6 +131,37 @@ Do not edit the ledger, run Drizzle directly to bypass the check, or restore an
 old schema over the canonical one. A failed or disconnected migration is not
 proof of rollback: reconnect, run `--check`, and inspect the retained database
 before deciding whether another attempt is appropriate.
+
+### Clear legacy managed PAT bindings before `0049`
+
+Migration `0049_codex_pat_sources` fails with `Unsupported legacy managed PAT
+authentication: recreate development Agents, revisions, and provisioning
+requests before migrating` when an Agent draft, any AgentRevision, or a
+provisioning plan still holds a retired `chatgpt_service_account` binding. No
+API deletes a revision or provisioning request on its own: delete each affected
+Agent, which also deletes its revisions and requests, and create it again after
+the upgrade. Changing an Agent's binding does not clear historical revisions.
+
+A provisioning request that never created an Agent survives Agent deletion.
+Let queued or running requests finish. Then, as the migration role, list the
+remaining ones and delete those that failed or were cancelled. Deleting the
+`occ.controller_work` row removes its request row, as Agent deletion does:
+
+```sql
+SELECT work_id, status FROM occ.agent_provisioning_work
+WHERE agent_id IS NULL
+  AND plan #>> '{harnessAuth,method}' = 'chatgpt_service_account';
+
+DELETE FROM occ.controller_work
+WHERE work_kind = 'provisioning'
+  AND idempotency_key IN (
+    SELECT work_id FROM occ.agent_provisioning_work
+    WHERE agent_id IS NULL AND status IN ('failed', 'cancelled')
+      AND plan #>> '{harnessAuth,method}' = 'chatgpt_service_account');
+```
+
+Alternatively, [recreate the disposable installation](#recreate-an-unsupported-disposable-development-installation).
+In-place conversion is unsupported.
 
 ### Recreate an unsupported disposable development installation
 
@@ -182,7 +237,14 @@ it does not use the API's listener or authentication settings.
 | `OCC_WORKER_LEASE_DURATION_MS`      | `5000`.                        | Positive safe integer controlling the claim lease in milliseconds.                                                                                            |
 | `OCC_WORKER_MAX_ATTEMPTS`           | `5`.                           | Positive safe integer limiting attempts before permanent failure.                                                                                             |
 | `OCC_WORKER_CONVERGENCE_TIMEOUT_MS` | `900000`.                      | Positive safe integer bounding Namespace convergence from operation creation.                                                                                 |
+| `OCC_WORKER_DATABASE_TIMEOUT_MS`    | `60000`.                       | Client-side bound on each worker query and connection; a silent connection is dropped and retried, and longer lock waits fail the pass as an attempt.         |
 | `OCC_WORKER_READINESS_PATH`         | Optional absolute path.        | Writes a private freshness marker after real queue-health observations; required by packaged worker probes.                                                   |
+| `OCC_WORKER_LIVENESS_PATH`          | Optional absolute path.        | Writes a private marker as the run loop makes progress, even through database outages; the packaged liveness probe restarts a worker whose marker is stale.   |
+
+The run loop writes the liveness marker at startup, at the start of every pass
+and on every claim renewal. A database outage keeps it moving; the packaged
+liveness probe fails only when it is older than
+`max(120 s, 240 polls, 6 leases, 2 database timeouts)`.
 
 Start the worker only after the controller is healthy and the Installation exists:
 
@@ -214,8 +276,9 @@ bootstrap, API, and worker. `occ dev up` starts the supported development
 profile; the checkout-local `scripts/dev-up` entry point uses the same path.
 Startup validates Compose configuration, waits for services, copies
 the bootstrap service-key response to a private file, and proves authenticated
-access. `OCC_DEVELOPMENT_COMPUTE_DRIVER` selects Docker Compute or the
-Compose-hosted [local Kubernetes profile](../../guides/deploy/local-kubernetes-development.md).
+access. `OCC_DEVELOPMENT_COMPUTE_DRIVER` selects Docker Compute or Kubernetes
+Compute. Kubernetes Compute can use a Compose control plane or the
+[Kubernetes-only profile](../../guides/deploy/local-kubernetes-development.md).
 The helper prefers a usable Docker Engine and otherwise selects Podman directly,
 even when no `docker` compatibility alias exists. Podman requires the standalone
 `podman-compose` provider; Docker Compute also requires `yq` v4. The helper

@@ -3,6 +3,7 @@ import {
   type JSONSchema,
   type PluginCatalogEntry,
   type PluginCatalogPage,
+  type PluginDiscoveryAuthentication,
   type PluginDriver,
   type PluginDesiredState,
   type PluginApprovers,
@@ -17,6 +18,7 @@ import {
   ScopeViolationError,
 } from "@openclaw-enterprise/occ";
 import {
+  hasAliasedSelections,
   openClawCatalogEntries,
   validatePolicies,
   type CodexPluginCatalogReader,
@@ -316,9 +318,22 @@ class BundledPluginDriverBase {
     } catch (error) {
       const field =
         error instanceof Error && "policyField" in error ? error.policyField : undefined;
+      if (field === "pluginId") {
+        const pluginId =
+          error instanceof Error && "pluginId" in error && typeof error.pluginId === "string"
+            ? error.pluginId
+            : undefined;
+        throw new PluginPolicyValidationError("unknownPlugin", this.id, pluginId);
+      }
       throw new PluginPolicyValidationError(
         field === "toolDefaults.reviewer" || field === "tools[id].reviewer" ? field : undefined,
       );
+    }
+    // Admission-only, like the Codex approvers check: revisions admitted before this
+    // check keep rendering unchanged. An Agent or in-flight provisioning record that
+    // holds both keys is refused at its next create replay, update, deploy, or resume.
+    if (hasAliasedSelections(kind, selections)) {
+      throw new PluginPolicyValidationError("aliasedPlugin");
     }
   }
 
@@ -360,7 +375,11 @@ export class CodexPluginDriver extends BundledPluginDriverBase implements Plugin
   // TODO: gate all_actions/write_actions on enforceable session constraints before this draft ships.
   // A permissive native session can bypass app-level review despite translation.
   readonly policyCapabilities: PluginPolicyCapabilities = deepFreeze({
-    approvers: { agent: true, plugin: true, tools: true },
+    // TODO(policySubject): advertise plugin and tool approvers once upstream Codex plugin approval
+    // requests carry policySubject. Until then OpenClaw's Slack resolver returns no approvers for a
+    // subject-less request whenever approvals.plugin.slack.plugins is set, so only the Agent-wide
+    // list can approve Codex plugin calls.
+    approvers: { agent: true, plugin: false, tools: false },
     toolDefaults: {
       enabled: true,
       approval: ["provider_default", "all_actions", "write_actions", "none"],
@@ -376,6 +395,17 @@ export class CodexPluginDriver extends BundledPluginDriverBase implements Plugin
 
   validatePolicies(selections: PluginDesiredState, defaultApprovers?: PluginApprovers): void {
     this.validate("codex", selections, defaultApprovers);
+    // Admission-only check: runtime translation still renders already-admitted revisions unchanged.
+    // TODO(policySubject): remove with the capability gate above.
+    if (
+      Object.values(selections).some(
+        (selection) =>
+          selection.approvers !== undefined ||
+          Object.values(selection.tools ?? {}).some((tool) => tool.approvers !== undefined),
+      )
+    ) {
+      throw new PluginPolicyValidationError("approvers");
+    }
   }
   private readonly catalogReader: CodexPluginCatalogReader | undefined;
   private readonly catalogSource: "hosted" | "openai-curated";
@@ -386,7 +416,7 @@ export class CodexPluginDriver extends BundledPluginDriverBase implements Plugin
   }
 
   async discoverCatalog(
-    input: { readonly accessToken?: string; readonly cursor?: string; readonly q?: string },
+    input: PluginDiscoveryAuthentication & { readonly cursor?: string; readonly q?: string },
     signal?: AbortSignal,
   ): Promise<PluginCatalogPage> {
     if (this.catalogSource === "openai-curated") {
@@ -404,21 +434,11 @@ export class CodexPluginDriver extends BundledPluginDriverBase implements Plugin
         setup: CURATED_SETUP,
       };
     }
-    if (input.accessToken === undefined) {
-      throw new PluginDiscoveryError("credentials_rejected");
-    }
-    return discoverHostedPlugins(
-      {
-        accessToken: input.accessToken,
-        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-        ...(input.q === undefined ? {} : { q: input.q }),
-      },
-      signal,
-    );
+    return discoverHostedPlugins(input, signal);
   }
 
   async getCatalogPlugin(
-    input: { readonly accessToken?: string; readonly pluginId: string },
+    input: PluginDiscoveryAuthentication & { readonly pluginId: string },
     signal?: AbortSignal,
   ): Promise<PluginCatalogEntry> {
     if (this.catalogSource === "openai-curated") {
@@ -428,10 +448,7 @@ export class CodexPluginDriver extends BundledPluginDriverBase implements Plugin
       }
       return this.catalog([entry])[0]!;
     }
-    if (input.accessToken === undefined) {
-      throw new PluginDiscoveryError("credentials_rejected");
-    }
-    return getHostedPlugin({ accessToken: input.accessToken, pluginId: input.pluginId }, signal);
+    return getHostedPlugin(input, signal);
   }
 
   constructor(

@@ -3,9 +3,9 @@ import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import {
   KubernetesComputeDriver,
-  kubernetesGatewayNamespaceName,
   kubernetesNamespaceName,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
+import { SETUP_WRAPPER_COMMAND } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { encodeRepositoryCredentialSessionFiles } from "../../apps/controller/src/drivers/repo/github/credentials/client/config.ts";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 
@@ -129,6 +129,8 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
     },
     { nodeEnrollment },
   );
+  // Fixture failures are final; skip the driver's API retry waits.
+  driver.waitBeforeRetry = async () => {};
   const revision = {
     id: "revision-repository-material",
     namespaceId: "namespace-repository-material",
@@ -294,7 +296,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
     kind: "Secret",
     metadata: {
       name: "model-key",
-      namespace: kubernetesGatewayNamespaceName(revision.namespaceId),
+      namespace: kubernetesNamespaceName(revision.namespaceId),
       uid: "model-key-uid",
     },
     data: { value: Buffer.from("fixture-key").toString("base64") },
@@ -324,6 +326,11 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
         pods.filter((pod) => pod.metadata.namespace === target && matching(pod, labelSelector)),
       ),
     };
+  };
+  // Annotation patches that sync a running Harness after its node setup is written.
+  clients.core.patchNamespacedPod = async ({ name, namespace: target }) => {
+    calls.push({ operation: "patchPod", name, namespace: target });
+    return {};
   };
   for (const [api, kinds] of [
     [
@@ -468,7 +475,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
     harnessAuth: {
       ...revision.harnessAuth,
       backendRef: {
-        namespaceName: kubernetesGatewayNamespaceName(revision.namespaceId),
+        namespaceName: kubernetesNamespaceName(revision.namespaceId),
         name: "model-key",
         key: "value",
         uid: "model-key-uid",
@@ -482,19 +489,14 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
       (object) =>
         object.kind === "Secret" &&
         object.metadata.namespace === namespace &&
-        !object.metadata.name.startsWith("gateway-secrets-") &&
-        !object.metadata.name.startsWith("harness-secrets-") &&
-        !object.metadata.name.startsWith("workspace-node-"),
+        object.metadata.labels?.["openclaw.dev/repository-material"] === "session",
     );
   const enroll = (selected) => {
     const name = driver.workspaceNodeName(selected);
-    const secret = driver.manifest(
-      "v1",
-      "Secret",
-      name,
-      driver.pluginRuntimeOwnership(selected),
-      namespace,
-    );
+    const secret = driver.manifest("v1", "Secret", name, driver.pluginRuntimeOwnership(selected), {
+      name: namespace,
+      plane: "execution",
+    });
     save({
       ...secret,
       metadata: {
@@ -506,6 +508,8 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
       data: {
         deviceId: Buffer.from(`node-${selected.id}`).toString("base64"),
         setupCode: Buffer.from("completed-setup").toString("base64"),
+        // A current setup code, as preparation keeps renewing it.
+        expiresAtMs: Buffer.from(String(Date.now() + 600_000)).toString("base64"),
       },
     });
   };
@@ -516,7 +520,12 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
   }
   const markReady = () => {
     for (const object of deployments()) {
-      object.status = { observedGeneration: object.metadata.generation, readyReplicas: 1 };
+      object.status = {
+        observedGeneration: object.metadata.generation,
+        replicas: 1,
+        updatedReplicas: 1,
+        readyReplicas: 1,
+      };
       save(object);
     }
     pods = deployments().map((object) =>
@@ -605,10 +614,14 @@ test("Dedicated repository custody and networking belong only to Codex", async (
   await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
   const agent = f.consumer();
   const gateway = f.deployments().find((deployment) => deployment !== agent);
-  assert.equal(
-    preparedNativeDocument(f),
-    original,
-    "the separate gateway receives no native exec prefix",
+  const gatewayConfiguration = JSON.parse(preparedNativeDocument(f));
+  // Compute adds the hook callback independently of repository credential custody.
+  // Repository material must leave every other Gateway setting unchanged.
+  delete gatewayConfiguration.plugins.entries.codex.config.appServer.nativeHookRelay;
+  assert.deepEqual(
+    gatewayConfiguration,
+    JSON.parse(original),
+    "repository material does not change the separate Gateway's execution configuration",
   );
   const assertGatewayIsolated = (deployment) => {
     const pod = deployment.spec.template.spec;
@@ -689,15 +702,16 @@ test("Dedicated credential refresh preserves its enrolled workspace node", async
   const original = runtimeBinding();
   await f.driver.prepareRevision(f.revision, f.context([original]));
   f.markReady();
-  // Gateway readiness permits enrollment, then a separate observation admits the node.
-  assert.equal((await f.driver.prepareRevision(f.revision, f.context([original]))).ready, false);
-  f.markReady();
-  await f.driver.prepareRevision(f.revision, f.context([original]));
-  f.markReady();
-  assert.equal((await f.driver.prepareRevision(f.revision, f.context([original]))).ready, false);
-  // Recording the node ID updates the Gateway binding and requires its new generation.
-  f.markReady();
+  // Gateway readiness permits enrollment. The setup reaches the running Harness
+  // through its volume without replacing it, and this fixture pairs at once.
   assert.equal((await f.driver.prepareRevision(f.revision, f.context([original]))).ready, true);
+  // Without a status proxy the controller cannot read the Gateway's ack, so
+  // activation binds the recorded node ID into the Gateway's pod spec and waits.
+  await assert.rejects(
+    f.driver.activateRevision(f.revision, f.context([original])),
+    /gateway is not ready/,
+  );
+  f.markReady();
   await f.driver.activateRevision(f.revision, f.context([original]));
   const before = structuredClone(f.consumer());
   const nodeSecret = [...f.objects.values()].find(
@@ -730,13 +744,16 @@ test("Dedicated credential refresh preserves its enrolled workspace node", async
     container.volumeMounts.find((mount) => mount.subPath === nodeSecret.metadata.name),
     nodeMount,
   );
-  assert.deepEqual(
-    container.env.find(({ name }) => name === "OPENCLAW_NODE_SETUP_CODE"),
-    {
-      name: "OPENCLAW_NODE_SETUP_CODE",
-      valueFrom: { secretKeyRef: { name: nodeSecret.metadata.name, key: "setupCode" } },
-    },
+  assert.equal(
+    container.env.some(({ name }) => name === "OPENCLAW_NODE_SETUP_CODE"),
+    false,
+    "the setup code never enters the Harness environment",
   );
+  assert.deepEqual(
+    refreshed.spec.template.spec.volumes.find(({ name }) => name === "openclaw-node-setup"),
+    before.spec.template.spec.volumes.find(({ name }) => name === "openclaw-node-setup"),
+  );
+  assert.equal(nodeSecret.data.setupCode, undefined, "readiness removed the paired setup code");
   assert.deepEqual(
     f.objects.get(`Secret:${nodeSecret.metadata.namespace}:${nodeSecret.metadata.name}`),
     nodeSecret,
@@ -755,6 +772,41 @@ test("Dedicated credential refresh preserves its enrolled workspace node", async
     nodeSecret,
   );
   assert.equal(f.secrets().filter((secret) => secret.immutable).length, 1);
+});
+
+test("Kubernetes keeps original admission correlation out of runtime resources", async () => {
+  const f = await fixture("dedicated");
+  const admissionId = "1720000000000-12345678-1234-4234-8234-123456789abc";
+  const binding = { ...runtimeBinding(), admissionId };
+  // The Worker may carry its original attempt identity internally; it is not
+  // a credential and must not be exposed in the Agent's material resources.
+  await f.driver.prepareRevision(f.revision, f.context([binding]));
+  assert.equal(JSON.stringify([...f.objects.values()]).includes(admissionId), false);
+  await f.driver.prepareRevision(
+    f.revision,
+    f.context([
+      {
+        kind: "retained",
+        repositoryRef: binding.repositoryRef,
+        sessionId: binding.sessionId,
+        deadlineWallMs: binding.deadlineWallMs,
+        admissionId,
+      },
+    ]),
+  );
+  assert.equal(f.secrets().length, 1);
+
+  for (const invalid of ["", "bad\ncorrelation", "x".repeat(129), null]) {
+    const other = await fixture("dedicated");
+    await assert.rejects(
+      other.driver.prepareRevision(
+        other.revision,
+        other.context([{ ...binding, admissionId: invalid }]),
+      ),
+      { message: "Repository credential material is invalid." },
+    );
+    assert.deepEqual(other.apiCalls, []);
+  }
 });
 
 for (const mode of ["embedded", "dedicated"]) {
@@ -830,6 +882,30 @@ for (const mode of ["embedded", "dedicated"]) {
   });
 }
 
+test("Embedded successor is not ready when material expires during policy reconciliation", async (t) => {
+  let clock = Date.now();
+  t.mock.method(Date, "now", () => clock);
+  const f = await fixture("embedded");
+  const original = runtimeBinding();
+  await f.driver.prepareRevision(f.revision, f.context([original]));
+  f.markReady();
+  await f.driver.activateRevision(f.revision, f.context([original]));
+
+  const successor = { ...f.revision, id: "revision-successor", revision: 2 };
+  const replacement = runtimeBinding("session_successor");
+  const patchPolicy = f.clients.networking.patchNamespacedNetworkPolicy;
+  let policyObserved = false;
+  f.clients.networking.patchNamespacedNetworkPolicy = async (...args) => {
+    const result = await patchPolicy(...args);
+    policyObserved = true;
+    clock = deadlineWallMs;
+    return result;
+  };
+  const result = await f.driver.prepareRevision(successor, f.context([replacement]));
+  assert.equal(policyObserved, true);
+  assert.equal(result.ready, false);
+});
+
 test("Dedicated successor material is rechecked after workspace-node status", async () => {
   let loseMaterialReadiness = false;
   let statusObserved = false;
@@ -884,6 +960,72 @@ test("Dedicated successor material is rechecked after workspace-node status", as
   loseMaterialReadiness = false;
   f.markReady();
   assert.equal((await prepare()).ready, true);
+});
+
+test("Dedicated successor is not ready when material expires during workspace-node status", async (t) => {
+  let clock = Date.now();
+  t.mock.method(Date, "now", () => clock);
+  let expireOnStatus = false;
+  let statusObserved = false;
+  const f = await fixture("dedicated", {
+    async createSetup() {
+      throw new Error("The material fixture already has an enrolled node.");
+    },
+    async isConnected() {
+      if (expireOnStatus) {
+        statusObserved = true;
+        clock = deadlineWallMs;
+      }
+      return true;
+    },
+  });
+  f.enroll(f.revision);
+  const original = runtimeBinding();
+  await f.driver.prepareRevision(f.revision, f.context([original]));
+  f.markReady();
+  await f.driver.activateRevision(f.revision, f.context([original]));
+
+  const successor = { ...f.revision, id: "revision-successor", revision: 2 };
+  f.enroll(successor);
+  const replacement = runtimeBinding("session_successor");
+  const prepare = () => f.driver.prepareRevision(successor, f.context([replacement]));
+  await prepare();
+  f.markReady();
+  assert.equal((await prepare()).ready, true);
+  expireOnStatus = true;
+  assert.equal((await prepare()).ready, false);
+  assert.equal(statusObserved, true);
+});
+
+test("Dedicated activation refuses material that expires during workspace-node status", async (t) => {
+  let clock = Date.now();
+  t.mock.method(Date, "now", () => clock);
+  let expireOnStatus = false;
+  let statusObserved = false;
+  const f = await fixture("dedicated", {
+    async createSetup() {
+      throw new Error("The material fixture already has an enrolled node.");
+    },
+    async isConnected() {
+      if (expireOnStatus) {
+        statusObserved = true;
+        clock = deadlineWallMs;
+      }
+      return true;
+    },
+  });
+  f.enroll(f.revision);
+  const binding = runtimeBinding();
+  await f.driver.prepareRevision(f.revision, f.context([binding]));
+  f.markReady();
+  await f.driver.activateRevision(f.revision, f.context([binding]));
+  f.markReady();
+
+  expireOnStatus = true;
+  await assert.rejects(f.driver.activateRevision(f.revision, f.context([binding])), {
+    message: "The exact repository credential runtime generation is not ready.",
+  });
+  assert.equal(statusObserved, true);
 });
 
 test("Dedicated retained-material loss reports only the missing session and accepts worker replacement", async () => {
@@ -1206,23 +1348,28 @@ test("Embedded Codex plugin runtime receives broker network policy centrally", a
   });
 });
 
-test("Dedicated Codex repository material projects a combined broker CA bundle", async () => {
-  const f = await fixture("dedicated");
-  const publicCa = Buffer.from("-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n");
-  await f.driver.prepareRevision(
-    f.revision,
-    f.context([runtimeBinding("session_with_ca", publicCa)]),
-  );
-  const environment = Object.fromEntries(
-    f.consumer().spec.template.spec.containers[0].env.map(({ name, value }) => [name, value]),
-  );
-  assert.match(
-    environment.SSL_CERT_FILE,
-    /^\/run\/oce\/repository-credentials\/sessions\/[a-f0-9]{64}\/ca-bundle\.pem$/,
-  );
-  assert.equal(environment.GIT_SSL_CAINFO, environment.SSL_CERT_FILE);
-  assert.equal(environment.NODE_EXTRA_CA_CERTS, environment.SSL_CERT_FILE);
-});
+// Both consumer shapes must trust the projected CA without disabling TLS verification.
+for (const mode of ["embedded", "dedicated"]) {
+  test(`Repository consumer projects a combined broker CA bundle (${mode})`, async () => {
+    const f = await fixture(mode);
+    const publicCa = Buffer.from(
+      "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n",
+    );
+    await f.driver.prepareRevision(
+      f.revision,
+      f.context([runtimeBinding("session_with_ca", publicCa)]),
+    );
+    const environment = Object.fromEntries(
+      f.consumer().spec.template.spec.containers[0].env.map(({ name, value }) => [name, value]),
+    );
+    assert.match(
+      environment.SSL_CERT_FILE,
+      /^\/run\/oce\/repository-credentials\/sessions\/[a-f0-9]{64}\/ca-bundle\.pem$/,
+    );
+    assert.equal(environment.GIT_SSL_CAINFO, environment.SSL_CERT_FILE);
+    assert.equal(environment.NODE_EXTRA_CA_CERTS, environment.SSL_CERT_FILE);
+  });
+}
 
 test("Kubernetes projects the repository client into native exec paths without changing admitted configuration", async (t) => {
   for (const roster of ["list", "entries"]) {
@@ -1308,42 +1455,117 @@ test("Kubernetes preserves native configuration bytes without repository binding
 
 test("Kubernetes rejects malformed repository exec configuration before any API access", async (t) => {
   const malformed = [
-    ["tools null", { tools: null }],
-    ["tools array", { tools: [] }],
-    ["exec string", { tools: { exec: "full" } }],
-    ["exec null", { tools: { exec: null } }],
-    ["exec array", { tools: { exec: [] } }],
-    ["prefix scalar", { tools: { exec: { pathPrepend: "/operator/bin" } } }],
-    ["prefix null", { tools: { exec: { pathPrepend: null } } }],
-    ["prefix nonstring", { tools: { exec: { pathPrepend: ["/operator/bin", 1] } } }],
-    ["agents null", { agents: null }],
-    ["agents array", { agents: [] }],
-    ["agent list object", { agents: { list: {} } }],
-    ["agent list null", { agents: { list: null } }],
-    ["agent entries null", { agents: { entries: null } }],
-    ["agent entries array", { agents: { entries: [] } }],
-    ["agent entry null", { agents: { entries: { main: null } } }],
-    ["agent entry exec string", { agents: { entries: { main: { tools: { exec: "full" } } } } }],
+    ["tools null", { tools: null }, "Repository credentials require tools to be an object."],
+    ["tools array", { tools: [] }, "Repository credentials require tools to be an object."],
+    [
+      "exec string",
+      { tools: { exec: "full" } },
+      "Repository credentials require tools.exec to be an object.",
+    ],
+    [
+      "exec null",
+      { tools: { exec: null } },
+      "Repository credentials require tools.exec to be an object.",
+    ],
+    [
+      "exec array",
+      { tools: { exec: [] } },
+      "Repository credentials require tools.exec to be an object.",
+    ],
+    [
+      "prefix scalar",
+      { tools: { exec: { pathPrepend: "/operator/bin" } } },
+      "Repository credentials require tools.exec.pathPrepend to be an array of strings.",
+    ],
+    [
+      "prefix null",
+      { tools: { exec: { pathPrepend: null } } },
+      "Repository credentials require tools.exec.pathPrepend to be an array of strings.",
+    ],
+    [
+      "prefix nonstring",
+      { tools: { exec: { pathPrepend: ["/operator/bin", 1] } } },
+      "Repository credentials require tools.exec.pathPrepend to be an array of strings.",
+    ],
+    ["agents null", { agents: null }, "Repository credentials require agents to be an object."],
+    ["agents array", { agents: [] }, "Repository credentials require agents to be an object."],
+    [
+      "agent list object",
+      { agents: { list: {} } },
+      "Repository credentials require agents.list to be an array.",
+    ],
+    [
+      "agent list null",
+      { agents: { list: null } },
+      "Repository credentials require agents.list to be an array.",
+    ],
+    [
+      "agent entries null",
+      { agents: { entries: null } },
+      "Repository credentials require agents.entries to be an object.",
+    ],
+    [
+      "agent entries array",
+      { agents: { entries: [] } },
+      "Repository credentials require agents.entries to be an object.",
+    ],
+    [
+      "agent entry null",
+      { agents: { entries: { main: null } } },
+      "Repository credentials require agents.entries entry to be an object.",
+    ],
+    [
+      "agent entry exec string",
+      { agents: { entries: { main: { tools: { exec: "full" } } } } },
+      "Repository credentials require agents.entries entry.tools.exec to be an object.",
+    ],
     [
       "agent entry prefix nonstring",
       { agents: { entries: { main: { tools: { exec: { pathPrepend: [false] } } } } } },
+      "Repository credentials require agents.entries entry.tools.exec.pathPrepend to be an array of strings.",
     ],
-    ["agent null", { agents: { list: [null] } }],
-    ["agent array", { agents: { list: [[]] } }],
-    ["agent tools null", { agents: { list: [{ id: "main", tools: null }] } }],
-    ["agent tools array", { agents: { list: [{ id: "main", tools: [] }] } }],
-    ["agent exec null", { agents: { list: [{ id: "main", tools: { exec: null } }] } }],
-    ["agent exec array", { agents: { list: [{ id: "main", tools: { exec: [] } }] } }],
+    [
+      "agent null",
+      { agents: { list: [null] } },
+      "Repository credentials require agents.list entry to be an object.",
+    ],
+    [
+      "agent array",
+      { agents: { list: [[]] } },
+      "Repository credentials require agents.list entry to be an object.",
+    ],
+    [
+      "agent tools null",
+      { agents: { list: [{ id: "main", tools: null }] } },
+      "Repository credentials require agents.list entry.tools to be an object.",
+    ],
+    [
+      "agent tools array",
+      { agents: { list: [{ id: "main", tools: [] }] } },
+      "Repository credentials require agents.list entry.tools to be an object.",
+    ],
+    [
+      "agent exec null",
+      { agents: { list: [{ id: "main", tools: { exec: null } }] } },
+      "Repository credentials require agents.list entry.tools.exec to be an object.",
+    ],
+    [
+      "agent exec array",
+      { agents: { list: [{ id: "main", tools: { exec: [] } }] } },
+      "Repository credentials require agents.list entry.tools.exec to be an object.",
+    ],
     [
       "agent prefix scalar",
       { agents: { list: [{ id: "main", tools: { exec: { pathPrepend: "/agent/bin" } } }] } },
+      "Repository credentials require agents.list entry.tools.exec.pathPrepend to be an array of strings.",
     ],
     [
       "agent prefix nonstring",
       { agents: { list: [{ id: "main", tools: { exec: { pathPrepend: [false] } } }] } },
+      "Repository credentials require agents.list entry.tools.exec.pathPrepend to be an array of strings.",
     ],
   ];
-  for (const [name, configuration] of malformed) {
+  for (const [name, configuration, message] of malformed) {
     await t.test(name, async () => {
       const f = await fixture();
       const agentDefaults = f.revision.configuration.agents.defaults;
@@ -1352,7 +1574,9 @@ test("Kubernetes rejects malformed repository exec configuration before any API 
         f.revision.configuration.agents.defaults = agentDefaults;
       }
       const before = structuredClone(f.revision.configuration);
-      await assert.rejects(f.driver.prepareRevision(f.revision, f.context([runtimeBinding()])));
+      await assert.rejects(f.driver.prepareRevision(f.revision, f.context([runtimeBinding()])), {
+        message,
+      });
       assert.deepEqual(
         f.apiCalls,
         [],
@@ -1360,7 +1584,9 @@ test("Kubernetes rejects malformed repository exec configuration before any API 
       );
       // Activation is a separate reconciliation entrypoint and must not bypass
       // the same native configuration validation before consulting workloads.
-      await assert.rejects(f.driver.activateRevision(f.revision, f.context([runtimeBinding()])));
+      await assert.rejects(f.driver.activateRevision(f.revision, f.context([runtimeBinding()])), {
+        message,
+      });
       assert.deepEqual(f.apiCalls, [], "activation must reject before Kubernetes reads or writes");
       assert.deepEqual(f.revision.configuration, before);
     });
@@ -1417,6 +1643,7 @@ for (const mode of ["embedded", "dedicated"]) {
         assert.deepEqual(native.volumeMounts, [{ ...mount, readOnly: false }]);
         assert.equal(pod.securityContext.runAsNonRoot, true);
         for (const initializer of [init, native]) {
+          assert.deepEqual(initializer.command, [...SETUP_WRAPPER_COMMAND]);
           assert.equal(initializer.securityContext.readOnlyRootFilesystem, true);
           assert.equal(initializer.securityContext.allowPrivilegeEscalation, false);
           assert.deepEqual(initializer.securityContext.capabilities, { drop: ["ALL"] });
@@ -1447,6 +1674,38 @@ for (const mode of ["embedded", "dedicated"]) {
       },
     );
 
+    for (const publicCa of [undefined, Buffer.from("fixture-public-ca")]) {
+      await t.test(
+        `repository file ordering preserves the Pod template (public CA: ${publicCa !== undefined})`,
+        async () => {
+          const f = await fixture(mode);
+          const binding = runtimeBinding(undefined, publicCa);
+          await f.driver.prepareRevision(f.revision, f.context([binding]));
+          const originalTemplate = structuredClone(f.consumer().spec.template);
+          const originalGeneration = f.consumer().metadata.generation;
+
+          // JSON object members may return in a different order after storage.
+          // That must not restart an unchanged credential-consuming workload.
+          const secret = f.secrets()[0];
+          secret.data = Object.fromEntries(Object.entries(secret.data).reverse());
+          f.save(secret);
+          const { files, ...retained } = binding;
+          retained.kind = "retained";
+          await f.driver.prepareRevision(f.revision, f.context([retained]));
+          assert.deepEqual(f.consumer().spec.template, originalTemplate);
+          assert.equal(f.consumer().metadata.generation, originalGeneration);
+
+          const reordered = {
+            ...binding,
+            files: Object.fromEntries(Object.entries(files).reverse()),
+          };
+          await f.driver.prepareRevision(f.revision, f.context([reordered]));
+          assert.deepEqual(f.consumer().spec.template, originalTemplate);
+          assert.equal(f.consumer().metadata.generation, originalGeneration);
+        },
+      );
+    }
+
     await t.test(
       "Kubernetes reports exact missing retained material without silently creating new custody",
       async () => {
@@ -1467,13 +1726,39 @@ for (const mode of ["embedded", "dedicated"]) {
           ready: false,
           repositoryCredentialMaterialMissing: [missing],
         });
-        await assert.rejects(f.driver.activateRevision(f.revision, context));
+        // Dedicated activation reports the missing material. Embedded activation refuses
+        // earlier: preparation stopped, so the shared gateway Deployment was never created.
+        await assert.rejects(
+          f.driver.activateRevision(f.revision, context),
+          mode === "dedicated"
+            ? {
+                name: "DependencyUnavailableError",
+                message: "Repository credential material is unavailable for activation.",
+              }
+            : { message: "The Agent gateway workload is unavailable." },
+        );
         assert.equal(
           f.calls.filter((call) => call.operation === "write" && call.kind === "Secret").length,
           0,
         );
         assert.equal(f.secrets().length, 0);
         assert.equal(f.deployments().length, 0);
+        if (mode === "embedded") {
+          // Once the shared gateway exists, embedded activation reaches the same refusal and
+          // publishes no Secret for the set while one retained reference is missing.
+          const project = runtimeBinding("session_material_project");
+          await f.driver.prepareRevision(f.revision, f.context([pending, project]));
+          assert.equal(f.deployments().length, 1);
+          const writes = f.calls.length;
+          await assert.rejects(f.driver.activateRevision(f.revision, context), {
+            name: "DependencyUnavailableError",
+            message: "Repository credential material is unavailable for activation.",
+          });
+          assert.deepEqual(
+            f.calls.slice(writes).filter((call) => call.operation === "write"),
+            [],
+          );
+        }
       },
     );
 
@@ -1485,7 +1770,9 @@ for (const mode of ["embedded", "dedicated"]) {
         const document = JSON.parse(binding.files["client.json"]);
         document.sessionId = "another-session";
         binding.files["client.json"] = JSON.stringify(document);
-        await assert.rejects(f.driver.prepareRevision(f.revision, f.context([binding])));
+        await assert.rejects(f.driver.prepareRevision(f.revision, f.context([binding])), {
+          message: "Repository credential material is invalid.",
+        });
         assert.equal(f.secrets().length, 0);
         assert.equal(f.deployments().length, 0);
       },
@@ -1514,11 +1801,23 @@ for (const mode of ["embedded", "dedicated"]) {
           }
           return create(request);
         };
-        await assert.rejects(f.driver.prepareRevision(f.revision, f.context([first, second])));
+        // The API error is replaced so a Secret body it may carry never reaches callers.
+        await assert.rejects(f.driver.prepareRevision(f.revision, f.context([first, second])), {
+          message: "Repository credential material could not be created.",
+        });
         assert.equal(f.secrets().length, 1);
         assert.equal(f.deployments().length, 0);
         await f.driver.stopRevision(f.revision);
         assert.equal(f.secrets().length, 0);
+        // A conflict whose Secret is gone by the follow-up read cannot confirm custody.
+        f.clients.core.createNamespacedSecret = async () => {
+          throw Object.assign(new Error("Secret already exists"), { statusCode: 409 });
+        };
+        await assert.rejects(f.driver.prepareRevision(f.revision, f.context([first, second])), {
+          message: "Repository credential material creation could not be confirmed.",
+        });
+        assert.equal(f.secrets().length, 0);
+        assert.equal(f.deployments().length, 0);
       },
     );
 
@@ -1618,6 +1917,8 @@ for (const mode of ["embedded", "dedicated"]) {
         const deployment = f.consumer();
         deployment.status = {
           observedGeneration: deployment.metadata.generation,
+          replicas: 1,
+          updatedReplicas: 1,
           readyReplicas: 1,
         };
         f.save(deployment);
@@ -1625,7 +1926,10 @@ for (const mode of ["embedded", "dedicated"]) {
         f.setPods([oldPod, replacementPod]);
         const waiting = await f.driver.prepareRevision(f.revision, f.context([replacement]));
         assert.equal(waiting.ready, false);
-        await assert.rejects(f.driver.activateRevision(f.revision, f.context([replacement])));
+        await assert.rejects(f.driver.activateRevision(f.revision, f.context([replacement])), {
+          name: "DependencyUnavailableError",
+          message: "The exact repository credential runtime generation is not ready.",
+        });
 
         replacementPod.status.conditions = [{ type: "Ready", status: "True" }];
         f.setPods([replacementPod]);
@@ -1694,10 +1998,8 @@ for (const mode of ["embedded", "dedicated"]) {
           createdAt: f.revision.createdAt,
         });
         assert.equal(result.namespaceDeleted, true, JSON.stringify(result));
-        assert.deepEqual(
-          f.secrets().map((secret) => secret.metadata.name),
-          ["external-owner"],
-        );
+        assert.deepEqual(f.secrets(), []);
+        assert.ok(f.objects.has(`Secret:${f.namespace}:external-owner`));
         assert.ok(f.objects.has(`Namespace::${f.namespace}`));
       },
     );
