@@ -617,14 +617,22 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     }
   }
 
-  // Without runtime status there is no Pod picker and OCC reads the source's current
-  // Pod: prefer the Pod the download's header names, then the last page's Pod.
+  // A fresh download can name a different Pod, or report that no Pod remains.
+  // Only downloads without production metadata fall back to the loaded page.
   function downloadPodName(text, source, pod) {
     if (pod) {
       return pod.name;
     }
     const header = text.slice(0, Math.max(0, text.indexOf("\n")));
     const served = header.startsWith("# ") ? / pod=(\S+)/.exec(header)?.[1] : undefined;
+    const prefix = `# agent=${agent.id} revision=${revisionId} source=${source.id} `;
+    if (
+      source.kind === "container" &&
+      header.startsWith(prefix) &&
+      / observedAt=\S+ withheld=\d+$/.test(header)
+    ) {
+      return served ?? "no-pod";
+    }
     return (
       served ??
       (statusDenied && lastStream?.source === source.id ? lastStream.pod : null) ??
