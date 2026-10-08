@@ -126,9 +126,10 @@ authorization epoch.
 
 Reconfiguring refresh material starts a new OpenShell authorization epoch and
 revokes handles derived from the previous one (`provider_refresh.rs`,
-`effective_authorization_epoch`). Source review therefore indicates that
-running Agents need a redeploy after an update, as they do after a static
-update. The real test must confirm it before the reference documents it.
+`effective_authorization_epoch`). Running Agents therefore need a redeploy after
+an update, as they do after a static update. The real OpenShell suite confirms
+it: within one Sandbox provider poll after an update, the same running Harness
+presents no valid token.
 
 ### API
 
@@ -205,6 +206,17 @@ private CA:
 - Deleting the source removes refresh state and the provider.
 - Startup rejects `credential_refresh` without a paired `credential_gateway` on
   the same Backend.
+
+## Delivery
+
+The OAuth2 refresh PR implements this proposal: the `credential_refresh`
+capability and its OpenShell Driver, the `oauth2-client-credentials` and
+`oauth2-refresh-token` types, `POST …/rotate`, and
+`occ credential-source rotate`. The current contract is owned by the
+[CredentialRefreshDriver reference](../../../docs/reference/drivers/credential-refresh.md).
+The real OpenShell suite proves registration, background re-minting in a
+running Harness, forced rotation, reauthorization, and deletion against an
+in-cluster Keycloak.
 
 ## Open questions
 
