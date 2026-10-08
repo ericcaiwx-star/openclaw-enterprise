@@ -247,8 +247,9 @@ capability and its OpenShell Driver, the `oauth2-client-credentials` and
 `occ credential-source rotate`. The current contract is owned by the
 [CredentialRefreshDriver reference](../../../docs/reference/drivers/credential-refresh.md).
 The real OpenShell suite proves registration, background re-minting in a
-running Harness, forced rotation, reauthorization, and deletion against an
-in-cluster Keycloak.
+running Harness, forced rotation, reauthorization, a failed update, and
+deletion against an in-cluster Keycloak. OCC conformance proves that
+registration sends the Credential Gateway Driver no refresh secrets.
 
 ## Open questions
 

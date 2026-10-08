@@ -3968,7 +3968,8 @@ export class OpenClawController {
             source,
             signal: AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
           },
-          { type: source.type, config, secrets: values },
+          // A refresh type's secrets are issuer material, held only by the refresh Driver.
+          { type: source.type, config, secrets: refresh === undefined ? values : {} },
         ),
       );
       terminal = true;

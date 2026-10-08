@@ -65,7 +65,8 @@ The API and worker construct the Driver at startup from trusted Installation
 configuration; only the API calls it. The interface has no initializer or
 destructor.
 
-1. **Registration.** After the gateway's `registerSource` succeeds, OCC calls
+1. **Registration.** OCC calls the gateway's `registerSource` with config only;
+   resolved Secret values go only to this Driver. After it succeeds, OCC calls
    `configureRefresh` and then `rotate` to mint the first token. Both request IDs
    derive from the source ID, so a replay of the same step is not applied twice.
    The source becomes `ready` only once `rotate` reports `ready`. On any failure,
@@ -75,9 +76,12 @@ destructor.
    failure appears in the source's status with its recovery action.
 3. **Update.** `PATCH` reads the current or replacement Secret values and calls
    `configureRefresh`, then `rotate`. OCC commits replacement Secret references
-   only after a `ready` mint. A failed mint leaves the new material in the
-   Driver; repeat the update with corrected Secrets. On OpenShell, running
-   Agents need a redeploy afterwards; see its
+   only after a `ready` mint. The update is not atomic: after `configureRefresh`
+   succeeds, a failed mint returns `503` but the Driver keeps the new material,
+   and the source stays `ready` with the failure in its status. OCC restores
+   nothing. An update with no `secrets` re-applies the recorded references;
+   otherwise supply corrected Secrets. On OpenShell, running Agents need a
+   redeploy after any update that reaches `configureRefresh`; see its
    [limits](openshell-credential-gateway.md#limits).
 4. **Rotation.** `POST …/rotate` calls `rotate` for incidents such as a
    suspected token leak. Running Agents keep their placeholder and need no

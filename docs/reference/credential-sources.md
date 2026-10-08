@@ -167,10 +167,12 @@ gateway gives updated values only to new processes. To rotate a key:
 
 A `refresh`-type source keeps no static value: an update replaces its refresh
 material and mints a new token, and OCC commits replacement Secret references
-only after that mint succeeds. If the mint fails, the gateway keeps the new
-material; repeat the update with corrected Secrets. Running Agents lose the
-source's token within about 10 seconds of the update and receive none until you
-redeploy them.
+only after that mint succeeds. If the mint fails, the update returns `503`, but
+the gateway keeps the new material; the source stays `ready` and its
+`status.refresh` reports the failure. OCC does not restore the previous
+material. Send `{}` to re-apply the recorded Secrets, or update with corrected
+ones. Running Agents lose the source's token within about 10 seconds of an
+update, even a failed one, and receive none until you redeploy them.
 
 ## Rotate a refresh source
 

@@ -417,6 +417,8 @@ test("a refresh source is ready only after its first mint, and its material is n
     calls.map(({ operation }) => operation),
     ["registerSource", "configureRefresh", "rotate"],
   );
+  // Custody boundary: the gateway registers config only and never receives the issuer secret.
+  assert.deepEqual(calls[0].input.secrets, {});
   assert.deepEqual(calls[1].input.secrets, { client_secret: "synthetic-client-secret" });
   assert.deepEqual(calls[1].input.config, { client_id: "occ-tools" });
   assert.match(calls[1].input.requestId, UUID);

@@ -2885,7 +2885,8 @@ async function registerRefreshSources(request, namespaceId, tokenEcho, keycloak,
  * verifies Keycloak's signature on whatever token OpenShell substituted. The phase proves:
  * - the gateway re-mints a token before expiry and the same running Harness uses it;
  * - a forced rotation through the API mints a new token without a redeploy;
- * - a revoked refresh token reports `reauthorize`, and new material restores minting;
+ * - a revoked refresh token reports `reauthorize`; an update whose mint fails is a 503 that
+ *   keeps the recorded Secret references, and new material restores minting;
  * - deleting an unreferenced source removes its refresh state and provider from OpenShell.
  */
 async function assertRefreshCredentialSources(topology) {
@@ -2984,14 +2985,31 @@ async function assertRefreshCredentialSources(topology) {
   const staticRotation = await request("POST", `${sourcePath(toolSources[0])}/rotate`);
   assert.equal(staticRotation.status, 409, JSON.stringify(staticRotation.error));
 
-  // Ending the user's Keycloak sessions revokes the stored refresh token. A forced mint then
-  // fails, and the source reports that the owner must authorize again.
+  // Ending the user's Keycloak sessions revokes the stored refresh token, and also a second
+  // token from a sign-in just before. A forced mint then fails, and the source reports that
+  // the owner must authorize again.
+  const staleRefreshToken = await refreshSources.secret(await keycloak.signInRefreshToken());
   await keycloak.signOutUser();
   const revoked = await request("POST", `${sourcePath(refreshToken)}/rotate`);
   assert.equal(revoked.status, 503, JSON.stringify(revoked.error ?? revoked.data));
   const reauthorize = await readRefresh(refreshToken);
   assert.equal(reauthorize.state, "failed", JSON.stringify(reauthorize));
   assert.equal(reauthorize.recoveryAction, "reauthorize");
+
+  // An update whose mint fails is a 503. OCC keeps naming the last material that minted, and
+  // the source keeps reporting the failure for the owner to act on.
+  const beforeFailedUpdate = await request("GET", sourcePath(refreshToken));
+  assert.equal(beforeFailedUpdate.status, 200, JSON.stringify(beforeFailedUpdate.error));
+  const failedUpdate = await request("PATCH", sourcePath(refreshToken), {
+    secrets: { refresh_token: staleRefreshToken },
+  });
+  assert.equal(failedUpdate.status, 503, JSON.stringify(failedUpdate.error ?? failedUpdate.data));
+  const afterFailedUpdate = await request("GET", sourcePath(refreshToken));
+  assert.equal(afterFailedUpdate.status, 200, JSON.stringify(afterFailedUpdate.error));
+  assert.deepEqual(afterFailedUpdate.data.secrets, beforeFailedUpdate.data.secrets);
+  assert.equal(afterFailedUpdate.data.state, "ready");
+  assert.equal(afterFailedUpdate.data.status.refresh.state, "failed");
+  assert.equal(afterFailedUpdate.data.status.refresh.recoveryAction, "reauthorize");
 
   // New material from a fresh sign-in restores minting through the regular update API.
   const reconfiguredAt = Math.floor(Date.now() / 1000);

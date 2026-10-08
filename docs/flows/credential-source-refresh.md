@@ -58,7 +58,8 @@ The API validates the request against the gateway catalog. A type whose
 `rotation` is `refresh` resolves the selected Credential Refresh Driver inside
 the first transaction, so a missing selection fails before any gateway call.
 The API reads the Secret values, commits the record as `registering`, and calls
-the gateway's `registerSource`.
+the gateway's `registerSource` with config only: a refresh type's Secret values
+are issuer material, so only the refresh Driver receives them.
 
 `apps/controller/src/drivers/credential-gateway/openshell.ts:registerSource`
 imports a per-source OpenShell profile whose `access_token` credential declares
@@ -101,9 +102,12 @@ longer offers: that source keeps its gateway status without `refresh`.
 `PATCH` locks the source, reads its current or replacement Secrets, and checks
 the gateway status. For a `refresh` type it calls `configureRefresh` with a new
 request ID, then `rotate`, instead of the gateway's `updateSource`. A
-non-`ready` mint returns `503` before OCC replaces the Secret references.
-OpenShell starts a new authorization epoch on each reconfiguration, which
-revokes the stable placeholders of running Sandboxes, so Agents need a redeploy.
+non-`ready` mint returns `503` before OCC replaces the Secret references, but
+OpenShell keeps the new material, and the next `GET` reports the failed mint.
+An update without `secrets` re-applies the recorded references. OpenShell
+starts a new authorization epoch on each reconfiguration, even one whose mint
+fails, which revokes the stable placeholders of running Sandboxes, so Agents
+need a redeploy.
 
 `packages/occ/src/index.ts:rotateCredentialSource`
 
@@ -127,7 +131,7 @@ which sends `DeleteProviderRefresh` with `allow_missing`, and then the gateway's
   reach `token_url`; check its NetworkPolicy and trust of the issuer's CA.
 - `reauthorize` follows a revoked refresh token; supply new material with `PATCH`.
 - `tests/integration/sandbox-driver-openshell-k3d-real.test.mjs` proves minting,
-  background re-minting, forced rotation, reauthorization, and deletion against
+  background re-minting, forced rotation, reauthorization, a failed update, and deletion against
   a real Keycloak. `tests/conformance/credential-source-occ.test.mjs` covers OCC
   ordering and cleanup.
 
@@ -144,5 +148,6 @@ which sends `DeleteProviderRefresh` with `allow_missing`, and then the gateway's
 
 ## Changelog
 
+- 2026-10-08 16:19: Registration sends the gateway no refresh secrets; a failed update keeps the new material. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - f79f896b3)
 - 2026-10-08 11:46: Reading a source no longer needs its type in the current catalog. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - 3ce93bfda)
 - 2026-10-08 00:00: Created for OAuth2 refresh sources and the Credential Refresh Driver. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - 4151882d2)
