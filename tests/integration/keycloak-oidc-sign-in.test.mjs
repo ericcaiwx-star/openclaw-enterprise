@@ -236,7 +236,6 @@ async function openConsole(t, tokenAuth) {
     upstreamPort: app.server.address().port,
     tls,
   });
-  // Registered after the API's close, so it runs first.
   t.after(ingress.close);
   if (browser === undefined) {
     browser = await chromium.launch({

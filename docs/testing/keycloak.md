@@ -63,7 +63,7 @@ preparation.
 
 The browser tests compose the production API in-process (`composeProductionSignIn`)
 from the chart's OIDC upgrade settings, listening on loopback behind the HTTPS ingress
-from [`console-app.mjs`](../../tests/helpers/console-app.mjs) on the reserved port with
+from [`console-app.mjs`](../../tests/helpers/console-app.mjs) on the selected port with
 the `127.0.0.1` leaf. That origin is `OCC_AUTH_BASE_URL` and matches the realm's one
 redirect URI. The lane's PostgreSQL holds one bootstrapped Installation per run; its
 recovery administrator creates `alice`'s account and attaches her fixed subject, and
