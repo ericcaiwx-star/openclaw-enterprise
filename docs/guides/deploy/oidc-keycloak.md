@@ -51,8 +51,8 @@ certificate. OCE requires:
   signature algorithm at RS256 and do not add an audience mapper: OCE rejects an
   additional audience.
 
-For a private CA, the current chart has no OIDC CA value or turnkey mount. Use an
-explicit, upgrade-safe deployment customization to mount a combined public CA
+For a private CA, the chart version covered by this guide has no OIDC CA value
+or turnkey mount. Use an explicit, upgrade-safe deployment customization to mount a combined public CA
 bundle for the API, configure `NODE_EXTRA_CA_CERTS` to read it, and restart the
 Node process after trust changes. Preserve any existing Gateway CA roots in that
 bundle: the chart may already set `NODE_EXTRA_CA_CERTS` for Gateway routing, so

@@ -29,8 +29,9 @@ together with GitHub and Google. One issuer is supported per Installation.
   public CA bundle in the API Pod, set `NODE_EXTRA_CA_CERTS` to that bundle, and restart
   Node after trust changes. Include the IdP CA and any existing Gateway CA roots: the
   chart may already set this variable for Gateway routing, and replacing its bundle with
-  only the IdP CA breaks Gateway trust. The chart has no dedicated OIDC CA value or
-  turnkey mount. Verify the customized deployment and trust after each upgrade; see
+  only the IdP CA breaks Gateway trust. The chart version covered by this guide has
+  no dedicated OIDC CA value or turnkey mount. Verify the customized deployment and
+  trust after each upgrade; see
   [Gateway trust and rotation](../../reference/gateway-routing.md#tls-and-certificate-lifecycle).
 
 ## Register the client
