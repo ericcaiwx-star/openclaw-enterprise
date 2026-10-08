@@ -10,7 +10,9 @@ import {
   ConfigurationValidationError,
 } from "../../apps/controller/src/drivers/configuration/kubernetes/index.ts";
 import { PresetValidationError } from "../../packages/contracts/src/index.ts";
+import { normalizeRequestSecretBindings } from "../../packages/occ/src/agent-provisioning.ts";
 import {
+  AgentCredentialSourceBindingError,
   AgentDeletingError,
   AgentPrincipalAuthorizationError,
   AuthorizationDeniedError,
@@ -21,6 +23,7 @@ import {
   DeletionRetryOwnedError,
   DependencyUnavailableError,
   DeviceAuthorizationStartError,
+  HarnessAuthSecretDriverError,
   IAMAccessBindingRoleError,
   IAMPolicyValidationError,
   IAMRoleInUseError,
@@ -33,13 +36,17 @@ import {
   PluginDiscoveryError,
   PluginPolicyValidationError,
   PostgresCommitOutcomeUnknownError,
+  ProvisioningSecretDriverError,
   ResourceConflictError,
   ResourceStateConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsError,
   ScopeViolationError,
+  SecretBindingDriverError,
   SecretBindingValidationError,
+  SecretStorageDriverError,
   SecretValueError,
+  ServiceAccountDriverNotConfiguredError,
 } from "../../packages/occ/src/index.ts";
 
 // Text that must never reach a client: the mappings below that answer with fixed text are
@@ -160,6 +167,36 @@ const cases = [
     },
   ],
   [
+    "service-account issuance on an Installation without a ChatGPT Backend names the fix",
+    new ServiceAccountDriverNotConfiguredError("issue"),
+    {
+      status: 409,
+      code: "SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED",
+      message:
+        "This Installation has no ChatGPT Backend, so it cannot issue service-account credentials. An administrator must configure the ChatGPT Backend and select its ServiceAccount Driver; see https://docs-enterprise.openclaw.org/guides/integrations/chatgpt/",
+    },
+  ],
+  [
+    "a ChatGPT Harness deploy on an Installation without a ChatGPT Backend names the fix",
+    new ServiceAccountDriverNotConfiguredError("deploy"),
+    {
+      status: 409,
+      code: "SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED",
+      message:
+        "ChatGPT Harness authentication requires an issued account access-token credential, and this Installation has no ChatGPT Backend to issue one. An administrator must configure it; see https://docs-enterprise.openclaw.org/guides/integrations/chatgpt/",
+    },
+  ],
+  [
+    "deleting a service account with an issued token without a ChatGPT Backend names the fix",
+    new ServiceAccountDriverNotConfiguredError("delete"),
+    {
+      status: 409,
+      code: "SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED",
+      message:
+        "This service account holds an issued access token, and this Installation has no ChatGPT Backend to revoke it. An administrator must configure it again before deleting the account; see https://docs-enterprise.openclaw.org/guides/integrations/chatgpt/",
+    },
+  ],
+  [
     "a Kubernetes API 409",
     apiError(409),
     {
@@ -191,6 +228,19 @@ const cases = [
     },
   ],
   [
+    "an IAM policy path over the 512-character cap keeps whole leading segments",
+    new IAMPolicyValidationError(
+      `/bindings/${"b".repeat(600)}`,
+      "The subject is not usable in this Namespace.",
+    ),
+    {
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: "The subject is not usable in this Namespace.",
+      details: [{ path: "/bindings", code: "INVALID_VALUE" }],
+    },
+  ],
+  [
     "a Secret value over the byte limit",
     new SecretValueError("TOO_LONG", "Secret values must be at most 65536 UTF-8 bytes."),
     {
@@ -210,6 +260,15 @@ const cases = [
     },
   ],
   [
+    "an unlisted Harness credential source",
+    new AgentCredentialSourceBindingError(),
+    {
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: "The Harness credential source must be listed in the Agent's credentialSources.",
+    },
+  ],
+  [
     "an invalid requested Secret binding",
     new SecretBindingValidationError("Secret references cannot cross Namespaces."),
     {
@@ -222,6 +281,34 @@ const cases = [
     "a runtime image without native worker support",
     new NativeWorkerSupportError(),
     { status: 400, code: "INVALID_REQUEST", message: new NativeWorkerSupportError().message },
+  ],
+  [
+    "a plugin selection the selected Plugin Driver does not offer",
+    new PluginPolicyValidationError("unknownPlugin", "occ-plugin", "codex-plugin:a~b/c"),
+    {
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: new PluginPolicyValidationError("unknownPlugin", "occ-plugin", "codex-plugin:a~b/c")
+        .message,
+      details: [{ path: "/plugins/codex-plugin:a~0b~1c", code: "INVALID_VALUE" }],
+    },
+  ],
+  [
+    "a reserved Secret binding destination",
+    new SecretBindingValidationError(
+      "A secret binding destination uses the reserved prefix OPENCLAW_*: OPENCLAW_TOKEN.",
+      {
+        bindingsPath: "/configuration/secretBindings",
+        key: "OPENCLAW_TOKEN",
+        code: "INVALID_VALUE",
+      },
+    ),
+    {
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: "A secret binding destination uses the reserved prefix OPENCLAW_*: OPENCLAW_TOKEN.",
+      details: [{ path: "/configuration/secretBindings/OPENCLAW_TOKEN", code: "INVALID_VALUE" }],
+    },
   ],
   [
     "plugin selections that alias the same plugin",
@@ -279,6 +366,19 @@ const cases = [
       code: "CHANNEL_CREDENTIAL_BINDING_REQUIRED",
       message: "Select an environment-backed Secret for this channel credential.",
       details: [{ path: "/channels/slack/appToken", code: "INVALID_VALUE" }],
+    },
+  ],
+  [
+    "a channel credential path under a long account key is capped",
+    new ChannelCredentialError(
+      "binding_required",
+      `/channels/slack/accounts/${"a".repeat(600)}/appToken`,
+    ),
+    {
+      status: 400,
+      code: "CHANNEL_CREDENTIAL_BINDING_REQUIRED",
+      message: "Select an environment-backed Secret for this channel credential.",
+      details: [{ path: "/channels/slack/accounts", code: "INVALID_VALUE" }],
     },
   ],
   [
@@ -573,12 +673,13 @@ const cases = [
     },
   ],
   [
-    "missing admission evidence",
+    "a 401 admission failure",
     admissionFailure({ statusCode: 401 }),
     {
       status: 401,
       code: "UNAUTHENTICATED",
-      message: "The caller did not provide valid admission evidence.",
+      message:
+        "A valid session cookie or service API key is required: the credential sent is missing, invalid, expired, or revoked. Send service API keys in the x-api-key header; Authorization bearer tokens are not accepted.",
     },
   ],
   [
@@ -628,6 +729,56 @@ const cases = [
       status: 503,
       code: "DEPENDENCY_UNAVAILABLE",
       message: "A required platform dependency is unavailable.",
+    },
+  ],
+  [
+    "a Configuration Secret binding the selected Secret Driver cannot serve names the fix",
+    new SecretBindingDriverError(),
+    {
+      status: 503,
+      code: "DEPENDENCY_UNAVAILABLE",
+      message:
+        "The selected Secret Driver does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
+    },
+  ],
+  [
+    "a Harness authentication Secret the selected Secret Driver cannot serve names the fix",
+    new HarnessAuthSecretDriverError(),
+    {
+      status: 503,
+      code: "DEPENDENCY_UNAVAILABLE",
+      message:
+        "The selected Secret Driver does not own the Harness authentication Secret. Bind a Secret stored through the selected driver: set harnessAuth to another Secret, or create a new Secret with the key and bind that.",
+    },
+  ],
+  [
+    "an Agent provisioning Secret the selected Secret Driver cannot serve names the fix",
+    new ProvisioningSecretDriverError(),
+    {
+      status: 503,
+      code: "DEPENDENCY_UNAVAILABLE",
+      message:
+        "The selected Secret Driver does not own a Secret this Agent provisioning uses. Use only Secrets stored through the selected driver: save replacement Secrets and submit a new provisioning request with them.",
+    },
+  ],
+  [
+    "a Secret update the selected Secret Driver cannot perform names the fix",
+    new SecretStorageDriverError("update"),
+    {
+      status: 503,
+      code: "DEPENDENCY_UNAVAILABLE",
+      message:
+        "The selected Secret Driver does not own this Secret, so its value cannot be updated. Create a new Secret with the value through the selected driver and bind it in place of this one.",
+    },
+  ],
+  [
+    "a Secret delete the selected Secret Driver cannot perform names the fix",
+    new SecretStorageDriverError("delete"),
+    {
+      status: 503,
+      code: "DEPENDENCY_UNAVAILABLE",
+      message:
+        "The selected Secret Driver does not own this Secret, so its stored value cannot be deleted. Delete it once the Installation again selects the Secret Driver that stored it.",
     },
   ],
   [
@@ -743,3 +894,127 @@ for (const [name, error, expected] of cases) {
     assert.equal(sent.error.message, failure.message);
   });
 }
+
+test("a submitted Secret binding destination names its rule and key, never the Secret", () => {
+  const source = { kind: "secret", namespaceId: "ns_1", id: "sec_private_id" };
+  for (const [destination, bindingsPath, message, details] of [
+    [
+      "OPENCLAW_TOKEN",
+      undefined,
+      "A secret binding destination uses the reserved prefix OPENCLAW_*: OPENCLAW_TOKEN.",
+      [{ path: "/secretBindings/OPENCLAW_TOKEN", code: "INVALID_VALUE" }],
+    ],
+    [
+      "path",
+      "/configuration/secretBindings",
+      "A secret binding destination is a reserved process or platform variable name: path.",
+      [{ path: "/configuration/secretBindings/path", code: "INVALID_VALUE" }],
+    ],
+    [
+      "bad/name\n",
+      undefined,
+      "A secret binding destination is not a valid environment variable name: it must match ^[A-Za-z_][A-Za-z0-9_]*$ and have at most 253 characters.",
+      // A malformed key is not echoed; the detail points at the binding map.
+      [{ path: "/secretBindings", code: "INVALID_FORMAT" }],
+    ],
+  ]) {
+    let failure;
+    try {
+      normalizeRequestSecretBindings({ [destination]: { source } }, bindingsPath);
+    } catch (error) {
+      failure = requestFailure(error);
+    }
+    assert.ok(failure, destination);
+    assert.equal(failure.status, 400, destination);
+    assert.equal(failure.message, message, destination);
+    assert.deepEqual(failure.details, details, destination);
+    assert.doesNotMatch(JSON.stringify({ ...failure, message: failure.message }), /sec_private_id/);
+  }
+});
+
+// Ajv reports a referenced schema's failures under the reference ("Scalar/anyOf/0/type"), not
+// under the union branch that refers to it, and an inner union there can have a shorter schema
+// path than the outer union (finding 808). Entries as Ajv (verbose) reports a boolean sent for
+// `{ anyOf: [{ $ref: "Scalar" }, { type: "null" }] }` where Scalar is a string-or-number union.
+test("a nullable union of a referenced schema attributes the reference's problems to its branch", () => {
+  const validation = [
+    {
+      keyword: "type",
+      instancePath: "/a",
+      schemaPath: "Scalar/anyOf/0/type",
+      params: { type: "string" },
+    },
+    {
+      keyword: "type",
+      instancePath: "/a",
+      schemaPath: "Scalar/anyOf/1/type",
+      params: { type: "number" },
+    },
+    {
+      keyword: "anyOf",
+      instancePath: "/a",
+      schemaPath: "Scalar/anyOf",
+      params: {},
+      schema: [{ type: "string" }, { type: "number" }],
+    },
+    {
+      keyword: "type",
+      instancePath: "/a",
+      schemaPath: "#/properties/a/anyOf/1/type",
+      params: { type: "null" },
+    },
+    {
+      keyword: "anyOf",
+      instancePath: "/a",
+      schemaPath: "#/properties/a/anyOf",
+      params: {},
+      schema: [{ $ref: "Scalar" }, { type: "null" }],
+    },
+  ];
+  const failure = requestFailure(
+    Object.assign(new Error("body/a is invalid"), {
+      statusCode: 400,
+      validationContext: "body",
+      validation,
+    }),
+  );
+  assert.equal(failure.status, 400);
+  assert.equal(
+    failure.message,
+    "The request does not match the operation contract: body /a has the wrong type (expected one of string, number, null).",
+  );
+});
+
+// A reference that two branches make could be either branch's, so it is attributed to neither
+// and each problem keeps naming what its field accepts. Entries as Ajv (verbose) reports
+// `{ a: { x: [1, 1] } }` for `{ anyOf: [{ $ref: "List" }, { type: "object", properties:
+// { x: { $ref: "List" } } }] }`, where List is a uniqueItems array.
+test("a reference that two union branches make is attributed to neither", () => {
+  const validation = [
+    { keyword: "type", instancePath: "/a", schemaPath: "List/type", params: { type: "array" } },
+    {
+      keyword: "uniqueItems",
+      instancePath: "/a/x",
+      schemaPath: "List/uniqueItems",
+      params: { i: 1, j: 0 },
+    },
+    {
+      keyword: "anyOf",
+      instancePath: "/a",
+      schemaPath: "#/properties/a/anyOf",
+      params: {},
+      schema: [{ $ref: "List" }, { type: "object", properties: { x: { $ref: "List" } } }],
+    },
+  ];
+  const failure = requestFailure(
+    Object.assign(new Error("body/a is invalid"), {
+      statusCode: 400,
+      validationContext: "body",
+      validation,
+    }),
+  );
+  assert.equal(
+    failure.message,
+    "The request does not match the operation contract: body /a has the wrong type (expected array); body /a/x has an unsupported value (expected no duplicate items); body /a has an unsupported value.",
+  );
+});

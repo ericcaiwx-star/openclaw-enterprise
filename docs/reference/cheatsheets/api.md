@@ -63,7 +63,7 @@
 - [`listAgents`](../api.md#get-namespacesnamespaceidagents): List authorized Agents in one exact Namespace.
 - [`listRepositoryOptions`](../api.md#get-namespacesnamespaceidagentsrepositoryoptions): List approved repository choices for Agent creation in one Namespace.
 - [`getAgent`](../api.md#get-namespacesnamespaceidagentsagentid): Get an exact Namespace-owned Agent.
-- [`getAgentCredentialWithdrawal`](../api.md#get-namespacesnamespaceidagentsagentidcredentialsourcescredentialsourceidwithdrawal): Get the withdrawal state of a credential source for an Agent's active revision.
+- [`getAgentCredentialWithdrawal`](../api.md#get-namespacesnamespaceidagentsagentidcredentialsourcescredentialsourceidwithdrawal): Get the withdrawal state of a credential source for an Agent.
 - [`getAgentProvisioning`](../api.md#get-namespacesnamespaceidagentsprovisionworkid): Get first-time provisioning status for one exact work item.
 - [`getAgentRuntimeImages`](../api.md#get-namespacesnamespaceidagentsagentidruntimeimages): Read observed images and source commits for an Agent's active runtime.
 - [`getSavedAgentPluginPolicyCapabilities`](../api.md#get-namespacesnamespaceidagentsagentidpluginscapabilities): Read selected Plugin Driver policy capabilities for an active Agent with caller Agent read/update permission.
@@ -132,10 +132,16 @@
 - [`createIAMRole`](../api.md#post-namespacesnamespaceidiamroles): Create an immutable Namespace IAM Role.
 - [`deleteIAMRole`](../api.md#delete-namespacesnamespaceidiamrolesroleid): Delete an unreferenced exact Namespace IAM Role.
 
+### IAM service principals
+
+- [`listIAMServicePrincipals`](../api.md#get-namespacesnamespaceidiamserviceprincipals): List the Namespace's non-Agent ServicePrincipals.
+- [`getIAMServicePrincipal`](../api.md#get-namespacesnamespaceidiamserviceprincipalsserviceprincipalid): Get an exact Namespace ServicePrincipal.
+- [`createIAMServicePrincipal`](../api.md#post-namespacesnamespaceidiamserviceprincipals): Create a Namespace ServicePrincipal with no grants for automation or CLI keys.
+
 ### Secrets
 
 - [`listSecrets`](../api.md#get-namespacesnamespaceidsecrets): List readable Namespace-owned Secret metadata without revealing material.
-- [`getSecret`](../api.md#get-namespacesnamespaceidsecretssecretid): Get exact Namespace-owned Secret metadata without revealing material.
+- [`getSecret`](../api.md#get-namespacesnamespaceidsecretssecretid): Get exact Namespace-owned Secret metadata and its readable consumers.
 - [`createSecret`](../api.md#post-namespacesnamespaceidsecrets): Create exact Namespace-owned Secret material and return metadata only.
 - [`updateSecret`](../api.md#patch-namespacesnamespaceidsecretssecretid): Replace exact Namespace-owned Secret material and return stable metadata.
 - [`deleteSecret`](../api.md#delete-namespacesnamespaceidsecretssecretid): Delete exact unbound Namespace-owned Secret material.

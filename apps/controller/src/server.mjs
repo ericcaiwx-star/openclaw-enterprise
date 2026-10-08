@@ -3,10 +3,10 @@ import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import {
-  PresetFileError,
   loadInstallationConfiguration,
   loadStartupConfigurationSnapshot,
 } from "./composition/installation-config.ts";
+import { PresetFileError } from "./composition/installation-presets.ts";
 import { composeProduction } from "./composition/production.ts";
 import { validateWorkspaceFilesApiKeyPath } from "./composition/workspace-files.ts";
 import { createOccLogger, emitOccLogEvent } from "./logging.ts";
@@ -14,7 +14,7 @@ import { createOccMetrics } from "./metrics/index.ts";
 import { startupDependencyFailure } from "./startup-failure.ts";
 import { metricsConfiguration, startMetricsListener } from "./metrics/listener.ts";
 
-const loopbackHosts = new Set(["127.0.0.1", "::1", "[::1]"]);
+const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const developmentBindHosts = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
 const DEFAULT_BETTER_AUTH_BASE_URL = "http://127.0.0.1:3000";
 
@@ -23,6 +23,9 @@ function startupFailureCode(error) {
     return "PRESET_FILE_INVALID";
   }
   const message = error instanceof Error ? error.message : "";
+  if (/stored Installation name breaks the Name rule/.test(message)) {
+    return "INSTALLATION_NAME_INVALID";
+  }
   if (/OCC_AUTH_SECRET/.test(message)) {
     return "AUTH_SECRET_INVALID";
   }
@@ -36,6 +39,15 @@ function startupFailureCode(error) {
   }
   if (/OCC_GATEWAY_API_KEY_PATH|gateway API key file/i.test(message)) {
     return "GATEWAY_API_KEY_UNAVAILABLE";
+  }
+  // Production composition refuses the combination before any database work; the auth
+  // composer's host-only cookie check is the backstop.
+  if (
+    /sign-in (does not support|supports host-only cookies without shared) native admin/.test(
+      message,
+    )
+  ) {
+    return "EXTERNAL_SIGN_IN_NATIVE_ADMIN_UNSUPPORTED";
   }
   if (/OCC_AGENT_NATIVE_ADMIN|Native admin UI access|Native admin Agent domain/.test(message)) {
     return "AGENT_NATIVE_ADMIN_INVALID";

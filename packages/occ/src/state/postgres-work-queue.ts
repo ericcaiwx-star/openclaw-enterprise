@@ -492,7 +492,9 @@ const FAIL_EXHAUSTED_NAMESPACES_SQL = `
 
 /**
  * Queue transitions append `reconcile` evidence in the same statement. `filter` narrows which
- * transitioned rows get a row; it is appended to the evidence SELECT's WHERE clause.
+ * transitioned rows get a row; it is appended to the evidence SELECT's WHERE clause. A failure
+ * that ends the work item (`failed_permanent`) also carries `final: true`, so it differs from a
+ * retry with the same reason code.
  * `reasonCode` is a raw SQL expression: pass parameters or constants, never input.
  */
 const insertEvidenceCteSql = (filter = "", reasonCode = "$4::text") => `
@@ -532,6 +534,8 @@ const insertEvidenceCteSql = (filter = "", reasonCode = "$4::text") => `
       $3::text,
       jsonb_build_object('reasonCode', ${reasonCode}, 'attemptCount', transitioned.attempt_count,
         'workId', transitioned.idempotency_key)
+        || CASE WHEN transitioned.state = 'failed_permanent'
+             THEN jsonb_build_object('final', true) ELSE '{}'::jsonb END
     FROM evidence_targets AS transitioned
     WHERE true ${filter}
     RETURNING id
@@ -1142,6 +1146,9 @@ export class PostgresWorkQueue {
         "Only an active revision's deployment or maintenance can continue after failure.",
       );
     }
+    // continuing_agent locks the Agent without its Namespace. Callers that continue a
+    // revision must already hold the Namespace (then the Agent) in this transaction, as
+    // the worker does, or this deadlocks with admission's Namespace-then-Agent order.
     const failed = await this.client.query(
       `WITH source AS MATERIALIZED (
          SELECT * FROM occ.controller_work AS work

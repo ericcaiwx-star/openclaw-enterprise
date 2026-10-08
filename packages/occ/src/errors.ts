@@ -2,6 +2,7 @@ import type {
   AuthorizationEvidence,
   AuthorizationRequest,
   ResourceRef,
+  SecretConsumers,
 } from "@openclaw-enterprise/contracts";
 
 export class AuthorizationDeniedError extends Error {
@@ -96,6 +97,90 @@ export class DependencyUnavailableError extends AuthorizationDeniedError {
 }
 
 /**
+ * A Secret the selected Secret Driver cannot serve, typically one stored through a driver the
+ * Installation no longer selects. Each subclass is raised only after the caller's grant and the
+ * Secret lookup, so it reveals nothing a 403 or 404 hides, and carries a fixed message naming
+ * the fix for its own path. HTTP returns that message; every other 503 keeps the generic text.
+ */
+export abstract class SecretDriverOwnershipError extends DependencyUnavailableError {}
+
+/**
+ * A Configuration Secret binding the selected Secret Driver cannot serve. Only a Configuration
+ * write can replace the binding, so the fixed message says so.
+ */
+export class SecretBindingDriverError extends SecretDriverOwnershipError {
+  constructor() {
+    super(
+      "The selected Secret Driver does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
+    );
+    this.name = "SecretBindingDriverError";
+  }
+}
+
+/**
+ * An Agent's requested or bound Harness authentication Secret the selected Secret Driver cannot
+ * serve. The Agent's `harnessAuth` must name another Secret.
+ */
+export class HarnessAuthSecretDriverError extends SecretDriverOwnershipError {
+  constructor() {
+    super(
+      "The selected Secret Driver does not own the Harness authentication Secret. Bind a Secret stored through the selected driver: set harnessAuth to another Secret, or create a new Secret with the key and bind that.",
+    );
+    this.name = "HarnessAuthSecretDriverError";
+  }
+}
+
+/**
+ * A Secret an Agent provisioning request or its accepted work uses that the selected Secret
+ * Driver cannot serve. Accepted work keeps its inputs, so only a new request can replace it.
+ */
+export class ProvisioningSecretDriverError extends SecretDriverOwnershipError {
+  constructor() {
+    super(
+      "The selected Secret Driver does not own a Secret this Agent provisioning uses. Use only Secrets stored through the selected driver: save replacement Secrets and submit a new provisioning request with them.",
+    );
+    this.name = "ProvisioningSecretDriverError";
+  }
+}
+
+const SECRET_STORAGE_DRIVER_MESSAGES = Object.freeze({
+  update:
+    "The selected Secret Driver does not own this Secret, so its value cannot be updated. Create a new Secret with the value through the selected driver and bind it in place of this one.",
+  delete:
+    "The selected Secret Driver does not own this Secret, so its stored value cannot be deleted. Delete it once the Installation again selects the Secret Driver that stored it.",
+});
+
+/**
+ * An exact Secret update or delete the selected Secret Driver cannot perform: OCC never writes or
+ * removes a value through a driver that does not own it.
+ */
+export class SecretStorageDriverError extends SecretDriverOwnershipError {
+  readonly operation: keyof typeof SECRET_STORAGE_DRIVER_MESSAGES;
+
+  constructor(operation: keyof typeof SECRET_STORAGE_DRIVER_MESSAGES) {
+    super(SECRET_STORAGE_DRIVER_MESSAGES[operation]);
+    this.name = "SecretStorageDriverError";
+    this.operation = operation;
+  }
+}
+
+/**
+ * A credential source registered through a Credential Gateway Driver the Installation no longer
+ * selects. OCC never binds, deploys, updates or deletes a source through a driver that did not
+ * register it. Raised only after the caller's grant and the source lookup, so it reveals nothing
+ * a 403 or 404 hides; one fixed message names the fix on every path. An Installation with no
+ * Credential Gateway, or a selected one that is unusable, is not this error.
+ */
+export class CredentialSourceDriverError extends DependencyUnavailableError {
+  constructor() {
+    super(
+      "The selected Credential Gateway Driver did not register this credential source. Bind a replacement registered through the selected driver instead. To update or delete this source, an administrator must first re-select the driver that registered it.",
+    );
+    this.name = "CredentialSourceDriverError";
+  }
+}
+
+/**
  * A running Agent has no active revision yet (its first deployment, or a redeploy after a
  * stop, is still activating). A lifecycle state, not an outage; it stays a
  * DependencyUnavailableError so callers that need a revision still answer 503.
@@ -174,9 +259,11 @@ export class ScopeViolationError extends Error {
 }
 
 /**
- * Admitted Configuration content cannot select a supported Harness runtime. The
- * caller can already see the Configuration, so HTTP reports the static message as
- * an invalid request instead of hiding it as a scope miss.
+ * Admitted Configuration content cannot select a supported Harness runtime, or a
+ * provisioning request names an execution mode the Compute Driver does not provision
+ * (public through the Installation capabilities). The caller can already see what the
+ * message names, so HTTP reports it as an invalid request instead of hiding it as a
+ * scope miss.
  */
 export class ConfigurationHarnessError extends ScopeViolationError {
   constructor(message: string) {
@@ -186,18 +273,46 @@ export class ConfigurationHarnessError extends ScopeViolationError {
 }
 
 /**
+ * An Agent's `harnessAuth` names a credential source its `credentialSources` list does not
+ * hold. OCC raises it only after every source authorization, and the rule depends only on
+ * the request and the Agent the caller may already update, so HTTP reports it as an invalid
+ * request instead of hiding it as a scope miss.
+ */
+export class AgentCredentialSourceBindingError extends ScopeViolationError {
+  constructor() {
+    super("The Harness credential source must be listed in the Agent's credentialSources.");
+    this.name = "AgentCredentialSourceBindingError";
+  }
+}
+
+/**
  * A request names an invalid Secret binding: Agent provisioning or a Configuration write
  * with a reserved or invalid environment destination or an unsupported binding shape
- * (including credential-source Harness authentication in Agent provisioning), or
+ * (including missing, runtime or credential-source Harness authentication in Agent
+ * provisioning), or
  * any of those, an Agent's Harness authentication, a credential source, or plugin discovery
  * naming a Secret in another Namespace. Messages are static, so HTTP reports them as an
  * invalid request instead of hiding them as a scope miss; Secret existence is still checked
  * later and stays a scope miss.
  */
 export class SecretBindingValidationError extends ScopeViolationError {
-  constructor(message: string) {
+  /**
+   * The submitted destination key that broke a destination rule, and the JSON Pointer of
+   * the binding map that holds it. Never a Secret value or ID.
+   */
+  readonly destination?: {
+    readonly bindingsPath: string;
+    /** Absent for a malformed key, which is not echoed; the detail points at the map. */
+    readonly key?: string;
+    readonly code: "INVALID_FORMAT" | "INVALID_VALUE";
+  };
+
+  constructor(message: string, destination?: SecretBindingValidationError["destination"]) {
     super(message);
     this.name = "SecretBindingValidationError";
+    if (destination !== undefined) {
+      this.destination = Object.freeze({ ...destination });
+    }
   }
 }
 
@@ -267,6 +382,129 @@ export class ResourceStateConflictError extends ResourceConflictError {
   constructor(message: string) {
     super(message);
     this.name = "ResourceStateConflictError";
+  }
+}
+
+const SECRET_CONSUMER_LABELS = [
+  ["agents", "Agent", "Agents"],
+  ["configurations", "Configuration", "Configurations"],
+  ["credentialSources", "credential source", "credential sources"],
+  [
+    "provisioningRequests",
+    "pending Agent provisioning request",
+    "pending Agent provisioning requests",
+  ],
+] as const satisfies readonly (readonly [keyof SecretConsumers, string, string])[];
+
+/** The HTTP error contract caps messages at 256 characters. */
+const SECRET_REFERENCED_MESSAGE_LIMIT = 256;
+
+/**
+ * Names each kind of readable reference and as many of its IDs as fit the message cap,
+ * one ID per kind in turn, so many Agents cannot crowd out a Configuration. References the
+ * caller cannot read are only counted. The Secret's `consumers` on GET has the full list.
+ */
+function secretReferencedMessage(consumers: Readonly<SecretConsumers>): string {
+  const kinds = SECRET_CONSUMER_LABELS.filter(([key]) => consumers[key].length > 0);
+  const shown = new Map<string, number>(kinds.map(([key]) => [key, 0]));
+  const suffix =
+    consumers.provisioningRequests.length > 0
+      ? "Remove those references, or let provisioning finish, first."
+      : "Remove those references first.";
+  const render = (): string => {
+    const parts: string[] = kinds.map(([key, singular, plural]) => {
+      const ids = consumers[key];
+      const label = ids.length === 1 ? singular : plural;
+      const count = shown.get(key) ?? 0;
+      if (count === 0) {
+        return `${label} (${ids.length})`;
+      }
+      const more = ids.length - count;
+      return `${label} ${ids.slice(0, count).join(", ")}${more === 0 ? "" : ` and ${more} more`}`;
+    });
+    if (consumers.unreadable > 0) {
+      parts.push(
+        `${consumers.unreadable} ${consumers.unreadable === 1 ? "resource" : "resources"} you cannot read`,
+      );
+    }
+    if (consumers.truncated) {
+      parts.push("and more");
+    }
+    return `The Secret is still referenced by ${parts.join("; ")}. ${suffix}`;
+  };
+  // Counts alone fit today (at most SECRET_CONSUMER_LIMIT references); the fallback below
+  // keeps the HTTP contract if a label or that limit grows.
+  const done = new Set<string>();
+  while (done.size < kinds.length) {
+    for (const [key] of kinds) {
+      if (done.has(key)) {
+        continue;
+      }
+      const count = shown.get(key) ?? 0;
+      shown.set(key, count + 1);
+      if (count + 1 > consumers[key].length || render().length > SECRET_REFERENCED_MESSAGE_LIMIT) {
+        shown.set(key, count);
+        done.add(key);
+      }
+    }
+  }
+  const message = render();
+  return message.length <= SECRET_REFERENCED_MESSAGE_LIMIT
+    ? message
+    : `The Secret is still referenced by other resources. ${suffix}`;
+}
+
+/**
+ * Secret deletion found current references. Raised only after the delete authorization;
+ * the message names the references the caller may read and counts the others.
+ */
+export class SecretReferencedError extends ResourceStateConflictError {
+  readonly consumers: Readonly<SecretConsumers>;
+
+  constructor(consumers: Readonly<SecretConsumers>) {
+    super(secretReferencedMessage(consumers));
+    this.name = "SecretReferencedError";
+    this.consumers = consumers;
+  }
+}
+
+/**
+ * The Compute Driver refuses a gateway setting in the caller's own Configuration that it
+ * cannot provision, such as `gateway.auth.mode` or `gateway.trustedProxies`. Like the
+ * Configuration errors above, the message names the setting and what the Driver accepts,
+ * never a submitted value, so HTTP returns it with the 409 that other plan refusals use,
+ * and provisioning status keeps it. Raised only after the caller was authorized.
+ */
+export class ComputeGatewaySettingError extends ResourceStateConflictError {
+  readonly setting: string;
+
+  constructor(setting: string, requirement: string) {
+    // A submitted key can be part of the setting's path; status stores this message as is.
+    const shown = setting.replace(/[\p{Cc}\p{Cf}]|\p{Cs}/gu, "?");
+    super(
+      configurationFieldMessage(shown, (path) => `Configuration setting ${path} ${requirement}.`),
+    );
+    this.name = "ComputeGatewaySettingError";
+    this.setting = setting;
+  }
+}
+
+const COMPUTE_PROVISIONING_REFUSED =
+  "The Compute Driver cannot provision this execution mode or gateway configuration.";
+
+/**
+ * Any other Compute Driver refusal of a provisioning plan, such as an Installation gateway or
+ * routing setting. Its cause may name Installation configuration, so the caller gets fixed
+ * text; HTTP logs `reason` (bounded) with the request ID for the operator.
+ */
+export class ComputeProvisioningRefusedError extends ResourceStateConflictError {
+  readonly reason: string;
+
+  constructor(cause: unknown) {
+    super(COMPUTE_PROVISIONING_REFUSED);
+    this.name = "ComputeProvisioningRefusedError";
+    const reason = cause instanceof Error ? cause.message : "The Compute Driver refused the plan.";
+    this.reason = Array.from(reason).slice(0, 512).join("");
   }
 }
 
@@ -437,6 +675,23 @@ export class SandboxRevisionUnsupportedError extends Error {
 }
 
 /**
+ * A Credential Gateway cannot attach this exact AgentRevision's credential sources: two of them
+ * would place their placeholders in the same Sandbox environment variable. The revision's
+ * source list and each source's config are fixed, so retrying cannot change the outcome; the
+ * worker fails the deployment with `code`. The message stays in the controller; status shows a
+ * fixed text.
+ */
+export class CredentialSourceRevisionError extends Error {
+  readonly code: "CREDENTIAL_SOURCE_ENVIRONMENT_CONFLICT";
+
+  constructor(code: CredentialSourceRevisionError["code"], message: string) {
+    super(message);
+    this.name = "CredentialSourceRevisionError";
+    this.code = code;
+  }
+}
+
+/**
  * An AccessBinding Role carries Permissions that can never take effect through the
  * binding: `create` is checked against the Namespace, not an existing resource, and a
  * binding to an exact resource applies only Permissions of that resource's kind.
@@ -494,6 +749,45 @@ export class CredentialGatewayNotConfiguredError extends Error {
       "This Installation has no Credential Gateway, so credential sources are unavailable. An administrator must select the OpenShell Credential Gateway Driver; see https://docs-enterprise.openclaw.org/reference/credential-sources/",
     );
     this.name = "CredentialGatewayNotConfiguredError";
+  }
+}
+
+/**
+ * The selected Credential Gateway's catalog lacks a source type: registration names one it does
+ * not offer, or a configuration change dropped an existing source's type (OpenShell offers
+ * `bearer-token` only with `toolBinaries`). An Installation property, raised only after the
+ * caller's grant and the source lookup, so it reveals nothing a 403 or 404 hides. The fixed
+ * message names the fix.
+ */
+export class CredentialSourceTypeNotOfferedError extends ResourceStateConflictError {
+  constructor() {
+    super(
+      "The selected Credential Gateway does not offer this credential source type. An administrator must enable it, for example toolBinaries for OpenShell bearer-token; see https://docs-enterprise.openclaw.org/reference/drivers/openshell-credential-gateway/",
+    );
+    this.name = "CredentialSourceTypeNotOfferedError";
+  }
+}
+
+const SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED_MESSAGES = Object.freeze({
+  issue:
+    "This Installation has no ChatGPT Backend, so it cannot issue service-account credentials. An administrator must configure the ChatGPT Backend and select its ServiceAccount Driver; see https://docs-enterprise.openclaw.org/guides/integrations/chatgpt/",
+  deploy:
+    "ChatGPT Harness authentication requires an issued account access-token credential, and this Installation has no ChatGPT Backend to issue one. An administrator must configure it; see https://docs-enterprise.openclaw.org/guides/integrations/chatgpt/",
+  delete:
+    "This service account holds an issued access token, and this Installation has no ChatGPT Backend to revoke it. An administrator must configure it again before deleting the account; see https://docs-enterprise.openclaw.org/guides/integrations/chatgpt/",
+});
+
+/**
+ * The Installation has no ChatGPT Backend, so it selects no ServiceAccount Driver: no account
+ * credential can be issued, a ChatGPT Harness binding cannot deploy, and an account holding an
+ * issued access token cannot be deleted, since nothing can revoke the token. An Installation
+ * property, raised only after the caller's grant and the account lookup, so it reveals nothing
+ * a 403 or 404 hides. The fixed message names the fix.
+ */
+export class ServiceAccountDriverNotConfiguredError extends ResourceConflictError {
+  constructor(operation: "issue" | "deploy" | "delete") {
+    super(SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED_MESSAGES[operation]);
+    this.name = "ServiceAccountDriverNotConfiguredError";
   }
 }
 
@@ -591,11 +885,31 @@ export class RuntimeLogsError extends Error {
 }
 
 export class PluginPolicyValidationError extends Error {
+  /** The rejected plugin selection key, so HTTP can point at `/plugins/<id>`. */
+  readonly pluginId?: string;
+
   constructor(
-    field?: "toolDefaults.reviewer" | "tools[id].reviewer" | "approvers" | "aliasedPlugin",
+    field?:
+      | "toolDefaults.reviewer"
+      | "tools[id].reviewer"
+      | "approvers"
+      | "aliasedPlugin"
+      | "unknownPlugin",
+    driverId?: string,
+    pluginId?: string,
   ) {
     let message = "The supplied plugin policies are invalid.";
-    if (field === "aliasedPlugin") {
+    if (field === "unknownPlugin") {
+      // driverId comes from trusted Installation configuration, never from the request.
+      // pluginId is a selection key admitted under the API contract's [A-Za-z0-9._~:@-] rule,
+      // from this request or from storage. It follows the rule, so HTTP's message cap cuts
+      // the advice first.
+      message = `A plugin selection names a plugin that the selected Plugin Driver${
+        driverId === undefined ? "" : ` (${driverId})`
+      } does not offer${
+        pluginId === undefined ? "" : `: ${pluginId}`
+      }. Check each plugin ID and its Driver prefix against that Driver's catalog; an Installation selects one Plugin Driver.`;
+    } else if (field === "aliasedPlugin") {
       message =
         'Two plugin selections name the same plugin (a native ID and its driver-prefixed ID, such as "diffs" and "occ-plugin:diffs"). Keep one selection per plugin.';
     } else if (field === "approvers") {
@@ -610,6 +924,20 @@ export class PluginPolicyValidationError extends Error {
     }
     super(message);
     this.name = "PluginPolicyValidationError";
+    if (field === "unknownPlugin" && pluginId !== undefined) {
+      this.pluginId = pluginId;
+    }
+  }
+
+  /**
+   * The same refusal without the `/plugins/<id>` pointer, for selections read from storage
+   * (deploy, an update that omits `plugins`, provisioning replay or retry): the request body
+   * holds no such path. The message still names the plugin.
+   */
+  withoutRequestPath(): PluginPolicyValidationError {
+    const stored = new PluginPolicyValidationError();
+    stored.message = this.message;
+    return stored;
   }
 }
 

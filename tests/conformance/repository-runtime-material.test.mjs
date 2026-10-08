@@ -3,7 +3,6 @@ import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import {
   KubernetesComputeDriver,
-  kubernetesGatewayNamespaceName,
   kubernetesNamespaceName,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { SETUP_WRAPPER_COMMAND } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
@@ -297,7 +296,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
     kind: "Secret",
     metadata: {
       name: "model-key",
-      namespace: kubernetesGatewayNamespaceName(revision.namespaceId),
+      namespace: kubernetesNamespaceName(revision.namespaceId),
       uid: "model-key-uid",
     },
     data: { value: Buffer.from("fixture-key").toString("base64") },
@@ -476,7 +475,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
     harnessAuth: {
       ...revision.harnessAuth,
       backendRef: {
-        namespaceName: kubernetesGatewayNamespaceName(revision.namespaceId),
+        namespaceName: kubernetesNamespaceName(revision.namespaceId),
         name: "model-key",
         key: "value",
         uid: "model-key-uid",
@@ -490,9 +489,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
       (object) =>
         object.kind === "Secret" &&
         object.metadata.namespace === namespace &&
-        !object.metadata.name.startsWith("gateway-secrets-") &&
-        !object.metadata.name.startsWith("harness-secrets-") &&
-        !object.metadata.name.startsWith("workspace-node-"),
+        object.metadata.labels?.["openclaw.dev/repository-material"] === "session",
     );
   const enroll = (selected) => {
     const name = driver.workspaceNodeName(selected);
@@ -617,10 +614,14 @@ test("Dedicated repository custody and networking belong only to Codex", async (
   await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
   const agent = f.consumer();
   const gateway = f.deployments().find((deployment) => deployment !== agent);
-  assert.equal(
-    preparedNativeDocument(f),
-    original,
-    "the separate gateway receives no native exec prefix",
+  const gatewayConfiguration = JSON.parse(preparedNativeDocument(f));
+  // Compute adds the hook callback independently of repository credential custody.
+  // Repository material must leave every other Gateway setting unchanged.
+  delete gatewayConfiguration.plugins.entries.codex.config.appServer.nativeHookRelay;
+  assert.deepEqual(
+    gatewayConfiguration,
+    JSON.parse(original),
+    "repository material does not change the separate Gateway's execution configuration",
   );
   const assertGatewayIsolated = (deployment) => {
     const pod = deployment.spec.template.spec;
@@ -1370,68 +1371,68 @@ for (const mode of ["embedded", "dedicated"]) {
   });
 }
 
-test("Kubernetes projects the repository client into native exec paths without changing admitted configuration", async (t) => {
-  for (const roster of ["list", "entries"]) {
-    await t.test(roster, async () => {
+// OCC refuses a nonempty agents.list and the pinned OpenClaw Gateway rejects any list, so
+// the projected roster is the keyed agents.entries.
+test("Kubernetes projects the repository client into native exec paths without changing admitted configuration", async () => {
+  const f = await fixture();
+  const shim = "/opt/oce/repository-credentials/bin";
+  f.revision.configuration.tools = {
+    allow: ["exec", "process"],
+    exec: {
+      host: "gateway",
+      mode: "full",
+      timeoutSec: 120,
+      pathPrepend: ["/operator/bin", shim, "/shared/bin", shim],
+    },
+  };
+  f.revision.configuration.agents.ownership = "explicit";
+  f.revision.configuration.agents.entries = {
+    custom: {
+      tools: {
+        allow: ["exec"],
+        exec: { host: "gateway", mode: "full", pathPrepend: ["/agent/bin", shim] },
+      },
+    },
+    "own-exec": { tools: { exec: { mode: "full" } } },
+    inherits: { tools: { allow: ["exec", "process"] } },
+    plain: {},
+  };
+  const original = structuredClone(f.revision.configuration);
+  deepFreeze(f.revision.configuration);
+
+  // The actual runtime document must survive OpenClaw's exec environment
+  // construction; setting only the Kubernetes container PATH is insufficient.
+  await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
+  const expected = structuredClone(original);
+  expected.tools.exec.pathPrepend = [shim, "/operator/bin", "/shared/bin"];
+  expected.agents.entries.custom.tools.exec.pathPrepend = [shim, "/agent/bin"];
+  expected.agents.entries["own-exec"].tools.exec.pathPrepend = [
+    shim,
+    "/operator/bin",
+    "/shared/bin",
+  ];
+  assert.deepEqual(JSON.parse(preparedNativeDocument(f)), expected);
+  assert.deepEqual(f.revision.configuration, original);
+});
+
+test("Kubernetes supplies a native repository exec prefix when no tools configuration exists", async (t) => {
+  // OpenClaw drops an empty agents.list beside an implicit empty roster, so it passes through.
+  for (const list of [undefined, []]) {
+    await t.test(list === undefined ? "no list" : "empty list", async () => {
       const f = await fixture();
-      const shim = "/opt/oce/repository-credentials/bin";
-      f.revision.configuration.tools = {
-        allow: ["exec", "process"],
-        exec: {
-          host: "gateway",
-          mode: "full",
-          timeoutSec: 120,
-          pathPrepend: ["/operator/bin", shim, "/shared/bin", shim],
-        },
-      };
-      f.revision.configuration.agents.ownership = "explicit";
-      f.revision.configuration.agents.list = [
-        {
-          id: "custom",
-          tools: {
-            allow: ["exec"],
-            exec: { host: "gateway", mode: "full", pathPrepend: ["/agent/bin", shim] },
-          },
-        },
-        { id: "own-exec", tools: { exec: { mode: "full" } } },
-        { id: "inherits", tools: { allow: ["exec", "process"] } },
-        { id: "plain" },
-      ];
-      if (roster === "entries") {
-        f.revision.configuration.agents.entries = Object.fromEntries(
-          f.revision.configuration.agents.list.map(({ id, ...entry }) => [id, entry]),
-        );
-        delete f.revision.configuration.agents.list;
+      if (list !== undefined) {
+        f.revision.configuration.agents.list = list;
       }
       const original = structuredClone(f.revision.configuration);
       deepFreeze(f.revision.configuration);
-
-      // The actual runtime document must survive OpenClaw's exec environment
-      // construction; setting only the Kubernetes container PATH is insufficient.
       await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
-      const expected = structuredClone(original);
-      expected.tools.exec.pathPrepend = [shim, "/operator/bin", "/shared/bin"];
-      const custom = roster === "list" ? expected.agents.list[0] : expected.agents.entries.custom;
-      const ownExec =
-        roster === "list" ? expected.agents.list[1] : expected.agents.entries["own-exec"];
-      custom.tools.exec.pathPrepend = [shim, "/agent/bin"];
-      ownExec.tools.exec.pathPrepend = [shim, "/operator/bin", "/shared/bin"];
-      assert.deepEqual(JSON.parse(preparedNativeDocument(f)), expected);
+      assert.deepEqual(JSON.parse(preparedNativeDocument(f)), {
+        ...original,
+        tools: { exec: { pathPrepend: ["/opt/oce/repository-credentials/bin"] } },
+      });
       assert.deepEqual(f.revision.configuration, original);
     });
   }
-});
-
-test("Kubernetes supplies a native repository exec prefix when no tools configuration exists", async () => {
-  const f = await fixture();
-  const original = structuredClone(f.revision.configuration);
-  deepFreeze(f.revision.configuration);
-  await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
-  assert.deepEqual(JSON.parse(preparedNativeDocument(f)), {
-    ...original,
-    tools: { exec: { pathPrepend: ["/opt/oce/repository-credentials/bin"] } },
-  });
-  assert.deepEqual(f.revision.configuration, original);
 });
 
 test("Kubernetes preserves native configuration bytes without repository bindings", async (t) => {
@@ -1453,6 +1454,8 @@ test("Kubernetes preserves native configuration bytes without repository binding
 });
 
 test("Kubernetes rejects malformed repository exec configuration before any API access", async (t) => {
+  const rosterRefusal =
+    'The OpenClaw Gateway rejects agents.list, agents.entries default markers, an agents.ownership other than "explicit", a multi-Agent roster without it, and an explicit one without entries.';
   const malformed = [
     ["tools null", { tools: null }, "Repository credentials require tools to be an object."],
     ["tools array", { tools: [] }, "Repository credentials require tools to be an object."],
@@ -1488,15 +1491,14 @@ test("Kubernetes rejects malformed repository exec configuration before any API 
     ],
     ["agents null", { agents: null }, "Repository credentials require agents to be an object."],
     ["agents array", { agents: [] }, "Repository credentials require agents to be an object."],
+    // The projection leaves agents.list to the roster refusal: the Gateway rejects every list.
+    ["agent list object", { agents: { list: {} } }, rosterRefusal],
+    ["agent list null", { agents: { list: null } }, rosterRefusal],
+    ["agent list entry null", { agents: { list: [null] } }, rosterRefusal],
     [
-      "agent list object",
-      { agents: { list: {} } },
-      "Repository credentials require agents.list to be an array.",
-    ],
-    [
-      "agent list null",
-      { agents: { list: null } },
-      "Repository credentials require agents.list to be an array.",
+      "agent list prefix nonstring",
+      { agents: { list: [{ id: "main", tools: { exec: { pathPrepend: [false] } } }] } },
+      rosterRefusal,
     ],
     [
       "agent entries null",
@@ -1524,44 +1526,34 @@ test("Kubernetes rejects malformed repository exec configuration before any API 
       "Repository credentials require agents.entries entry.tools.exec.pathPrepend to be an array of strings.",
     ],
     [
-      "agent null",
-      { agents: { list: [null] } },
-      "Repository credentials require agents.list entry to be an object.",
-    ],
-    [
-      "agent array",
-      { agents: { list: [[]] } },
-      "Repository credentials require agents.list entry to be an object.",
+      "agent entry array",
+      { agents: { entries: { main: [] } } },
+      "Repository credentials require agents.entries entry to be an object.",
     ],
     [
       "agent tools null",
-      { agents: { list: [{ id: "main", tools: null }] } },
-      "Repository credentials require agents.list entry.tools to be an object.",
+      { agents: { entries: { main: { tools: null } } } },
+      "Repository credentials require agents.entries entry.tools to be an object.",
     ],
     [
       "agent tools array",
-      { agents: { list: [{ id: "main", tools: [] }] } },
-      "Repository credentials require agents.list entry.tools to be an object.",
+      { agents: { entries: { main: { tools: [] } } } },
+      "Repository credentials require agents.entries entry.tools to be an object.",
     ],
     [
       "agent exec null",
-      { agents: { list: [{ id: "main", tools: { exec: null } }] } },
-      "Repository credentials require agents.list entry.tools.exec to be an object.",
+      { agents: { entries: { main: { tools: { exec: null } } } } },
+      "Repository credentials require agents.entries entry.tools.exec to be an object.",
     ],
     [
       "agent exec array",
-      { agents: { list: [{ id: "main", tools: { exec: [] } }] } },
-      "Repository credentials require agents.list entry.tools.exec to be an object.",
+      { agents: { entries: { main: { tools: { exec: [] } } } } },
+      "Repository credentials require agents.entries entry.tools.exec to be an object.",
     ],
     [
       "agent prefix scalar",
-      { agents: { list: [{ id: "main", tools: { exec: { pathPrepend: "/agent/bin" } } }] } },
-      "Repository credentials require agents.list entry.tools.exec.pathPrepend to be an array of strings.",
-    ],
-    [
-      "agent prefix nonstring",
-      { agents: { list: [{ id: "main", tools: { exec: { pathPrepend: [false] } } }] } },
-      "Repository credentials require agents.list entry.tools.exec.pathPrepend to be an array of strings.",
+      { agents: { entries: { main: { tools: { exec: { pathPrepend: "/agent/bin" } } } } } },
+      "Repository credentials require agents.entries entry.tools.exec.pathPrepend to be an array of strings.",
     ],
   ];
   for (const [name, configuration, message] of malformed) {
@@ -1997,10 +1989,8 @@ for (const mode of ["embedded", "dedicated"]) {
           createdAt: f.revision.createdAt,
         });
         assert.equal(result.namespaceDeleted, true, JSON.stringify(result));
-        assert.deepEqual(
-          f.secrets().map((secret) => secret.metadata.name),
-          ["external-owner"],
-        );
+        assert.deepEqual(f.secrets(), []);
+        assert.ok(f.objects.has(`Secret:${f.namespace}:external-owner`));
         assert.ok(f.objects.has(`Namespace::${f.namespace}`));
       },
     );

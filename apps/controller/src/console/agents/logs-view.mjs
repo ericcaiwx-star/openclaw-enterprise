@@ -168,24 +168,33 @@ export function recordRow(record) {
       withheldText(record),
     );
   }
-  const summary = element(
+  const content = element(
     "span",
-    { className: "log-line" },
-    element("span", { className: "log-time" }, record.time ? displayDate(record.time) : "—"),
-    element("span", { className: `log-level log-level-${record.level}` }, record.level),
-    element("span", { className: "log-kind" }, record.kind),
-    record.subsystem
-      ? element("span", { className: "log-subsystem" }, visibleText(record.subsystem))
-      : null,
+    { className: "log-content" },
     element("span", { className: "log-message" }, visibleText(record.message)),
     // A failure code is the point of the line; keep it visible without expanding.
     record.fields?.code === undefined
       ? null
       : element("span", { className: "log-code" }, `code=${visibleText(record.fields.code)}`),
   );
+  const summary = element(
+    "span",
+    { className: "log-line" },
+    element("span", { className: "log-time" }, record.time ? displayDate(record.time) : "—"),
+    element("span", { className: `log-level log-level-${record.level}` }, record.level),
+    element(
+      "span",
+      { className: "log-origin" },
+      element("span", { className: "log-kind" }, record.kind),
+      record.subsystem
+        ? element("span", { className: "log-subsystem" }, visibleText(record.subsystem))
+        : null,
+    ),
+    content,
+  );
   const provenance = record.kind === "sandbox" ? policyProvenance(record.fields) : null;
   if (provenance !== null) {
-    summary.append(
+    content.append(
       element("span", { className: "log-provenance" }, visibleText(provenance)),
       element("span", { className: "log-join", title: INFERRED_JOIN_TITLE }, INFERRED_JOIN_LABEL),
     );

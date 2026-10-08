@@ -97,6 +97,12 @@ export function renderAgentLogs(context, { agent, revisionId }) {
   const sourceSelect = element("select", { id: "runtime-log-source", disabled: true });
   const podSelect = element("select", { id: "runtime-log-pod", hidden: true });
   const podLabel = element("label", { for: "runtime-log-pod", hidden: true }, "Pod");
+  const podPicker = element(
+    "div",
+    { className: "log-picker log-pod-picker", hidden: true },
+    podLabel,
+    podSelect,
+  );
   const previous = element("input", {
     type: "checkbox",
     id: "runtime-log-previous",
@@ -111,6 +117,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
   });
   const followButton = button("Follow", () => setFollow(!following), {
     "aria-pressed": "false",
+    className: "log-follow",
     disabled: true,
   });
   const refreshButton = button("Refresh logs", () => void readLogs({ restart: true }), {
@@ -141,11 +148,11 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     autocomplete: "off",
   });
   filterInput.addEventListener("input", () => applyFilters());
-  const filterStatus = element("p", { className: "hint", role: "status" });
-  const retention = element("p", { className: "hint" });
-  const sourceHint = element("p", { className: "hint", role: "note", hidden: true });
-  const logStatus = element("p", { className: "muted", role: "status" });
-  const logError = element("p", { className: "error", role: "alert", hidden: true });
+  const filterStatus = element("p", { className: "log-filter-status", role: "status" });
+  const retention = element("p", { className: "log-retention" });
+  const sourceHint = element("p", { className: "log-source-hint", role: "note", hidden: true });
+  const logStatus = element("p", { className: "log-output-status", role: "status" });
+  const logError = element("p", { className: "log-error", role: "alert", hidden: true });
   const pane = element("div", {
     className: "log-pane",
     role: "log",
@@ -261,6 +268,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     );
     podSelect.hidden = (source?.pods.length ?? 0) <= 1;
     podLabel.hidden = podSelect.hidden;
+    podPicker.hidden = podSelect.hidden;
     if (source?.pods.some(({ name }) => name === chosenPod)) {
       podSelect.value = chosenPod;
     }
@@ -595,39 +603,64 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     element("h3", {}, "Runtime"),
     stripStatus,
     strip,
-    element("h3", {}, "Logs"),
-    element(
-      "p",
-      { className: "muted" },
-      "Operational output and sandbox policy decisions only: credential-shaped text is masked and structured payloads, prompts and protocol traffic are withheld. Nothing here is stored.",
-    ),
     element(
       "div",
-      { className: "log-toolbar" },
-      element("label", { for: "runtime-log-source" }, "Source"),
-      sourceSelect,
-      podLabel,
-      podSelect,
-      element("label", { className: "checkbox" }, previous, " Previous instance"),
-      element("label", { className: "checkbox" }, includeDebug, " Include debug"),
-      followButton,
-      refreshButton,
-      downloadButton,
+      { className: "log-viewer" },
+      element(
+        "div",
+        { className: "log-viewer-header" },
+        element("h3", {}, "Logs"),
+        element(
+          "p",
+          { className: "log-safety" },
+          "Only operational output and sandbox policy decisions. Credential-shaped text is masked; structured payloads, prompts and protocol traffic are withheld. Nothing here is stored.",
+        ),
+      ),
+      element(
+        "div",
+        { className: "log-controls" },
+        element(
+          "div",
+          { className: "log-toolbar" },
+          element(
+            "div",
+            { className: "log-picker" },
+            element("label", { for: "runtime-log-source" }, "Source"),
+            sourceSelect,
+          ),
+          podPicker,
+          element(
+            "div",
+            { className: "log-options" },
+            element("label", { className: "log-option" }, previous, " Previous instance"),
+            element("label", { className: "log-option" }, includeDebug, " Include debug"),
+          ),
+          element("div", { className: "log-actions" }, followButton, refreshButton, downloadButton),
+        ),
+        element(
+          "div",
+          { className: "log-filters", role: "group", "aria-label": "Log filters" },
+          element(
+            "div",
+            { className: "log-levels" },
+            element("span", { className: "log-filter-label" }, "Levels"),
+            ...levelChips,
+          ),
+          element(
+            "div",
+            { className: "log-search" },
+            element("label", { for: "runtime-log-filter" }, "Filter"),
+            filterInput,
+          ),
+        ),
+        filterStatus,
+      ),
+      sourceHint,
+      logError,
+      logStatus,
+      pane,
+      retention,
     ),
-    element(
-      "div",
-      { className: "log-toolbar", role: "group", "aria-label": "Log filters" },
-      element("span", { className: "muted" }, "Levels"),
-      ...levelChips,
-      element("label", { for: "runtime-log-filter" }, "Filter"),
-      filterInput,
-    ),
-    filterStatus,
-    retention,
-    sourceHint,
-    logStatus,
-    logError,
-    pane,
   );
   if (logsDenied) {
     showLogError(runtimeErrorText({ status: 403 }, "logs"));

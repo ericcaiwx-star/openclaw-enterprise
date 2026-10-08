@@ -1340,7 +1340,7 @@ test("failure text is bounded and redacts env values and credential shapes", asy
   assert.equal((await render(undefined)).message, undefined);
 });
 
-test("run keeps bounded Agent namespace activity from a passing k3d file", async (t) => {
+test("run keeps bounded Agent namespace activity from passing k3d files, alone and side by side", async (t) => {
   const root = await fixture(t);
   const clusterDirectory = join(root, "cluster");
   await mkdir(clusterDirectory);
@@ -1416,7 +1416,8 @@ test("run keeps bounded Agent namespace activity from a passing k3d file", async
       `const lines = query.startsWith("/api/v1/pods?") ? ${JSON.stringify(pods)} : ${JSON.stringify(events)};`,
       "for (const line of lines) process.stdout.write(JSON.stringify(line) + '\\n');",
       'process.stdout.write(\'{"type":"MODIFIED","object":\');',
-      "setInterval(() => {}, 1000);",
+      // A live watch runs until stopped; a stranded one exits on its own after a minute.
+      "setTimeout(() => {}, 60_000);",
       "",
     ].join("\n"),
   );
@@ -1486,6 +1487,122 @@ test("run keeps bounded Agent namespace activity from a passing k3d file", async
   assert.doesNotMatch(text, /do-not-publish|unrelated system event/);
   // Raw watch streams hold full Pod specs; only the projection survives.
   assert.deepEqual(await readdir(clusterDirectory), []);
+
+  // Two files sharing the runner under fileConcurrency watch the same cluster at once. Each
+  // keeps its own watch streams, so neither truncates nor deletes the other's capture.
+  await writeFile(
+    join(root, "tests/integration/agent-sibling.test.mjs"),
+    [
+      'import test from "node:test";',
+      'import { setTimeout as delay } from "node:timers/promises";',
+      'test("sibling file passes", () => delay(300));',
+      "",
+    ].join("\n"),
+  );
+  const pairFiles = [
+    "tests/integration/agent.test.mjs",
+    "tests/integration/agent-sibling.test.mjs",
+  ];
+  await writeJson(join(root, "scripts/ci/pair-suites.json"), {
+    version: 1,
+    lanes: {
+      "k3d-pair": {
+        fileConcurrency: 2,
+        parallelFiles: pairFiles,
+        files: [
+          { path: pairFiles[0], expectedTests: ["agent file passes"] },
+          { path: pairFiles[1], expectedTests: ["sibling file passes"] },
+        ],
+      },
+    },
+    groups: {},
+  });
+  const pairStatePath = join(root, "state/k3d-pair.json");
+  await writeJson(pairStatePath, {
+    lane: "k3d-pair",
+    resources: JSON.parse(await readFile(statePath, "utf8")).resources,
+  });
+  const pairResultsPath = join(root, "results/k3d-pair.json");
+  const pair = run(
+    root,
+    [
+      "run",
+      "k3d-pair",
+      "--manifest",
+      join(root, "scripts/ci/pair-suites.json"),
+      "--root",
+      root,
+      "--state",
+      pairStatePath,
+      "--results",
+      pairResultsPath,
+    ],
+    { OCC_KUBECTL_BIN: kubectl, CI_RUNNER_FILE_CONCURRENCY: "2" },
+  );
+  assert.equal(pair.status, 0, pair.stderr);
+  const pairSummary = JSON.parse(await readFile(pairResultsPath, "utf8"));
+  assert.deepEqual(
+    pairSummary.files.map(({ mode }) => mode),
+    ["parallel", "parallel"],
+  );
+  const pairReport = JSON.parse(await readFile(`${pairStatePath}.diagnostics.json`, "utf8"));
+  assert.deepEqual(
+    // Files finish in either order; each appends its own record.
+    pairReport.agentNamespaces
+      .map(({ file, namespaces, pods }) => [file, namespaces, pods.length])
+      .sort(([left], [right]) => left.localeCompare(right)),
+    pairFiles
+      .map((file) => [file, ["occ-agent-a"], 3])
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+  assert.deepEqual(await readdir(clusterDirectory), []);
+
+  // A second cluster whose directory is gone fails the capture after the first cluster's
+  // watches started. The file still runs, and those watches are stopped: left running,
+  // their child processes would hold the runner until the watch timeout.
+  const brokenStatePath = join(root, "state/k3d-broken.json");
+  await writeJson(brokenStatePath, {
+    lane: "k3d-lane",
+    resources: [
+      ...JSON.parse(await readFile(statePath, "utf8")).resources,
+      {
+        kind: "k3d-cluster",
+        status: "ready",
+        name: "removed-cluster",
+        directory: join(root, "removed-cluster"),
+        kubeconfig: join(root, "removed-cluster/kubeconfig"),
+        context: "k3d-removed-cluster",
+      },
+    ],
+  });
+  const broken = spawnSync(
+    process.execPath,
+    [
+      runnerPath,
+      "run",
+      "k3d-lane",
+      "--manifest",
+      join(root, "scripts/ci/suites.json"),
+      "--root",
+      root,
+      "--state",
+      brokenStatePath,
+      "--results",
+      join(root, "results/k3d-broken.json"),
+    ],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: { ...process.env, GITHUB_SHA: currentSha(), OCC_KUBECTL_BIN: kubectl },
+      timeout: 30_000,
+    },
+  );
+  assert.equal(broken.status, 0, broken.stderr);
+  assert.match(
+    broken.stderr,
+    /Agent namespace activity unavailable for tests\/integration\/agent\.test\.mjs/,
+  );
+  assert.deepEqual(await readdir(clusterDirectory), []);
 });
 
 test("audit fails when a referenced lane cannot be loaded", async (t) => {
@@ -1530,6 +1647,188 @@ test("audit rejects obsolete manifest selectors", async (t) => {
     "lanes.obsolete.files.0.allowedSkips is no longer supported",
     "lanes.obsolete.files.0.namePattern is no longer supported",
   ]);
+});
+
+test("audit rejects invalid file concurrency marks", async (t) => {
+  const root = await fixture(t);
+  for (const name of ["one", "two"]) {
+    await writeFile(join(root, `tests/integration/${name}.test.mjs`), "import 'node:test';\n");
+  }
+  await writeJson(join(root, "manifest.json"), {
+    version: 1,
+    lanes: {
+      marks: {
+        fileConcurrency: 0,
+        parallelFiles: [
+          "tests/integration/one.test.mjs",
+          "tests/integration/one.test.mjs",
+          "tests/integration/two.test.mjs",
+          "tests/integration/other.test.mjs",
+        ],
+        serialFiles: {
+          "tests/integration/two.test.mjs": "shared port",
+          "tests/integration/one.test.mjs": " ",
+          "tests/integration/gone.test.mjs": "moved",
+        },
+        files: [
+          { path: "tests/integration/one.test.mjs" },
+          { path: "tests/integration/two.test.mjs" },
+        ],
+      },
+    },
+    groups: { ci: ["marks"] },
+  });
+
+  const result = run(root, ["audit", "--manifest", "manifest.json", "--root", root]);
+  assert.equal(result.status, 1);
+  assert.deepEqual(
+    JSON.parse(result.stdout)
+      .issues.map((entry) => entry.message)
+      .sort(),
+    [
+      "lanes.marks.fileConcurrency must be an integer from 1 to 32",
+      "lanes.marks.parallelFiles lists tests/integration/one.test.mjs twice",
+      "lanes.marks.parallelFiles tests/integration/one.test.mjs is also serial",
+      "lanes.marks.parallelFiles tests/integration/other.test.mjs is not a lane file",
+      "lanes.marks.parallelFiles tests/integration/two.test.mjs is also serial",
+      "lanes.marks.serialFiles.tests/integration/gone.test.mjs is not a lane file",
+      "lanes.marks.serialFiles.tests/integration/one.test.mjs must name a reason",
+    ],
+  );
+});
+
+// Each fixture file holds a marker in `running/` while it runs. A parallel file waits
+// for its partner's marker, so it passes only if both share slots; a file that must
+// run alone fails if any other marker exists. Neither depends on timing.
+function concurrencyProbe(name, partner) {
+  return [
+    'import assert from "node:assert/strict";',
+    'import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";',
+    'import { setTimeout as sleep } from "node:timers/promises";',
+    'import test from "node:test";',
+    "const running = process.env.CI_RUNNER_PROBE_DIR;",
+    `test(${JSON.stringify(`${name} probe`)}, async () => {`,
+    `  writeFileSync(running + "/${name}", "");`,
+    "  try {",
+    partner
+      ? [
+          '    const deadline = Date.now() + Number(process.env.CI_RUNNER_PROBE_WAIT_MS ?? "20000");',
+          `    while (!existsSync(running + "/${partner}")) {`,
+          `      assert.ok(Date.now() < deadline, "${partner} never ran beside ${name}");`,
+          "      await sleep(10);",
+          "    }",
+        ].join("\n")
+      : `    assert.deepEqual(readdirSync(running), ["${name}"]);`,
+    "    await sleep(50);",
+    "  } finally {",
+    `    rmSync(running + "/${name}", { force: true });`,
+    "  }",
+    "});",
+    "",
+  ].join("\n");
+}
+
+test("run shares slots only between audited parallel files and runs the rest alone", async (t) => {
+  const root = await fixture(t);
+  const running = join(root, "running");
+  await mkdir(running);
+  const probes = {
+    unmarked: null,
+    left: "right",
+    serial: null,
+    right: "left",
+  };
+  for (const [name, partner] of Object.entries(probes)) {
+    await writeFile(
+      join(root, `tests/integration/${name}.test.mjs`),
+      concurrencyProbe(name, partner),
+    );
+  }
+  await writeJson(join(root, "manifest.json"), {
+    version: 1,
+    lanes: {
+      shared: {
+        fileConcurrency: 4,
+        parallelFiles: ["tests/integration/right.test.mjs", "tests/integration/left.test.mjs"],
+        serialFiles: { "tests/integration/serial.test.mjs": "writes a fixed path" },
+        files: [
+          { path: "tests/integration/unmarked.test.mjs" },
+          { path: "tests/integration/left.test.mjs" },
+          { path: "tests/integration/serial.test.mjs" },
+          { path: "tests/integration/right.test.mjs" },
+        ],
+      },
+    },
+    groups: { ci: ["shared"] },
+  });
+  const args = (name) => [
+    "run",
+    "shared",
+    "--manifest",
+    "manifest.json",
+    "--root",
+    root,
+    "--state",
+    `state/${name}.jsonl`,
+    "--results",
+    `results/${name}.json`,
+  ];
+  const env = { CI_RUNNER_PROBE_DIR: running, CI_RUNNER_FILE_CONCURRENCY: "2" };
+
+  const result = run(root, args("shared"), env);
+  assert.equal(result.status, 0, result.stderr);
+  const summary = JSON.parse(await readFile(join(root, "results/shared.json"), "utf8"));
+  assert.equal(summary.fileConcurrency, 2);
+  assert.equal(summary.counts.passed, 4);
+  // Results keep manifest order; serial files ran first, before the shared slots.
+  assert.deepEqual(
+    summary.files.map((file) => [file.path.split("/").at(-1), file.mode]),
+    [
+      ["unmarked.test.mjs", "serial"],
+      ["left.test.mjs", "parallel"],
+      ["serial.test.mjs", "serial"],
+      ["right.test.mjs", "parallel"],
+    ],
+  );
+  const [unmarked, left, serial, right] = summary.files;
+  assert.ok(unmarked.startOffsetMs < serial.startOffsetMs);
+  assert.ok(serial.startOffsetMs + serial.wallDurationMs <= left.startOffsetMs);
+  assert.ok(serial.startOffsetMs + serial.wallDurationMs <= right.startOffsetMs);
+  // Shared slots start in parallelFiles order.
+  assert.ok(right.startOffsetMs <= left.startOffsetMs);
+  assert.match(
+    result.stderr,
+    /^run-tests: passed tests\/integration\/left\.test\.mjs \d+\.\ds \(parallel\)$/m,
+  );
+
+  // One slot runs every file alone; the partners then cannot meet, and the
+  // result says so instead of passing.
+  const alone = run(root, args("alone"), {
+    ...env,
+    CI_RUNNER_FILE_CONCURRENCY: "1",
+    CI_RUNNER_PROBE_WAIT_MS: "300",
+  });
+  assert.equal(alone.status, 1);
+  const aloneSummary = JSON.parse(await readFile(join(root, "results/alone.json"), "utf8"));
+  assert.equal(aloneSummary.fileConcurrency, 1);
+  assert.deepEqual(
+    aloneSummary.files.map((file) => [file.mode, file.status]),
+    [
+      ["serial", "passed"],
+      ["serial", "failed"],
+      ["serial", "passed"],
+      ["serial", "failed"],
+    ],
+  );
+
+  const invalid = run(root, args("invalid"), { ...env, CI_RUNNER_FILE_CONCURRENCY: "many" });
+  assert.equal(invalid.status, 1);
+  const invalidSummary = JSON.parse(await readFile(join(root, "results/invalid.json"), "utf8"));
+  assert.deepEqual(invalidSummary.files, []);
+  assert.deepEqual(
+    invalidSummary.issues.map((entry) => entry.code),
+    ["invalid-env"],
+  );
 });
 
 test("audit requires current discovered test files and rejects duplicate ownership", async (t) => {
@@ -2030,3 +2329,206 @@ for (const scenario of [
     assert.doesNotMatch(artifact + result.stdout + result.stderr, /secret-canary/);
   });
 }
+
+test("run publishes a failed wait's followed container log, redacted, beside Agent activity", async (t) => {
+  const root = await fixture(t);
+  const clusterDirectory = join(root, "cluster");
+  await mkdir(clusterDirectory);
+  const statePath = join(root, "state/k3d.json");
+  const resultsPath = join(root, "results/k3d.json");
+  await writeJson(statePath, {
+    lane: "k3d-lane",
+    resources: [
+      {
+        kind: "k3d-cluster",
+        status: "ready",
+        name: "owned-cluster",
+        directory: clusterDirectory,
+        kubeconfig: join(clusterDirectory, "kubeconfig"),
+        context: "k3d-owned-cluster",
+      },
+    ],
+  });
+  const pod = {
+    metadata: {
+      namespace: "occ-agent-a",
+      name: "gateway-0",
+      uid: "uid-1",
+      creationTimestamp: "2026-10-08T07:43:40Z",
+      deletionTimestamp: "2026-10-08T07:43:53Z",
+      deletionGracePeriodSeconds: 330,
+    },
+    spec: {
+      containers: [{ name: "gateway", env: [{ name: "TOKEN", value: "do-not-publish-env" }] }],
+    },
+    status: {
+      phase: "Running",
+      containerStatuses: [
+        { name: "gateway", ready: false, restartCount: 0, state: { running: { startedAt: "t" } } },
+      ],
+    },
+  };
+  const event = {
+    metadata: { namespace: "occ-agent-a", name: "gateway-0.kill", uid: "e1" },
+    involvedObject: { kind: "Pod", name: "gateway-0", namespace: "occ-agent-a" },
+    type: "Normal",
+    reason: "Killing",
+    message: "Stopping container gateway",
+    count: 1,
+    lastTimestamp: "2026-10-08T07:43:53Z",
+  };
+  const logLines = [
+    "2026-10-08T07:43:49.1Z [gateway] startup phase: config.auth starting",
+    "2026-10-08T07:43:53.2Z [gateway] received SIGTERM; shutting down",
+    "2026-10-08T07:43:53.3Z request Authorization: Bearer do-not-publish-header",
+    "2026-10-08T07:43:53.4Z provider token=do-not-publish-assignment refreshed",
+    "2026-10-08T07:43:53.5Z parent value secretauthvalue-parent seen",
+  ];
+  // Only the lane gives the child this value; the runner's own env never has it.
+  const childSecret = "childonlysecret-1754";
+  // One stand-in serves the runner's raw watches (which wait until stopped) and
+  // the test helper's log follow and snapshots; the log ends after a slow exit.
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  const kubectl = join(bin, "kubectl");
+  await writeFile(
+    kubectl,
+    [
+      `#!${process.execPath}`,
+      "const args = process.argv.slice(2);",
+      'if (args.includes("logs")) {',
+      `  process.stdout.write(${JSON.stringify(`${logLines.join("\n")}\n`)});`,
+      "  process.stdout.write(`2026-10-08T07:43:53.6Z child value ${process.env.OCC_TEST_CHILD_ONLY}\\n`);",
+      "  process.stderr.write('follow note\\nGET https://api Authorization: Bearer do-not-publish-verbose');",
+      "  setTimeout(() => process.stdout.write('2026-10-08T07:44:22.0Z [gateway] exit 0'), 300);",
+      '} else if (args.includes("get") && args.includes("pods")) {',
+      `  process.stdout.write(JSON.stringify({ items: [${JSON.stringify(pod)}] }));`,
+      '} else if (args.includes("get") && args.includes("events")) {',
+      `  process.stdout.write(JSON.stringify({ items: [${JSON.stringify(event)}] }));`,
+      "} else {",
+      "  setTimeout(() => {}, 60_000);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await chmod(kubectl, 0o755);
+  const helper = join(repositoryRoot, "tests/helpers/container-log-capture.mjs");
+  await writeFile(
+    join(root, "tests/integration/stop.test.mjs"),
+    [
+      'import test from "node:test";',
+      `import { followContainerLog } from ${JSON.stringify(helper)};`,
+      "let snapshots = 0;",
+      'test("gateway stop is confirmed", async (t) => {',
+      "  const log = followContainerLog({",
+      '    args: ["logs", "--follow", "--timestamps"],',
+      "    env: process.env,",
+      '    target: { namespace: "occ-agent-a", pod: "gateway-0", container: "gateway" },',
+      "    snapshot: async () => {",
+      '      if (process.env.SNAPSHOT_FAILS_AFTER === String(++snapshots)) throw new Error("read failed");',
+      '      const read = async (kind) => JSON.parse((await import("node:child_process"))',
+      '        .execFileSync("kubectl", ["get", kind, "-o", "json"], { encoding: "utf8" })).items;',
+      '      return { pods: await read("pods"), events: await read("events") };',
+      "    },",
+      "  });",
+      "  try {",
+      '    process.env.SNAPSHOT_FAILS_AFTER = "2";',
+      '    await log.attachOnFailure(t, "passing wait", async () => "settled");',
+      '    log.mark("stop requested");',
+      '    await log.attachOnFailure(t, "terminal response wait", async () => {',
+      '      throw new Error("timed out");',
+      "    });",
+      "  } finally {",
+      "    await log.stop();",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(
+    join(root, "tests/integration/pass.test.mjs"),
+    'import test from "node:test";\ntest("passes", () => {});\n',
+  );
+  await writeJson(join(root, "scripts/ci/k3d-lane.json"), {
+    env: { OCC_TEST_CHILD_ONLY: childSecret },
+    files: [
+      { path: "tests/integration/stop.test.mjs", expectedTests: ["gateway stop is confirmed"] },
+      { path: "tests/integration/pass.test.mjs", expectedTests: ["passes"] },
+    ],
+  });
+  await writeJson(join(root, "scripts/ci/suites.json"), {
+    version: 1,
+    lanes: { "k3d-lane": "./k3d-lane.json" },
+    groups: {},
+  });
+
+  const result = run(
+    root,
+    [
+      "run",
+      "k3d-lane",
+      "--manifest",
+      join(root, "scripts/ci/suites.json"),
+      "--root",
+      root,
+      "--state",
+      statePath,
+      "--results",
+      resultsPath,
+    ],
+    { OCC_KUBECTL_BIN: kubectl, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.status, 1, result.stderr);
+  const text = await readFile(`${statePath}.diagnostics.json`, "utf8");
+  const { containerLogs } = JSON.parse(text);
+  // Only the failed wait writes a record: not the wait that settled, not the passing file.
+  assert.equal(containerLogs.length, 1);
+  const [log] = containerLogs;
+  assert.equal(log.file, "tests/integration/stop.test.mjs");
+  assert.equal(log.test, "gateway stop is confirmed");
+  assert.equal(log.reason, "terminal response wait");
+  assert.deepEqual(
+    [log.namespace, log.pod, log.container],
+    ["occ-agent-a", "gateway-0", "gateway"],
+  );
+  assert.deepEqual(
+    log.markers.map(({ label }) => label),
+    ["stop requested", "failed: terminal response wait"],
+  );
+  // The follow ran to the container's exit, unterminated last line included.
+  assert.equal(log.stream.ended, true);
+  assert.equal(log.stream.exitCode, 0);
+  assert.equal(log.stream.error, "follow note\n[redacted credential-bearing line]");
+  assert.deepEqual(log.lines, [
+    logLines[0],
+    logLines[1],
+    "[redacted credential-bearing line]",
+    "2026-10-08T07:43:53.4Z provider token=[redacted] refreshed",
+    "2026-10-08T07:43:53.5Z parent value [env:CI_RUNNER_PARENT_SECRET] seen",
+    "2026-10-08T07:43:53.6Z child value [env:OCC_TEST_CHILD_ONLY]",
+    "2026-10-08T07:44:22.0Z [gateway] exit 0",
+  ]);
+  // A failed read is marked, so it cannot pass for a Pod that is already gone.
+  assert.deepEqual(
+    log.snapshots.map(({ label, unavailable }) => [label, unavailable]),
+    [
+      ["at-failure", undefined],
+      ["after-log", true],
+    ],
+  );
+  const [snapshot] = log.snapshots;
+  assert.equal(snapshot.pods[0].deletedAt, "2026-10-08T07:43:53Z");
+  assert.equal(snapshot.pods[0].deletionGracePeriodSeconds, 330);
+  assert.equal(snapshot.pods[0].containers[0].startedAt, "t");
+  assert.deepEqual(
+    snapshot.events.map(({ reason, message }) => [reason, message]),
+    [["Killing", "Stopping container gateway"]],
+  );
+  assert.doesNotMatch(text, /do-not-publish|secretauthvalue|childonlysecret/);
+  // The record directory lived in the cluster's private directory and is gone.
+  assert.deepEqual(
+    (await readdir(clusterDirectory)).filter((name) => name.startsWith("container-logs-")),
+    [],
+  );
+});

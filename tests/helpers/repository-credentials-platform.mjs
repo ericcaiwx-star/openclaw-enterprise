@@ -17,6 +17,7 @@ import {
   kubernetesHash,
   validateExplicitK3dLoopbackContext,
 } from "./kubernetes-real.mjs";
+import { followContainerLog } from "./container-log-capture.mjs";
 import { grantAgentSecretOperate } from "./postgres-harness-auth.mjs";
 import { createResourceScope } from "../fixtures/repository-credentials/resources.mjs";
 import { run } from "../fixtures/repository-credentials/process.mjs";
@@ -476,7 +477,7 @@ async function setupRepositoryPlatformFixture(context, diagnostic) {
     { default: pg },
     { loadInstallationConfiguration },
     { composeProduction },
-    { kubernetesNamespaceName, kubernetesGatewayNamespaceName },
+    { kubernetesNamespaceName },
   ] = await Promise.all([
     import("pg"),
     import("../../apps/controller/src/composition/installation-config.ts"),
@@ -498,8 +499,8 @@ async function setupRepositoryPlatformFixture(context, diagnostic) {
     installationName: "Repository platform integration",
     environment: { PATH: process.env.PATH },
   });
-  const bootstrapNamespaces = (await pool.query("SELECT id FROM occ.namespaces")).rows.flatMap(
-    ({ id }) => [kubernetesNamespaceName(id), kubernetesGatewayNamespaceName(id)],
+  const bootstrapNamespaces = (await pool.query("SELECT id FROM occ.namespaces")).rows.map(
+    ({ id }) => kubernetesNamespaceName(id),
   );
   ownedNamespaces.push(...bootstrapNamespaces);
   let app;
@@ -571,10 +572,9 @@ async function setupRepositoryPlatformFixture(context, diagnostic) {
     201,
   );
   const placement = kubernetesNamespaceName(namespace.id);
-  const controlPlacement = kubernetesGatewayNamespaceName(namespace.id);
-  ownedNamespaces.push(placement, controlPlacement);
+  ownedNamespaces.push(placement);
   diagnostic.stage = "namespace-provisioning";
-  for (const tenant of [...bootstrapNamespaces, placement, controlPlacement]) {
+  for (const tenant of [...bootstrapNamespaces, placement]) {
     await kube.waitFor("worker-created tenant Namespace", async () => {
       const namespaces = JSON.parse(await kubectl("get", "namespaces", "-o", "json")).items;
       return namespaces.find(({ metadata }) => metadata.name === tenant);
@@ -832,6 +832,39 @@ async function setupRepositoryPlatformFixture(context, diagnostic) {
       return matches[0];
     });
   }
+  // Follows the gateway container's log so a failed wait can attach it after the
+  // Pod is gone (finding 795: a stopped gateway once took 29 s to exit).
+  function followGatewayLog(pod) {
+    const agent = pod.metadata.labels["openclaw.dev/agent"];
+    const read = async (...args) =>
+      JSON.parse(
+        (
+          await execute("kubectl", kubectlArguments(selection, [...args, "-o", "json"]), {
+            timeout: 15_000,
+          })
+        ).stdout,
+      ).items;
+    const follow = followContainerLog({
+      args: kubectlArguments(selection, [
+        "logs",
+        "--follow",
+        "--timestamps",
+        "-n",
+        placement,
+        pod.metadata.name,
+        "-c",
+        "gateway",
+      ]),
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: "C.UTF-8" },
+      target: { namespace: placement, pod: pod.metadata.name, container: "gateway" },
+      snapshot: async () => ({
+        pods: await read("get", "pods", "-n", placement, "-l", `openclaw.dev/agent=${agent}`),
+        events: await read("get", "events", "-n", placement),
+      }),
+    });
+    scope.after(() => follow.stop());
+    return follow;
+  }
   async function podNode(pod, script, input) {
     return execute(
       "kubectl",
@@ -1003,6 +1036,7 @@ async function setupRepositoryPlatformFixture(context, diagnostic) {
     request,
     createAgent,
     readyPod,
+    followGatewayLog,
     expediteWork,
     tool,
     podNode,

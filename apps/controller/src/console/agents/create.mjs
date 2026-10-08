@@ -138,7 +138,8 @@ function wait(ms) {
 
 // Failed provisioning codes that a retry of the same job cannot fix: the worker rejected
 // the request (a taken name, a scope or authorization rejection, a Namespace or Agent
-// lifecycle change) or the job was cancelled. Every other code, including the worker's
+// lifecycle change, an Installation Driver change the stored plan no longer passes, or a
+// Secret Driver switch) or the job was cancelled. Every other code, including the worker's
 // PROVISIONING_FAILED and PROVISIONING_WORK_NOT_FOUND, keeps Retry.
 const PERMANENT_PROVISIONING_CODES = new Set(["PROVISIONING_REJECTED", "PROVISIONING_CANCELLED"]);
 
@@ -321,11 +322,11 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   if (
     binding != null &&
     (!isObject(binding) ||
-      !["runtime", "api_key", "codex_pat", "chatgpt_service_account"].includes(binding.method) ||
-      (binding.method === "chatgpt_service_account" &&
-        typeof binding.serviceAccountId !== "string") ||
+      !["runtime", "api_key", "codex_pat"].includes(binding.method) ||
       (["api_key", "codex_pat"].includes(binding.method) &&
-        (binding.source?.kind !== "secret" ||
+        (!["secret", ...(binding.method === "codex_pat" ? ["service_account"] : [])].includes(
+          binding.source?.kind,
+        ) ||
           binding.source.namespaceId !== namespaceId ||
           typeof binding.source.id !== "string")))
   ) {
@@ -435,13 +436,16 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     element("option", { value: "" }, "Choose a model"),
     ...MODEL_CHOICES[nativeProvider.value].map((id) => element("option", { value: id }, id)),
   );
-  const enterModel = button("Enter model ID manually", () => {
-    manualModel = true;
-    model.value = "";
-    modelChoice.value = "";
-    updateModelConfiguration();
-    updateControls();
-    model.focus();
+  const toggleModel = button("Enter model ID manually", () => {
+    if (manualModel) {
+      resetModelChoices(false, model.value);
+    } else {
+      manualModel = true;
+      modelChoice.value = "";
+      updateModelConfiguration();
+      updateControls();
+    }
+    (manualModel ? model : modelChoice).focus();
   });
   const modelField = field("Model ID", model, "Enter a model ID available to this credential.");
   const choiceField = field(
@@ -452,16 +456,17 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   const modelSection = element(
     "section",
     { className: "model-selection" },
-    ...(useModelChoices ? [choiceField, enterModel] : []),
+    ...(useModelChoices ? [choiceField, toggleModel] : []),
     modelField,
   );
-  function resetModelChoices(resetTransport = false) {
+  function resetModelChoices(resetTransport = false, selectedModel = "") {
     manualModel = !useModelChoices;
-    model.value = "";
+    model.value = MODEL_CHOICES[nativeProvider.value].includes(selectedModel) ? selectedModel : "";
     modelChoice.replaceChildren(
       element("option", { value: "" }, "Choose a model"),
       ...MODEL_CHOICES[nativeProvider.value].map((id) => element("option", { value: id }, id)),
     );
+    modelChoice.value = model.value;
     updateModelConfiguration(resetTransport);
     updateControls();
   }
@@ -635,7 +640,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       typeof previousModel === "string"
         ? previousModel.slice(previousModel.indexOf("/") + 1)
         : pendingProviderModel;
-    // Keep transport and model metadata while switching to manual entry clears the model.
+    // Keep transport and model metadata while no model is selected.
     pendingProviderModel = selectedModel || resetTransport ? undefined : previousId;
     if (resetTransport) {
       delete providers.openai;
@@ -1425,7 +1430,10 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       modelField.hidden = !manualModel;
       model.required = manualModel;
       modelChoice.required = !manualModel;
-      enterModel.disabled ||= Boolean(savedConfiguration);
+      toggleModel.textContent = manualModel
+        ? "Choose a model from the list"
+        : "Enter model ID manually";
+      toggleModel.disabled ||= Boolean(savedConfiguration);
     }
     reloadRepositories.disabled = pending || outcomeUnknown;
     startNewDraft.disabled = pending || outcomeUnknown;
@@ -1764,7 +1772,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         savedSecret ??
         modelCredentialSecret ??
         presetExistingSecret ??
-        (hasBoundModelCredential ? binding.source : undefined);
+        (hasBoundModelCredential && binding.source.kind === "secret" ? binding.source : undefined);
       if (modelSecret) {
         await ensureSecretOperateBinding(context, savedAgent, modelSecret);
       }
