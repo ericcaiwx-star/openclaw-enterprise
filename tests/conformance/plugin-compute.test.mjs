@@ -1252,7 +1252,7 @@ test("Codex runtime helper disables curated plugins at once under API-key login"
     config: {
       features: { apps: false, plugins: false, remote_plugin: false },
       apps: { _default: { enabled: false } },
-      plugins: {},
+      plugins: { _default: { enabled: false } },
     },
     origins: {},
   };
@@ -1284,11 +1284,12 @@ test("Codex runtime helper disables curated plugins at once under API-key login"
     calls.map((request) => request.method),
     ["config/read", "config/batchWrite", "config/read"],
   );
-  assert.deepEqual(calls[1].params.edits.slice(0, 4), [
+  assert.deepEqual(calls[1].params.edits, [
     { keyPath: "features.apps", mergeStrategy: "replace", value: false },
     { keyPath: "features.plugins", mergeStrategy: "replace", value: false },
     { keyPath: "features.remote_plugin", mergeStrategy: "replace", value: false },
-    { keyPath: 'apps."_default"', mergeStrategy: "replace", value: { enabled: false } },
+    { keyPath: "apps", mergeStrategy: "replace", value: { _default: { enabled: false } } },
+    { keyPath: "plugins", mergeStrategy: "replace", value: { _default: { enabled: false } } },
   ]);
 
   const strict = await runCodexRuntimeHelper(
@@ -1320,7 +1321,7 @@ test("Codex runtime helper waits for a late app-server before disabling API-key 
     config: {
       features: { apps: false, plugins: false, remote_plugin: false },
       apps: { _default: { enabled: false } },
-      plugins: {},
+      plugins: { _default: { enabled: false } },
     },
     origins: {},
   };
