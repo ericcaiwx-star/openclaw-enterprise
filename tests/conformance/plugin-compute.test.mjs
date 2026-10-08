@@ -1046,7 +1046,9 @@ test("Codex runtime helper discovers tool policy after installation and before r
         _default: { enabled: false },
         [CODEX_LINEAR_NATIVE_ID]: { enabled: true },
       });
-      if (apps === undefined) return { status: "ok", version: "selected-plugins" };
+      if (apps === undefined) {
+        return { status: "ok", version: "selected-plugins" };
+      }
       assert.equal(apps._default.enabled, false, "discovery must not grant unselected apps");
       assert.equal(
         apps[CODEX_LINEAR_APP_ID]?.enabled,
