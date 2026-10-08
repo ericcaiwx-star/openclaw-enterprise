@@ -37,10 +37,12 @@ The following route assumes a Keycloak HTTPS endpoint with a publicly trusted
 certificate. OCE requires:
 
 - **One HTTPS host on port 443:** the issuer, authorization, token and JWKS URLs
-  use the same DNS host, written without a port. Browsers reach and trust the
+  use the same DNS host. Write the issuer without a port; the authorization, token
+  and JWKS URLs may explicitly include `:443`. Browsers reach and trust the
   authorization endpoint; the API must reach and trust the token and JWKS endpoints.
-- **A stable issuer:** configure Keycloak's hostname, for example
-  `https://sso.example.com`. The discovery document's issuer, such as
+- **A stable issuer:** configure Keycloak's fixed hostname, for example
+  `https://sso.example.com` or `https://sso.example.com/auth` for a context path.
+  The discovery document's issuer, such as
   `https://sso.example.com/realms/acme`, must match `auth.oidc.issuer` and the
   ID token's `iss` exactly. Do not use a `*.localhost` name for a Keycloak the API
   must reach from a Pod: the controller image resolves it to loopback.
