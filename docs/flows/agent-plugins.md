@@ -1,7 +1,7 @@
 ---
 created: 2026-09-08
 updated: 2026-10-08
-last_updated_session: 01a0def9-f5ff-7d11-b79b-7ef3346d526f
+last_updated_session: authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10
 ---
 
 # Agent Plugin Deployment Flow
@@ -323,7 +323,7 @@ deadline.
 
 ## Changelog
 
-- 2026-10-08 20:32: Integrate validated plugin default-off grants before native install, with final app-policy verification and skill-only selections. (codex/01a0def9-f5ff-7d11-b79b-7ef3346d526f - ae695e7f2b0c7bcd2416ed8146baeecb765ae233)
+- 2026-10-08 22:00: Integrate validated plugin default-off grants before native install, with final app-policy verification and skill-only selections. (authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10 - 65911984b3f6d9ee398aed913a0b8dd08e2ae094)
 
 - 2026-10-07 19:30: Pass the admitted model to native Codex before reviewer validation. (authoring-run/bc793557-585a-4c1a-9463-b2c55682ea02 - b1be0e0602b9db1035a689ca2a4ac4982f6d0b3b)
 
@@ -340,9 +340,5 @@ deadline.
 - 2026-09-28 21:26: Batch Codex metadata reads; preserve ordered writes and verification. (authoring-run/7c8bff1b-a2d1-48f6-a996-1be6a06719fa - 8352c0932bcbde43e88b44c6975496ca5431ff55)
 
 - 2026-09-28 10:46: Materialize inherited app policy; native proof pending. (codex/01a0cf72-6985-7712-ba92-d8cc32470f24 - 44ed2405)
-
-- 2026-09-27 21:52: Debounced catalog searches and canceled obsolete requests. (01a0e4d2-4f51-7780-b0fc-2352cb99078f - a599db7e)
-
-- 2026-09-27 15:10: Added plugin defaults and skills. (codex/01a0d755-b86e-7d33-bddc-c21ba03a3276 - ab9527bb)
 
 [Agent plugin deployment documentation history](agent-plugins/history.md) preserves the older dated entries.
