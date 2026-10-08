@@ -281,7 +281,7 @@ function validateOpenShellBackend(
     );
   }
   for (const key of Object.keys(drivers)) {
-    if (key !== "sandbox" && key !== "credential_gateway") {
+    if (key !== "sandbox" && key !== "credential_gateway" && key !== "credential_refresh") {
       throw new ScopeViolationError(path(id, `drivers.${key}`) + " is unsupported.");
     }
   }
@@ -289,6 +289,9 @@ function validateOpenShellBackend(
     throw new ScopeViolationError(
       path(id, "drivers") + " requires sandbox and credential_gateway members.",
     );
+  }
+  if (drivers.credential_refresh !== undefined && !isNonEmptyString(drivers.credential_refresh)) {
+    throw new ScopeViolationError(path(id, "drivers.credential_refresh") + " must be a Driver ID.");
   }
   return deepFreeze({
     id,
@@ -305,7 +308,13 @@ function validateOpenShellBackend(
         : { rootCertificatePath: rootCertificatePath as string }),
       ...(insecureTransport === undefined ? {} : { insecureTransport }),
     },
-    drivers: { sandbox: drivers.sandbox, credential_gateway: drivers.credential_gateway },
+    drivers: {
+      sandbox: drivers.sandbox,
+      credential_gateway: drivers.credential_gateway,
+      ...(drivers.credential_refresh === undefined
+        ? {}
+        : { credential_refresh: drivers.credential_refresh as string }),
+    },
   });
 }
 
@@ -319,6 +328,9 @@ function backendMembers(backend: BackendDefinition): readonly string[] {
   return [
     `sandbox:${backend.drivers.sandbox}`,
     `credential_gateway:${backend.drivers.credential_gateway}`,
+    ...(backend.drivers.credential_refresh === undefined
+      ? []
+      : [`credential_refresh:${backend.drivers.credential_refresh}`]),
   ];
 }
 
@@ -395,7 +407,26 @@ export function validateSelectedBackendDrivers(
         backend.drivers.credential_gateway,
         "Credential Gateway Driver",
       );
+      if (backend.drivers.credential_refresh !== undefined) {
+        requires(
+          "credential_refresh",
+          backend.drivers.credential_refresh,
+          "Credential Refresh Driver",
+        );
+      }
     }
+  }
+  // Refresh state lives with the gateway's source record, so the two roles share one Backend.
+  const refresh = selected.credential_refresh;
+  if (
+    refresh !== undefined &&
+    !backends.some((backend) =>
+      backendMembers(backend).includes(`credential_refresh:${refresh.id}`),
+    )
+  ) {
+    throw new DriverSelectionError(
+      "The selected Credential Refresh Driver must belong to the Credential Gateway's Backend.",
+    );
   }
   const gateway = selected.credential_gateway;
   if (
