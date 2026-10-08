@@ -164,8 +164,8 @@ below does not qualify a production Keycloak deployment.
 OCE sign-out ends the local OCE session, not the Keycloak session; a person may
 sign in again while the Keycloak session remains active. Disabling a user in
 Keycloak prevents new provider sign-ins but does not end an existing OCE session.
-For offboarding, disable the OCE account or detach its identity, and separately
-revoke applicable service keys. Follow
+For offboarding, disable the OCE account and separately revoke applicable service
+keys. Follow
 [Changes, rotation and outages](oidc-sign-in.md#changes-rotation-and-outages) for
 session limits, client-secret rotation, issuer or client-ID changes, and recovery.
 

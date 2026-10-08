@@ -181,8 +181,9 @@ The subject is 1–255 printable ASCII characters without spaces. The call retur
 when OIDC is off, the version is stale, the account is disabled, or another account
 holds the subject ("The external identity is already assigned."). Attachment advances
 the account version and ends the account's sessions. The method's `providerId` starts
-with `oidc:`; detach it with `POST /api/auth/accounts/:userId/methods/:methodId/detach`,
-which ends every session of the account, password sessions included.
+with `oidc:`; detach it with `POST /api/auth/accounts/:userId/methods/:methodId/detach`.
+Detaching removes that provider from the account and ends every session, including password
+sessions, but other enabled sign-in methods remain usable.
 
 Accounts are created with a password, and an OIDC identity can be attached only
 afterwards. To add someone who should sign in only through the IdP, follow
@@ -194,14 +195,17 @@ afterwards. To add someone who should sign in only through the IdP, follow
   new instance: attach every identity again, then detach the old methods. Sessions
   signed in through the old instance, or through OIDC once it is removed, end on their
   next request. Detaching an old method ends every session of that account.
-- Rotating only the client secret keeps attachments and voids pending sign-ins.
+- To rotate the client secret, close ingress and stop writers using the
+  [stopped-maintenance procedure](auth-maintenance.md#stop-every-writer). Coordinate
+  the replacement secret in the IdP and the protected OCE Secret, then restart the
+  single API controller to load its environment. Verify new OIDC sign-in and recovery
+  password sign-in through restricted access before restoring ingress. Once the changed configuration
+  loads, attachments remain and pending sign-ins are invalidated.
 - The API reads the JWKS on every callback, so IdP key rotation needs no restart.
 - OCE does not learn when the IdP disables someone: that person's OCE sessions continue
-  until they expire (at most 8 hours). Offboarding also means disabling the account in
-  OCE or detaching its OIDC method; either ends all of the account's sessions. Neither
-  ends a [service key](../../reference/authentication/service-api-keys.md#revoke-or-rotate-a-service-key)
-  the person uses from the CLI: revoke it, or delete its service principal's
-  AccessBindings.
+  until they expire (at most 8 hours). For offboarding, disable the OCE account to end
+  its sessions and prevent further human sign-in. Separately revoke applicable
+  [service keys](../../reference/authentication/service-api-keys.md#revoke-or-rotate-a-service-key).
 - Sign-out is local: while the IdP session lives, one click signs in again.
 - An IdP outage, blocked egress or a rejected ID token fails that sign-in closed and
   returns the browser to `/console/?authError=oidc`; the recovery account's password
