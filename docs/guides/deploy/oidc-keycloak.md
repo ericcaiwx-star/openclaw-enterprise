@@ -19,7 +19,7 @@ and, if applicable, [reverse proxy guidance](https://www.keycloak.org/server/rev
 The CI and Local Setup fixture uses `start-dev` and a development file database;
 it is not a production deployment.
 
-OCE's selected compatibility policy is Keycloak 26.x. The real-provider CI fixture
+The proposed OCE compatibility policy is Keycloak 26.x, pending team acceptance. The real-provider CI fixture
 currently pins **26.7.5** by digest in
 [`image.json`](../../../tests/fixtures/keycloak/image.json); the pin is the version
 exercised by that fixture, not qualification of every 26.x deployment. Other major
