@@ -24,8 +24,14 @@ together with GitHub and Google. One issuer is supported per Installation.
 - An IdP that serves its issuer, authorization, token and JWKS URLs over HTTPS on port
   443 from one DNS host name, and signs ID tokens with RS256 keys of at least 2,048 bits.
 - API Pod HTTPS egress to that host. Browsers, not the API, visit the authorization URL.
-- A certificate the API trusts. The API uses Node's default CA store; for a private CA,
-  add `NODE_EXTRA_CA_CERTS` to the API Pod.
+- A certificate the API trusts. Public CAs use Node's default CA store. For a private
+  IdP CA, use an explicit, upgrade-safe deployment customization to mount a combined
+  public CA bundle in the API Pod, set `NODE_EXTRA_CA_CERTS` to that bundle, and restart
+  Node after trust changes. Include the IdP CA and any existing Gateway CA roots: the
+  chart may already set this variable for Gateway routing, and replacing its bundle with
+  only the IdP CA breaks Gateway trust. The chart has no dedicated OIDC CA value or
+  turnkey mount. Verify the customized deployment and trust after each upgrade; see
+  [Gateway trust and rotation](../../reference/gateway-routing.md#tls-and-certificate-lifecycle).
 
 ## Register the client
 
