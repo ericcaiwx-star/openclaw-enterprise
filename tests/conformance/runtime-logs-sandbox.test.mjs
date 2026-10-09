@@ -797,3 +797,224 @@ test("sandbox wire budgeting handles empty, single and grouped withheld pages", 
     [],
   );
 });
+
+test("sandbox wire-cut timestamp groups drain before advancing beyond their time", async () => {
+  const fixture = await sandboxFixture();
+  const time = new Date(Date.now() - 1000).toISOString().replace("Z", "000000Z");
+  fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => ({
+    sandboxId: SANDBOX_ID,
+    time,
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; quoted diagnostic ${'"a" '.repeat(1000)}`,
+    fields: {},
+  }));
+  const seen = [];
+  let cursor;
+  for (let page = 0; page < 10; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(
+        `source=sandbox&tailLines=200${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(response.text, "utf8") <= 512 * 1024);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+    assert.ok(lines.length > 0);
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 150 }, (_, index) => index),
+  );
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
+  );
+  assert.deepEqual(
+    replay.data.records.filter(({ type }) => type === "line"),
+    [],
+  );
+});
+
+test("sandbox wire-cut prefixes without timestamps drain and suppress an unchanged snapshot", async () => {
+  const fixture = await sandboxFixture();
+  fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => ({
+    sandboxId: SANDBOX_ID,
+    time: null,
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; quoted diagnostic ${'"a" '.repeat(1000)}`,
+    fields: {},
+  }));
+  const seen = [];
+  let cursor;
+  for (let page = 0; page < 10; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(
+        `source=sandbox&tailLines=200${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(response.text, "utf8") <= 512 * 1024);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+    assert.ok(lines.length > 0);
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 150 }, (_, index) => index),
+  );
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
+  );
+  assert.deepEqual(
+    replay.data.records.filter(({ type }) => type === "line"),
+    [],
+  );
+});
+
+test("sandbox byte-window checkpoints preserve the pre-cut overlap baseline", async () => {
+  const fixture = await sandboxFixture();
+  const time = new Date(Date.now() - 1000).toISOString().replace("Z", "000000Z");
+  const anchor = {
+    sandboxId: SANDBOX_ID,
+    time,
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: "prior diagnostic",
+    fields: {},
+  };
+  fixture.gateway.state.lines = [anchor];
+  const initial = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=200"),
+  );
+  const later = new Date(Date.parse(time) + 1).toISOString().replace("Z", "000000Z");
+  fixture.gateway.state.lines = [
+    anchor,
+    ...Array.from({ length: 150 }, (_, index) => ({
+      ...anchor,
+      time: later,
+      message: `row=${index}; quoted diagnostic ${'"a" '.repeat(1000)}`,
+    })),
+  ];
+  const seen = [];
+  let cursor = initial.data.cursor;
+  for (let page = 0; page < 10; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
+    );
+    assert.equal(response.status, 200);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    assert.ok(lines.every(({ message }) => message !== "prior diagnostic"));
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 150 }, (_, index) => index),
+  );
+});
+
+test("sandbox byte-window changes report a gap before a fresh value snapshot", async () => {
+  for (const changed of ["prefix", "clipped size", "query tail"]) {
+    const fixture = await sandboxFixture();
+    const row = (index) => ({
+      sandboxId: SANDBOX_ID,
+      time: null,
+      level: "INFO",
+      target: "supervisor",
+      source: "sandbox",
+      message: `row=${index}; quoted diagnostic ${'"a" '.repeat(1000)}`,
+      fields: {},
+    });
+    fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => row(index));
+    const tail = changed === "clipped size" ? 100 : 200;
+    if (changed === "clipped size") {
+      fixture.gateway.state.bufferTotal = 150;
+    }
+    const first = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=${tail}`),
+    );
+    assert.equal(first.data.truncated, true);
+    if (changed === "prefix") {
+      fixture.gateway.state.lines[0] = {
+        ...row(0),
+        message: `changed row=0; ${'"a" '.repeat(1000)}`,
+      };
+    }
+    if (changed === "clipped size") {
+      // The values returned by the full tail stay identical, but the observed
+      // source total proves the clipped window changed.
+      fixture.gateway.state.bufferTotal = 151;
+    }
+    const next = await fixture.request(
+      "GET",
+      fixture.target.logsPath(
+        `source=sandbox&tailLines=${changed === "query tail" ? 100 : tail}&cursor=${first.data.cursor}`,
+      ),
+    );
+    assert.equal(next.status, 200);
+    assert.ok(Buffer.byteLength(next.text, "utf8") <= 512 * 1024);
+    assert.ok(
+      next.data.records.some(
+        ({ type, reason }) => type === "gap" && ["buffer_lost", "window_exceeded"].includes(reason),
+      ),
+      changed,
+    );
+    assert.ok(
+      next.data.records.some(({ type }) => type === "line"),
+      changed,
+    );
+  }
+});
+
+test("sandbox byte-window checkpoints notice changes to an undelivered suffix", async () => {
+  const fixture = await sandboxFixture();
+  const row = (index) => ({
+    sandboxId: SANDBOX_ID,
+    time: null,
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; quoted diagnostic ${'"a" '.repeat(1000)}`,
+    fields: {},
+  });
+  fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => row(index));
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=200"),
+  );
+  fixture.gateway.state.lines[149] = {
+    ...row(149),
+    message: `changed suffix; ${'"a" '.repeat(1000)}`,
+  };
+  const next = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${first.data.cursor}`),
+  );
+  assert.equal(next.status, 200);
+  assert.ok(
+    next.data.records.some(({ type, reason }) => type === "gap" && reason === "buffer_lost"),
+  );
+});

@@ -13,6 +13,17 @@ export interface RuntimeLogCursorBinding {
   readonly source: RuntimeLogSourceId;
 }
 
+export interface SandboxLogWindowCheckpoint {
+  readonly since: string | null;
+  readonly tailLines: number;
+  readonly count: number;
+  readonly seen: number;
+  readonly hash: string;
+  readonly total: number;
+  readonly baseTime: string | null;
+  readonly baseHashes: readonly string[];
+}
+
 export interface RuntimeLogCursorPosition {
   readonly viewId: string;
   readonly pod: string;
@@ -40,6 +51,8 @@ export interface RuntimeLogCursorPosition {
   readonly pemOpen?: boolean;
   /** Conservative delivered-time frontier; null cannot establish forward chronology. */
   readonly pemAfterTime?: string | null;
+  /** Authenticated value-prefix progress while a Sandbox response is byte-cut. */
+  readonly sandboxWindow?: SandboxLogWindowCheckpoint;
   readonly issuedAt: number;
 }
 
@@ -94,14 +107,54 @@ export function runtimeLogTimeKey(value: string): string {
   return match === null ? value : `${match[1]}.${(match[2] ?? "").padEnd(9, "0")}Z`;
 }
 
+function sandboxWindow(value: unknown): SandboxLogWindowCheckpoint | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const window = value as Record<string, unknown>;
+  if (
+    (window.since !== null && !validRuntimeLogFrontierTime(window.since)) ||
+    (window.baseTime !== null && !validRuntimeLogFrontierTime(window.baseTime)) ||
+    !Number.isSafeInteger(window.tailLines) ||
+    (window.tailLines as number) < 1 ||
+    (window.tailLines as number) > 1000 ||
+    !Number.isSafeInteger(window.count) ||
+    (window.count as number) < 0 ||
+    !Number.isSafeInteger(window.seen) ||
+    (window.seen as number) < (window.count as number) ||
+    (window.seen as number) > (window.tailLines as number) ||
+    typeof window.hash !== "string" ||
+    !/^[A-Za-z0-9_-]{16}$/.test(window.hash) ||
+    !Number.isSafeInteger(window.total) ||
+    (window.total as number) < (window.seen as number) ||
+    !Array.isArray(window.baseHashes) ||
+    window.baseHashes.length > MAX_HASHES ||
+    !window.baseHashes.every((hash) => typeof hash === "string" && /^[A-Za-z0-9_-]{16}$/.test(hash))
+  ) {
+    return undefined;
+  }
+  return {
+    since: window.since as string | null,
+    tailLines: window.tailLines as number,
+    count: window.count as number,
+    seen: window.seen as number,
+    hash: window.hash,
+    total: window.total as number,
+    baseTime: window.baseTime as string | null,
+    baseHashes: window.baseHashes as string[],
+  };
+}
+
 function position(value: unknown): RuntimeLogCursorPosition | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
   const record = value as Record<string, unknown>;
   const hashes = record.h;
+  const window = record.w === undefined ? undefined : sandboxWindow(record.w);
   const hasPem = Object.hasOwn(record, "po") || Object.hasOwn(record, "pt");
   if (
+    (record.w !== undefined && window === undefined) ||
     typeof record.v !== "string" ||
     typeof record.p !== "string" ||
     typeof record.u !== "string" ||
@@ -136,6 +189,7 @@ function position(value: unknown): RuntimeLogCursorPosition | undefined {
     lastTime: record.t as string | null,
     lastHashes: hashes as string[],
     issuedAt: record.i as number,
+    ...(window === undefined ? {} : { sandboxWindow: window }),
     ...(record.fc === undefined ? {} : { frontierComplete: record.fc as boolean }),
     ...(record.fn === undefined ? {} : { frontierCount: record.fn as number }),
     ...(hasPem ? { pemOpen: record.po as boolean, pemAfterTime: record.pt as string | null } : {}),
@@ -164,6 +218,7 @@ export function createRuntimeLogCursorCodec(secret: string): RuntimeLogCursorCod
           fn: value.frontierCount,
           po: value.pemOpen,
           pt: value.pemAfterTime,
+          w: value.sandboxWindow,
         }),
       ).toString("base64url");
       return `v1.${payload}.${mac(secret, payload)}`;

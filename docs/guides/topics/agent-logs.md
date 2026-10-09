@@ -228,12 +228,12 @@ RUNTIME_LOGS_POD_INVALID`).
   its gateway restarts; a follow poll whose last line is gone reports
   **Sandbox buffer lost** or **Lines skipped**. Lines the sandbox drops under
   load are not reported.
-- The sandbox stamps lines when it records them but sends them in batches, so
-  a line can arrive after a newer one was shown. A follow poll re-reads the
-  5 seconds before the newest line it showed and shows each line once, repeats
-  included. A line that arrives more than 5 seconds late, or behind more than
-  48 lines in those 5 seconds, can be missed. When more than 48 lines share one
-  millisecond, the poll shows **Lines skipped** at that time.
+- Follow polls re-read a 5-second overlap and count up to 48 delivered lines.
+  Later arrivals outside that history can be missed; over-capacity timestamp
+  groups show **Lines skipped**. A byte-cut page retains snapshot progress until
+  its suffix drains, including untimed lines. Changed windows or clipped-tail
+  sizes show **Sandbox buffer lost** or **Lines skipped** before a fresh snapshot.
+  Identical saturated-window replacement cannot be distinguished.
 - OCC reads through the read-only `GetSandboxLogs` call. Its OpenShell identity
   needs the `sandbox:read` scope (otherwise `503 RUNTIME_LOGS_CLUSTER_RBAC`)
   and Workspace role `user`. OpenShell hides sandboxes outside the identity's

@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/e25eab96-1110-45ec-b677-916a98b34613
+last_updated_session: authoring-run/2edda611-948b-44ae-a3d8-0a011073b719
 ---
 
 # Agent runtime logs flow
@@ -144,7 +144,7 @@ candidate is tried first; an oversized page uses bounded raw-prefix builds.
 They reuse the admitted read and fixed timestamps, without another Driver read
 or audit. Each candidate derives sanitization, masking context and cursor state
 from its delivered prefix. The result fits; maximum filling is not promised.
-Sandbox pages use the same budget helper. It classifies the whole page first, so
+Sandbox pages share the helper. Each candidate classifies its delivered prefix, so
 `runtime-logs/redact.ts:maskPemBlockLines` can mask a PEM block whose BEGIN,
 body and END lines arrive as separate plain-text lines.
 
@@ -180,10 +180,15 @@ exposes nothing else. OpenShell stamps supervisor lines when recorded but
 batches them, and filters `since_time` by that stamp, so a resume sends a time
 `SANDBOX_LOG_OVERLAP_MS` (5 s) behind the newest delivered line; the cursor
 keeps one hash per line delivered since then (up to 48), and each re-read line
-consumes one. A view's first page floors its resume time at the requested window
-start. If no remembered line came back and nothing older did, OCC emits
-`buffer_lost` or, when the window was full, `window_exceeded`; more than 48
-lines in one millisecond also emit `window_exceeded`. gRPC `NOT_FOUND` (absent
+consumes one. A first page floors its resume time at the requested window start.
+A serialized cut stores an authenticated window digest, raw-prefix count and
+pre-cut overlap baseline. The same observed prefix drains before advancing,
+including untimed lines and timestamp groups larger than 48. Untimed snapshots
+retain progress after draining. Changed values, query tails or clipped-tail sizes
+emit an existing gap before a fresh snapshot; unchanged saturated replacement
+cannot be detected. A complete timed window returns to the existing overlap.
+Missing remembered lines emit `buffer_lost` or `window_exceeded`; over-capacity
+timestamp groups also emit `window_exceeded`. gRPC `NOT_FOUND` (absent
 Sandbox, or concealed from a non-member) maps to
 `RUNTIME_LOGS_SANDBOX_NOT_FOUND`, never to an empty page. Lines naming two
 Sandbox IDs are refused; a new Sandbox ID emits `stream_replaced`.
@@ -251,6 +256,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 02:43: Retain authenticated Sandbox window progress across serialized cuts and report changed snapshots as gaps. (authoring-run/2edda611-948b-44ae-a3d8-0a011073b719 - 5c7c56b49f16b80c4fcb91fedff0959a5fd733b0)
 
 - 2026-10-10 01:14: Enforce the serialized runtime-log response limit for container and Sandbox pages, including cursors and the API frame. (authoring-run/018d11d8-3699-4e97-945b-c2cfd3088412 - 243b38ba6d951240065e5061e1e4abccdb44410c)
 
