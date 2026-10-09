@@ -2153,11 +2153,16 @@ function nativeRuntimeSnapshot(revision: AgentRevision): NativeRuntimeSnapshot |
 
 // OpenClaw's default Agent (the sole entry, or a named session store or system owner) keeps
 // its own workspace, while the Gateway, file transfer and workspace files address main. A
+// dedicated Codex Gateway binds only main to its Harness workspace node (finding 969), and a
+// non-main owner would make chats run as another Agent, so the same rules apply to it. A
 // refusal, not a rewrite: OCC skips this on status reads. Each refusal names the setting and
 // the rule it breaks, as requireOpenClawRoster's do. It runs after requireOpenClawRoster, so
 // agents and agents.entries are objects when present, and an explicit roster has at least one
 // entry.
-function requireNativeMainAgentDefault(configuration: OpenClawConfigurationDocument): void {
+function requireDedicatedMainAgentDefault(
+  configuration: OpenClawConfigurationDocument,
+  topology: "Dedicated OpenClaw" | "Dedicated Codex",
+): void {
   const agents = asRecord(configuration.agents);
   const defaults = asRecord(agents?.defaults);
   // OpenClaw matches normalized ids case-insensitively, as the OpenShell workspace pin does.
@@ -2166,7 +2171,7 @@ function requireNativeMainAgentDefault(configuration: OpenClawConfigurationDocum
     const agentId = asRecord(defaults?.[owner])?.agentId;
     if (agentId !== undefined && !isMain(agentId)) {
       throw new ConfigurationHarnessError(
-        `Dedicated OpenClaw serves the main Agent: set agents.defaults.${owner}.agentId to main, or remove it.`,
+        `${topology} serves the main Agent: set agents.defaults.${owner}.agentId to main, or remove it.`,
       );
     }
   }
@@ -2183,13 +2188,13 @@ function requireNativeMainAgentDefault(configuration: OpenClawConfigurationDocum
       agentEntryMessage(
         spelled[0],
         (path) =>
-          `Dedicated OpenClaw rejects the Agent ID in ${path}: use up to 64 letters, digits, _ or -, starting with a letter or digit.`,
+          `${topology} rejects the Agent ID in ${path}: use up to 64 letters, digits, _ or -, starting with a letter or digit.`,
       ),
     );
   }
   if (!entries.some(([id]) => isMain(id))) {
     throw new ConfigurationHarnessError(
-      "Dedicated OpenClaw serves the main Agent: add agents.entries.main, or rename an entry to main.",
+      `${topology} serves the main Agent: add agents.entries.main, or rename an entry to main.`,
     );
   }
 }
@@ -3109,10 +3114,13 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     // Every topology's Gateway rejects these rosters, so Configuration save refuses them too.
-    // Only dedicated OpenClaw serves main, so that rule stays here, at deployment.
+    // Only dedicated execution serves main, so that rule stays here, at deployment.
     requireOpenClawRoster(configuration);
-    if (native) {
-      requireNativeMainAgentDefault(configuration);
+    if (native || codex) {
+      requireDedicatedMainAgentDefault(
+        configuration,
+        native ? "Dedicated OpenClaw" : "Dedicated Codex",
+      );
     }
     if (
       (!embedded && !codex && !native) ||
