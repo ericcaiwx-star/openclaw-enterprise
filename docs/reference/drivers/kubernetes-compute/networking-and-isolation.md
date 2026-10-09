@@ -77,10 +77,10 @@ required-header and device auto-approval settings retain their separate purposes
 
 An optional [loopback password](storage-and-credentials.md#runtime-credentials)
 supports operator verification; it does not change the gateway's authentication mode.
-Readiness uses a Pod-local HTTP request to
-`127.0.0.1:$OPENCLAW_GATEWAY_PORT/readyz`; TLS terminates at Envoy, so native
-readiness probes remain unchanged. Docker and SSH default to managed password
-authentication and also support explicit trusted proxy.
+Native readiness and private traffic require HTTP;
+`gateway.tls.enabled` must be omitted or false. Deployment refuses true before
+creating revisions. Envoy terminates TLS. Docker and SSH support password or
+trusted proxy authentication over native HTTP.
 
 Operators must verify that the configured CIDRs contain the proxy's actual
 source addresses and exclude untrusted sources. CIDRs do not authenticate a

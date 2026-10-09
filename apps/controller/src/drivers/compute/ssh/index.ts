@@ -27,6 +27,7 @@ import {
 import { ComputeLifecycleDispatcher } from "../lifecycle-hooks.ts";
 import { currentComputeAbortSignal } from "../operation-context.ts";
 import { WORKSPACE_SETUP_RUNTIME } from "../workspace-setup-runtime.ts";
+import { validatePlaintextNativeGateway } from "../native-gateway-transport.ts";
 import { unsupportedNativeGatewayAuthFields } from "../../../gateway/auth-fields.ts";
 import { SystemSshCommandExecutor, type SshCommandExecutor } from "./executor.ts";
 
@@ -165,6 +166,11 @@ function usesGatewayPasswordReference(value: unknown): boolean {
 function sshGatewayConfigurationDocument(
   configuration: OpenClawConfigurationDocument,
 ): OpenClawConfigurationDocument {
+  validatePlaintextNativeGateway(
+    configuration,
+    (setting, requirement) =>
+      new ConfigurationFailure(`Configuration setting ${setting} ${requirement}.`),
+  );
   const gatewayRecord = asRecord(configuration.gateway);
   if (configuration.gateway !== undefined && gatewayRecord === undefined) {
     throw new ConfigurationFailure("SSH native gateway configuration must be an object.");
@@ -432,6 +438,10 @@ export class SshComputeDriver implements ComputeDriver {
     } catch (error) {
       return { ...result, failure: failure(error) };
     }
+  }
+
+  validateGatewaySettings(configuration: Readonly<OpenClawConfigurationDocument>): void {
+    validatePlaintextNativeGateway(configuration);
   }
 
   validateHarnessAuth(harness: RevisionHarnessDescriptor, auth: HarnessAuthSnapshot): void {

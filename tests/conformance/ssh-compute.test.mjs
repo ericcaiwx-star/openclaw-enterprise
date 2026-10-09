@@ -764,7 +764,7 @@ test("SSH Agent deletion frees the Agent's host port, unit, account, and state",
 test("SSH trusted-proxy can opt into direct loopback password authentication", async (t) => {
   const f = await fixture(t);
   const password = revision(f.driver, 1, "agent-ssh-string-password", {
-    gateway: { auth: { password: "${OPENCLAW_GATEWAY_PASSWORD}" } },
+    gateway: { tls: { enabled: false }, auth: { password: "${OPENCLAW_GATEWAY_PASSWORD}" } },
   });
   await prepare(f, password);
   assert.match(
@@ -916,13 +916,14 @@ test("SSH revisions fail closed on unbound identities, unsupported topology, san
     { gateway: { auth: { mode: "oauth" } } },
     { gateway: { auth: { unsupportedField: true } } },
     { gateway: { auth: { password: "plaintext" } } },
+    { gateway: { tls: { enabled: true } } },
   ]) {
     await assert.rejects(
       f.driver.prepareRevision({
         ...rev,
         configuration: admitLoggingConfiguration(configuration, "info"),
       }),
-      /gateway authentication|OPENCLAW_GATEWAY_PASSWORD/,
+      /gateway authentication|OPENCLAW_GATEWAY_PASSWORD|gateway\.tls\.enabled/,
     );
   }
   // Bind an Agent in a second Namespace; a revision naming it reaches the ownership check.

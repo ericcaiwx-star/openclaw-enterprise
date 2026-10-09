@@ -136,6 +136,10 @@ inputs, writable container tmpfs remains ephemeral.
 
 ## Gateway authentication
 
+The native listener must serve HTTP for readiness and private traffic.
+`gateway.tls.enabled` must be omitted or false; native TLS enablement is refused
+before backend work. External proxy TLS is independent of this listener setting.
+
 The container implementation renders `gateway.auth.mode: password` when native
 Configuration omits the mode. Explicit `password` and `trusted-proxy` are supported.
 Only supported authentication fields and modes are admitted. These rules do not

@@ -1,3 +1,4 @@
+import { plaintextGatewayComputeDrivers } from "../helpers/plaintext-gateway-compute.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -23,6 +24,7 @@ import {
   CODEX_OAUTH_BOOTSTRAP_ENTRYPOINT,
   GATEWAY_RUNTIME_ENTRYPOINT as KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
   GATEWAY_STOP_TIMEOUT_MS,
+  GATEWAY_READINESS_ENTRYPOINT,
   NATIVE_WORKER_ENTRYPOINT,
   PLUGIN_RUNTIME_HELPERS,
 } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
@@ -2095,5 +2097,107 @@ process.stdout.write("shared-codex-0.160.0-ready\n");
       script,
     ]);
     assert.match(stdout, /shared-codex-0.160.0-ready/);
+  },
+);
+
+test(
+  "runtime image refuses native listener TLS that cannot satisfy Compute HTTP readiness",
+  imageTestOptions,
+  async (t) => {
+    const drivers = plaintextGatewayComputeDrivers();
+    const directory = await mkdtemp(join(tmpdir(), "oce-native-listener-tls-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    // The loopback provider owns all possible requests; no model turn is sent.
+    const provider = String.raw`
+const http = require("node:http");
+let modelCalls = 0;
+http.createServer((req, res) => {
+  if (req.method === "POST") modelCalls++;
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify(req.url === "/counter" ? { modelCalls } : { data: [{ id: "fixture" }] }));
+}).listen(18880, "127.0.0.1");
+`;
+    for (const enabled of [true, false]) {
+      const configuration = drivers[0][1].kubernetesGatewayConfigurationDocument(
+        createAdmittedRuntimeImageConfiguration("openclaw"),
+      );
+      configuration.models.providers.openai.baseUrl = "http://127.0.0.1:18880/v1";
+      configuration.models.providers.openai.apiKey = "synthetic-owned-native-tls";
+      configuration.gateway.tls = {
+        enabled,
+        autoGenerate: true,
+        certPath: "/home/node/tls/cert.pem",
+        keyPath: "/home/node/tls/key.pem",
+      };
+      const path = join(directory, `configuration-${enabled}.json`);
+      await writeFile(path, JSON.stringify(configuration), { mode: 0o600 });
+      // Feed the original native input to the actual pinned Gateway to prove
+      // why Compute refuses it; this is not a supported TLS deployment fixture.
+      const { containerName } = await runGatewaySmoke(t, "openclaw", {
+        configurationPath: "/etc/openclaw/openclaw.json",
+        entrypoint: provider + KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
+        volumes: [`${path}:/etc/openclaw/openclaw.json:ro`],
+        waitUntilReady: false,
+        withAppServer: false,
+        extraEnvironment: [
+          "OPENCLAW_RUNTIME_STATUS_PORT=18791",
+          "OPENCLAW_RUNTIME_STATUS_CONTAINER=gateway",
+          "OPENCLAW_AGENT_REVISION_ID=owned-native-tls",
+          "OPENCLAW_POD_UID=owned-native-tls",
+        ],
+      });
+      const nativeProbe = enabled
+        ? `require("https").get({hostname:"127.0.0.1",port:8080,path:"/readyz",servername:"openclaw-gateway",ca:require("fs").readFileSync("/home/node/tls/cert.pem")},r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on("error",()=>process.exit(1));`
+        : `fetch("http://127.0.0.1:8080/readyz").then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1));`;
+      let ready = false;
+      for (let attempt = 0; attempt < 80 * imageSmokeTimeoutMultiplier; attempt++) {
+        try {
+          await runDocker(["exec", containerName, "node", "-e", nativeProbe]);
+          ready = true;
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      assert.equal(ready, true, commandOutput(await runDocker(["logs", containerName])));
+      const readiness = () =>
+        runDocker([
+          "exec",
+          containerName,
+          "node",
+          "-e",
+          ...nodeProgramArguments(GATEWAY_READINESS_ENTRYPOINT),
+        ]);
+      if (enabled) {
+        await assert.rejects(
+          readiness,
+          (error) => error.code === 1 && /Gateway \/readyz unavailable/.test(error.stdout),
+        );
+        for (const [kind, driver] of drivers) {
+          assert.throws(
+            () => driver.validateGatewaySettings?.(configuration),
+            /gateway\.tls\.enabled must be omitted or false/,
+            kind,
+          );
+        }
+      } else {
+        await readiness();
+        for (const [, driver] of drivers) {
+          assert.doesNotThrow(() => driver.validateGatewaySettings(configuration));
+        }
+      }
+      const counter = await runDocker([
+        "exec",
+        containerName,
+        "node",
+        "-e",
+        'fetch("http://127.0.0.1:18880/counter").then(r=>r.json()).then(v=>console.log(v.modelCalls));',
+      ]);
+      assert.equal(Number(counter.stdout.trim()), 0);
+      t.diagnostic(
+        `native TLS enabled=${enabled}: native ready, Compute readiness ${enabled ? "refused" : "passed"}, modelCalls=0`,
+      );
+      await runDocker(["rm", "-f", containerName]);
+    }
   },
 );
