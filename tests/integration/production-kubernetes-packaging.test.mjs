@@ -8,7 +8,12 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  createKubernetesComputeDriver,
+  PLUGIN_RUNTIME_STATUS_PORT,
+} from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
+import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
 
 import {
   renderProductionChart,
@@ -407,6 +412,69 @@ function chartAllowsIngress(objects, destination, source, port, protocol = "TCP"
 }
 
 test(
+  "the chart refuses tenant Gateway ports Compute refuses for the runtime status port",
+  tooling,
+  async () => {
+    const sandboxValues = {
+      ...gatewayRoutingValues,
+      "gatewayRouting.sandbox.enabled": "true",
+      "gatewayRouting.sandbox.domain": "previews.example.test",
+      "gatewayRouting.sandbox.tlsSecretName": "preview-wildcard",
+      "gatewayRouting.sandbox.ingressPeers[0].namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name":
+        "public-ingress",
+    };
+    const compute = (gatewayPort, sandbox) => {
+      const options = conformanceKubernetesOptions({
+        gatewayTrustedProxyCidrs: ["10.0.0.0/8"],
+        runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
+      });
+      // Routed Compute takes no direct gateway clients.
+      const { gatewayClients, ...network } = options.network;
+      return createKubernetesComputeDriver({
+        ...options,
+        network: { ...network, gatewayPort },
+        gatewayRouting: {
+          gatewayName: "oce-agent-gateways",
+          gatewayNamespace: "openclaw-system",
+          envoyNamespace: "envoy-gateway-system",
+          ...(sandbox ? { sandbox: { domain: "previews.example.test" } } : {}),
+        },
+      });
+    };
+    // tenantGatewayPort must equal Compute's network.gatewayPort, so Helm refuses exactly
+    // what controller startup refuses instead of installing a controller that cannot start.
+    for (const [gatewayPort, sandbox, refused] of [
+      [PLUGIN_RUNTIME_STATUS_PORT, false, true],
+      [PLUGIN_RUNTIME_STATUS_PORT, true, true],
+      [PLUGIN_RUNTIME_STATUS_PORT - 1, true, true],
+      [PLUGIN_RUNTIME_STATUS_PORT - 1, false, false],
+      [PLUGIN_RUNTIME_STATUS_PORT + 1, true, false],
+      [8080, true, false],
+    ]) {
+      const row = JSON.stringify({ gatewayPort, sandbox });
+      const chartValues = {
+        ...(sandbox ? sandboxValues : gatewayRoutingValues),
+        "gatewayRouting.tenantGatewayPort": String(gatewayPort),
+      };
+      if (refused) {
+        assert.throws(() => compute(gatewayPort, sandbox), /reserved runtime status port/, row);
+        await assert.rejects(
+          render(chartValues),
+          ({ code, stderr }) =>
+            code !== 0 &&
+            stderr.includes("gatewayRouting.tenantGatewayPort") &&
+            stderr.includes(`reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}`),
+          row,
+        );
+      } else {
+        assert.doesNotThrow(() => compute(gatewayPort, sandbox), row);
+        await render(chartValues);
+      }
+    }
+  },
+);
+
+test(
   "two-cluster packaging separates remote API identities without optional services",
   tooling,
   async () => {
@@ -673,6 +741,89 @@ test("production native examples satisfy the current Helm, Installation, and PVC
   assert.equal(bootstrapClaim.spec.resources.requests.storage, "1Gi");
 });
 
+test(
+  "production Helm custom Gateway hostname follows the loaded Compute contract",
+  tooling,
+  async (t) => {
+    const { loadInstallationConfiguration } =
+      await import("../../apps/controller/src/composition/installation-config.ts");
+    const directory = await mkdtemp(join(tmpdir(), "occ-control-hostname-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const example = loadYaml(
+      (await readFile(new URL("installation.yaml", productionExamples), "utf8")).replace(
+        "<actual-proxy-source-cidr>",
+        "192.0.2.10/32",
+      ),
+    );
+    const installationPath = join(directory, "installation.yaml");
+    const invalid = [
+      "Bad_Host",
+      "proxy.example.test:443",
+      "https://proxy.example.test",
+      "proxy..example.test",
+      `${"a".repeat(64)}.test`,
+      `${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(62)}`,
+    ];
+    const valid = [
+      "proxy.example.test",
+      `${"a".repeat(63)}.test`,
+      `${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(61)}`,
+      "",
+      undefined,
+    ];
+    for (const hostname of [...invalid, ...valid]) {
+      const configuration = structuredClone(example);
+      if (hostname === undefined) {
+        delete configuration.drivers.compute.configuration.gatewayRouting.hostname;
+      } else {
+        configuration.drivers.compute.configuration.gatewayRouting.hostname = hostname;
+      }
+      await writeFile(installationPath, JSON.stringify(configuration));
+      const load = () =>
+        loadInstallationConfiguration({
+          mode: "production",
+          environment: { OCC_CONFIG_PATH: installationPath },
+        });
+      const helmValues =
+        hostname === undefined
+          ? gatewayRoutingValues
+          : { ...gatewayRoutingValues, "gatewayRouting.hostname": hostname };
+      if (invalid.includes(hostname)) {
+        await assert.rejects(
+          load(),
+          /Gateway routing hostname must be a DNS hostname without a port or path/,
+        );
+        await assert.rejects(
+          render(helmValues),
+          ({ stderr }) =>
+            stderr.includes(
+              "gatewayRouting.hostname must be a DNS hostname without a port or path",
+            ),
+          hostname,
+        );
+        continue;
+      }
+      const loaded = await load();
+      const objects = await resources((await render(helmValues)).stdout);
+      const gateway = objects.find((object) => object.kind === "Gateway");
+      const envoy = objects.find((object) => object.kind === "EnvoyProxy");
+      const certificate = objects.find(
+        (object) => object.kind === "Certificate" && !object.spec.isCA,
+      );
+      const routing = loaded.installation.drivers.compute.configuration.gatewayRouting;
+      const expected =
+        hostname ||
+        `${envoy.spec.provider.kubernetes.envoyService.name}.${routing.envoyNamespace}.svc`;
+      assert.equal(
+        gateway.spec.listeners.find((listener) => listener.name === "https").hostname,
+        expected,
+      );
+      assert.deepEqual(certificate.spec.dnsNames, [expected]);
+      assert.equal(routing.hostname, hostname);
+    }
+  },
+);
+
 test("Helm refuses a Gateway name Compute refuses", tooling, async () => {
   await assert.rejects(
     execute(
@@ -748,6 +899,59 @@ test("Helm refuses a Gateway name Compute refuses", tooling, async () => {
   const gateway = (await resources(stdout)).find((object) => object.kind === "Gateway");
   assert.equal(gateway?.metadata.name, sixtyThree);
 });
+
+test(
+  "the execution chart refuses a harness Gateway name or Envoy namespace Compute refuses",
+  tooling,
+  async () => {
+    const template = (field, value) =>
+      execute(
+        helm,
+        [
+          "template",
+          "oce",
+          "deploy/helm/openclaw-execution",
+          "--set",
+          "routing.hostname=agents.example.invalid",
+          "--set",
+          "routing.gatewayClassName=private-envoy-gateway",
+          "--set",
+          "routing.tlsSecretName=agents-tls",
+          "--set",
+          "routing.controlPlaneCidrs[0]=198.51.100.0/24",
+          "--set-string",
+          `routing.${field}=${value}`,
+        ],
+        { cwd: repository, maxBuffer: 2_000_000 },
+      );
+    // Compute validateGatewayName: a DNS subdomain, at most 63 characters (a label value).
+    for (const gatewayName of ["Bad_Name", "-gateways", "gateways-", "a..b", "a".repeat(64)]) {
+      await assert.rejects(
+        template("gatewayName", gatewayName),
+        /routing\.gatewayName must be a DNS-safe Kubernetes resource name of at most 63 characters/,
+        gatewayName,
+      );
+    }
+    // Compute isKubernetesNamespaceName: a DNS label, at most 63 characters, no dots.
+    for (const envoyNamespace of ["Envoy", "envoy.system", "-envoy", "envoy-", "a".repeat(64)]) {
+      await assert.rejects(
+        template("envoyNamespace", envoyNamespace),
+        /routing\.envoyNamespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/,
+        envoyNamespace,
+      );
+    }
+    for (const gatewayName of ["gateways.example", "a".repeat(63)]) {
+      const gateways = await resources((await template("gatewayName", gatewayName)).stdout);
+      assert.equal(
+        gateways.find((object) => object.kind === "Gateway")?.metadata.name,
+        gatewayName,
+      );
+    }
+    const envoyNamespace = "a".repeat(63);
+    const envoy = await resources((await template("envoyNamespace", envoyNamespace)).stdout);
+    assert.ok(envoy.some((object) => object.metadata?.namespace === envoyNamespace));
+  },
+);
 
 test("production Helm values example renders the backendless default chart", tooling, async () => {
   const { stdout } = await execute(
@@ -2558,6 +2762,77 @@ test(
   },
 );
 
+test("database CA mounts stay distinct from active production volume mounts", tooling, async () => {
+  const optionalFeatures = {
+    ...repositoryCredentialValues,
+    ...gatewayRoutingValues,
+    ...chatgptValues,
+    "executionCluster.enabled": "true",
+    "executionCluster.apiKubeconfigSecretName": "execution-api",
+    "executionCluster.workerKubeconfigSecretName": "execution-worker",
+    "executionCluster.apiCidrs[0]": "10.44.0.2/32",
+  };
+  for (const features of [
+    {},
+    optionalFeatures,
+    { "bootstrap.password.mountPath": "/custom/bootstrap" },
+  ]) {
+    const objects = await resources((await render(features)).stdout);
+    // Derive the existing mounts from shipped workloads, independently of the validation list.
+    const paths = new Set(
+      objects
+        .filter(
+          (object) =>
+            ["Deployment", "Job"].includes(object.kind) &&
+            ["api", "worker", "initialization"].includes(
+              object.metadata.labels["app.kubernetes.io/component"],
+            ),
+        )
+        .flatMap((object) => [
+          ...(object.spec.template.spec.initContainers ?? []),
+          ...object.spec.template.spec.containers,
+        ])
+        .filter((container) => ["api", "worker", "migration", "bootstrap"].includes(container.name))
+        .flatMap((container) => (container.volumeMounts ?? []).map((mount) => mount.mountPath)),
+    );
+    assert.ok(paths.size > 0);
+    for (const mountPath of paths) {
+      await assert.rejects(
+        render({ ...features, ...databaseCaValues, "database.caMountPath": mountPath }),
+        /database.caMountPath.*distinct/,
+        mountPath,
+      );
+    }
+  }
+  // Paths reserved by optional features remain available when those features are disabled.
+  for (const mountPath of [
+    "/etc/openclaw/execution",
+    "/etc/openclaw/repository-registry",
+    "/etc/openclaw/repository-ca",
+    "/var/run/secrets/kubernetes.io/serviceaccount",
+    "/run/openclaw/repository-control",
+    "/etc/openclaw/gateway-api-key",
+    "/etc/openclaw/gateway-ca",
+    "/etc/openclaw/chatgpt",
+    "/custom/database-ca",
+  ]) {
+    await render({ ...databaseCaValues, "database.caMountPath": mountPath });
+  }
+  const ordinary = (await render()).stdout;
+  await render({
+    ...externalGatewayRoutingValues,
+    ...databaseCaValues,
+    "database.caMountPath": "/etc/openclaw/gateway-ca",
+  });
+  // The repository sidecar's private mounts do not occur in a database client.
+  for (const mountPath of ["/etc/openclaw/repository-inputs", "/run/openclaw/repository-private"]) {
+    await render({ ...optionalFeatures, ...databaseCaValues, "database.caMountPath": mountPath });
+  }
+  for (const mountPath of ["/etc/openclaw/installation", "/var/lib/openclaw/bootstrap"]) {
+    assert.equal((await render({ "database.caMountPath": mountPath })).stdout, ordinary);
+  }
+});
+
 test(
   "optional database CA Secret mounts into every production database client",
   tooling,
@@ -3087,16 +3362,9 @@ test("the chart refuses administrator emails the bootstrap Job refuses", tooling
 test("the chart refuses bootstrap claim names the volume helper refuses", tooling, async () => {
   const message =
     /bootstrap\.password\.claimName must be a DNS subdomain of at most 253 characters/;
-  const longLabel = "a".repeat(64);
-  const longest = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
-  for (const claimName of [
-    "Bootstrap",
-    "claim_name",
-    "claim-",
-    `.claim`,
-    longLabel,
-    `${"a".repeat(254)}`,
-  ]) {
+  // This is Kubernetes' 253-character object-name limit, not a DNS hostname limit.
+  const longest = "a".repeat(253);
+  for (const claimName of ["Bootstrap", "claim_name", "claim-", `.claim`, `${"a".repeat(254)}`]) {
     await assert.rejects(
       render({}, { strings: { "bootstrap.password.claimName": claimName } }),
       ({ code, stderr }) => code !== 0 && message.test(stderr),
@@ -3888,6 +4156,36 @@ test("Helm renders a values-file worker timeout of 1800000 as digits", tooling, 
   assert.doesNotMatch(rendered.stdout, /OCC_WORKER_CONVERGENCE_TIMEOUT_MS\n\s+value: "1\.8e\+06"/);
 });
 
+test("Collector exporter ports preserve decimal meaning in Kubernetes YAML", tooling, async () => {
+  const field = "logging.collector.exporter.port";
+  for (const value of ["03100", "0443", "010", "00080", "0", "65536", "18446744073709551617"]) {
+    await assert.rejects(
+      render(productionCollectorValues, { strings: { [field]: value } }),
+      /logging\.collector\.exporter\.port must be an integer TCP port from 1 to 65535/,
+      `Must refuse noncanonical or out-of-range exporter port: ${value}`,
+    );
+  }
+  for (const value of ["1", "3100", "65535"]) {
+    const objects = await resources(
+      (await render(productionCollectorValues, { strings: { [field]: value } })).stdout,
+    );
+    const policy = objects.find(
+      ({ kind, metadata }) =>
+        kind === "NetworkPolicy" && metadata.name === "openclaw-enterprise-collector-egress",
+    );
+    assert.deepEqual(policy.spec.egress.at(-1).ports, [{ protocol: "TCP", port: Number(value) }]);
+  }
+  const numeric = await resources(
+    (await render({ ...productionCollectorValues, [field]: 3100 })).stdout,
+  );
+  assert.deepEqual(
+    numeric
+      .find(({ metadata }) => metadata.name === "openclaw-enterprise-collector-egress")
+      .spec.egress.at(-1).ports,
+    [{ protocol: "TCP", port: 3100 }],
+  );
+});
+
 test("Helm rejects obvious malformed quantity syntax", tooling, async () => {
   const collector = {
     "logging.collector.enabled": "true",
@@ -4157,6 +4455,7 @@ test(
           "controlPlane.nodeSelector.topology\\.kubernetes\\.io/zone": "east",
           "controlPlane.nodeSelector.node-role\\.kubernetes\\.io/infra": "",
           "controlPlane.nodeSelector.edge": "a_b.c-d",
+          [`controlPlane.nodeSelector.${"a".repeat(253)}/pool`]: "control",
         },
       },
     );
@@ -4165,11 +4464,18 @@ test(
     // Kubernetes allows empty label values; charts before #1848 rendered them.
     assert.match(stdout, /node-role\.kubernetes\.io\/infra: ""/);
     assert.match(stdout, /edge: a_b\.c-d/);
+    const objects = await resources(stdout);
+    const api = objects.find(
+      (object) =>
+        object.kind === "Deployment" &&
+        object.metadata.labels?.["app.kubernetes.io/component"] === "api",
+    );
+    assert.equal(api.spec.template.spec.nodeSelector[`${"a".repeat(253)}/pool`], "control");
   },
 );
 
 test("execution chart refuses a harness hostname Compute refuses", tooling, async () => {
-  await assert.rejects(
+  const template = (...values) =>
     execute(
       helm,
       [
@@ -4177,16 +4483,91 @@ test("execution chart refuses a harness hostname Compute refuses", tooling, asyn
         "oce",
         "deploy/helm/openclaw-execution",
         "--set",
-        "routing.hostname=Bad_Host",
-        "--set",
         "routing.gatewayClassName=private-envoy-gateway",
         "--set",
         "routing.tlsSecretName=agents-tls",
         "--set-json",
         'routing.controlPlaneCidrs=["198.51.100.0/24"]',
+        ...values,
       ],
-      { cwd: repository },
-    ),
+      { cwd: repository, maxBuffer: 2_000_000 },
+    );
+  await assert.rejects(
+    template("--set", "routing.hostname=Bad_Host"),
     /routing\.hostname must be a DNS hostname without a port or path/,
   );
+  // --set reads these as a number and a boolean; the chart names the field instead of failing in len.
+  for (const hostname of ["123", "true"]) {
+    await assert.rejects(
+      template("--set", `routing.hostname=${hostname}`),
+      /routing\.hostname must be a string: quote a hostname YAML reads as a number or boolean, or pass it with --set-string/,
+      hostname,
+    );
+  }
+  for (const hostname of ["123", "agents.example.invalid"]) {
+    const { stdout } = await template("--set-string", `routing.hostname=${hostname}`);
+    const gateway = (await resources(stdout)).find((object) => object.kind === "Gateway");
+    assert.equal(gateway?.spec.listeners[0].hostname, hostname);
+  }
 });
+
+test(
+  "execution chart refuses an Envoy HTTPS port or DNS namespace the cluster refuses",
+  tooling,
+  async () => {
+    const template = (...values) =>
+      execute(
+        helm,
+        [
+          "template",
+          "oce",
+          "deploy/helm/openclaw-execution",
+          "--set",
+          "routing.hostname=agents.example.invalid",
+          "--set",
+          "routing.gatewayClassName=private-envoy-gateway",
+          "--set",
+          "routing.tlsSecretName=agents-tls",
+          "--set-json",
+          'routing.controlPlaneCidrs=["198.51.100.0/24"]',
+          ...values,
+        ],
+        { cwd: repository, maxBuffer: 2_000_000 },
+      );
+    const proxyPolicy = async (stdout) =>
+      (await resources(stdout)).find(
+        (object) => object.kind === "NetworkPolicy" && object.metadata.name === "oce-harness-proxy",
+      );
+    // Compute validatePort takes integers from 1 to 65535; Sprig int would truncate 10443.5.
+    // Sprig int turns a value too big for 64 bits into 0, which the lower bound catches.
+    for (const port of ["0", "65536", "10443.5", "-1", "true", "99999999999999999999"]) {
+      await assert.rejects(
+        template("--set", `routing.envoyHttpsTargetPort=${port}`),
+        /routing\.envoyHttpsTargetPort must be an integer TCP port from 1 to 65535/,
+        port,
+      );
+    }
+    for (const port of [1, 65535]) {
+      const policy = await proxyPolicy(
+        (await template("--set", `routing.envoyHttpsTargetPort=${port}`)).stdout,
+      );
+      assert.equal(policy?.spec.ingress[0].ports[0].port, port);
+    }
+    // The DNS egress rule selects kubernetes.io/metadata.name, which holds a Namespace name.
+    for (const namespace of ["Kube-System", "kube.system", "-dns", "a".repeat(64)]) {
+      await assert.rejects(
+        template("--set-string", `dns.namespace=${namespace}`),
+        /dns\.namespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/,
+        namespace,
+      );
+    }
+    const namespace = "a".repeat(63);
+    const policy = await proxyPolicy(
+      (await template("--set-string", `dns.namespace=${namespace}`)).stdout,
+    );
+    assert.equal(
+      policy?.spec.egress[0].to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"],
+      namespace,
+    );
+  },
+);

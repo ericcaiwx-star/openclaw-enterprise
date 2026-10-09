@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { loadStartupConfigurationSnapshot } from "../../apps/controller/src/composition/installation-config.ts";
+import {
+  loadInstallationConfiguration,
+  loadStartupConfigurationSnapshot,
+} from "../../apps/controller/src/composition/installation-config.ts";
 import {
   createKubernetesComputeDriver,
   KubernetesComputeDriver,
@@ -121,6 +132,7 @@ function render(
   profile,
   input,
   directory = mkdtempSync(join(tmpdir(), `oce-profile-${profile}-`)),
+  root = repository,
 ) {
   const inputPath = join(directory, "input.json");
   writeFileSync(inputPath, `${JSON.stringify(input, null, 2)}\n`);
@@ -137,7 +149,7 @@ function render(
         "--out-dir",
         directory,
       ],
-      { cwd: repository, encoding: "utf8" },
+      { cwd: root, encoding: "utf8" },
     );
   } catch (error) {
     error.profileRendererOutput = `${error.stdout ?? ""}${error.stderr ?? ""}`;
@@ -560,6 +572,75 @@ test("Helm catches generated profile Secret collisions", { skip: helmSkip }, () 
     `${error.stdout ?? ""}${error.stderr ?? ""}`,
     /repositoryCredentials\.serviceConfigSecretName must use a dedicated Secret distinct from chatgpt/,
   );
+});
+
+function withGitHubSignIn(input, github) {
+  const {
+    agentNativeAdminDomain: _domain,
+    sharedCookieDomain: _cookieDomain,
+    ...controlPlane
+  } = input.controlPlane;
+  return {
+    ...input,
+    controlPlane: { ...controlPlane, recoveryUserId: "recovery-admin_1", github },
+  };
+}
+
+test(
+  "preflight refuses sign-in Secrets that ChatGPT or repository credentials use, as Helm does",
+  { skip: helmSkip },
+  () => {
+    const input = managedCodexInput({ repository: repositoryConfiguration() });
+    const accepted = render("codex", withGitHubSignIn(input, {}));
+    assert.equal(accepted.summary.ok, true, accepted.preflight.errors.join("\n"));
+    helmTemplate(accepted);
+    for (const secretName of [
+      "occ-chatgpt-admin",
+      "occ-repository-service-config",
+      "occ-repository-app-key",
+      "occ-repository-tls",
+      "occ-repository-public-ca",
+    ]) {
+      assertPreflightFailure(
+        "codex",
+        withGitHubSignIn(input, { secretName }),
+        /controlPlane\.github\.secretName must name a dedicated Secret/,
+      );
+      // The same name placed over the accepted values makes the chart refuse it too.
+      const override = join(accepted.directory, `github-${secretName}.json`);
+      writeFileSync(override, JSON.stringify({ auth: { github: { secretName } } }));
+      const error = renderError(() => helmTemplate(accepted, [override]));
+      assert.match(
+        `${error.stdout ?? ""}${error.stderr ?? ""}`,
+        /auth\.github credentials must use a (dedicated Secret|Secret distinct from repositoryCredentials)/,
+      );
+    }
+    // Without managed ChatGPT accounts the chart does not reserve that Secret name.
+    const unmanaged = render(
+      "codex",
+      withGitHubSignIn(codexInput(), { secretName: "occ-chatgpt-admin" }),
+    );
+    assert.equal(unmanaged.summary.ok, true, unmanaged.preflight.errors.join("\n"));
+    helmTemplate(unmanaged);
+  },
+);
+
+test("preflight refuses lone surrogates, which Helm cannot parse in values.yaml", () => {
+  const cases = [
+    [{ adminEmail: "a\ud800@b.c" }, /controlPlane\.adminEmail must be well-formed Unicode text/],
+    [{ gatewayClassName: "e\udc00g" }, /controlPlane\.gatewayClassName must be well-formed/],
+    [
+      { dns: { namespace: "kube-system", podLabels: { "k8s\ud800": "kube-dns" } } },
+      /controlPlane\.dns\.podLabels keys must be well-formed Unicode text/,
+    ],
+  ];
+  for (const [override, expected] of cases) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({ controlPlane: { ...baseInput().controlPlane, ...override } }),
+      expected,
+    );
+  }
 });
 
 test("label values that YAML 1.1 would retype stay strings", () => {
@@ -1103,6 +1184,63 @@ test(
   },
 );
 
+// Operators render from a plain checkout: installation-profiles.md asks for `pnpm install`
+// only with native admin, whose public suffix check loads tldts. Copy the sources the renderer
+// can import, without any node_modules, into a directory outside the repository.
+function checkoutWithoutDependencies() {
+  const root = mkdtempSync(join(tmpdir(), "oce-profile-checkout-"));
+  const sources = [
+    "package.json",
+    "scripts/render-installation-profile.mjs",
+    "deploy/profiles",
+    "apps/controller/package.json",
+    "apps/controller/src",
+    ...readdirSync(join(repository, "packages"))
+      // Skip leftovers of a branch switch, such as a directory holding only node_modules.
+      .filter((name) => existsSync(join(repository, "packages", name, "package.json")))
+      .flatMap((name) => [`packages/${name}/package.json`, `packages/${name}/src`]),
+  ];
+  for (const source of sources) {
+    cpSync(join(repository, source), join(root, source), {
+      recursive: true,
+      filter: (path) => !path.split(sep).includes("node_modules"),
+    });
+  }
+  return root;
+}
+
+test("profiles render without installed dependencies unless native admin is on", (t) => {
+  const root = checkoutWithoutDependencies();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const [profile, input] of [
+    ["openclaw", externalSignInInput()],
+    ["codex", codexInput({ controlPlane: externalSignInInput().controlPlane })],
+  ]) {
+    const directory = mkdtempSync(join(tmpdir(), `oce-profile-${profile}-`));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    let output;
+    try {
+      output = render(profile, input, directory, root);
+    } catch (error) {
+      assert.fail(`${profile} render failed without node_modules:\n${error.profileRendererOutput}`);
+    }
+    assert.equal(output.summary.ok, true, output.preflight.errors.join("\n"));
+    assert.match(output.values, /agentNativeAdmin:\n {2}enabled: false\n/);
+  }
+
+  // Native admin needs the API's public suffix list, so it asks for the install, with a preflight.
+  const directory = mkdtempSync(join(tmpdir(), "oce-profile-native-admin-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const error = renderError(() => render("openclaw", baseInput(), directory, root));
+  assert.match(
+    error.profileRendererOutput,
+    /controlPlane\.sharedCookieDomain needs the public suffix list: run pnpm install first\./,
+  );
+  const preflight = JSON.parse(readFileSync(join(directory, "preflight.json"), "utf8"));
+  assert.equal(preflight.ok, false);
+  assert.equal(existsSync(join(directory, "values.yaml")), false);
+});
+
 test("preflight warns, without failing, when no trusted proxy is set", () => {
   const github = render("openclaw", externalSignInInput());
   assert.equal(github.summary.ok, true);
@@ -1544,20 +1682,25 @@ test("profiles refuse gateway namespaces the compute driver refuses", () => {
   };
   const admit = (gatewayRouting) =>
     createKubernetesComputeDriver({ ...configured, network, gatewayRouting });
+  // A Kubernetes Namespace name is a DNS label of at most 63 characters, with no dots.
+  // The Gateway namespace is also an owning-gateway-namespace label value.
   const namespaceMessage =
-    /controlPlane\.namespace must be a DNS-safe Kubernetes resource name of at most 253 characters/;
+    /controlPlane\.namespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/;
   const envoyMessage =
-    /controlPlane\.envoyNamespace must be a DNS-safe Kubernetes resource name of at most 253 characters/;
+    /controlPlane\.envoyNamespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/;
   const controlPlane = baseInput().controlPlane;
-  for (const namespace of [
+  const refused = [
     "openclaw/system",
     "OpenClaw",
     "foo_bar",
     "-system",
     "system-",
-    `${"a".repeat(254)}`,
+    "a".repeat(64),
+    "a".repeat(253),
+    "gateway.example",
     "openclaw-system ",
-  ]) {
+  ];
+  for (const namespace of refused) {
     assertPreflightFailure(
       "openclaw",
       baseInput({ controlPlane: { ...controlPlane, namespace } }),
@@ -1565,10 +1708,10 @@ test("profiles refuse gateway namespaces the compute driver refuses", () => {
     );
     assert.throws(
       () => admit({ ...routing, gatewayNamespace: namespace }),
-      /Gateway routing Gateway namespace must be a DNS-safe Kubernetes resource name/,
+      /Gateway routing Gateway namespace must be a Kubernetes namespace name/,
     );
   }
-  for (const envoyNamespace of ["envoy/system", "Envoy", `${"a".repeat(254)}`]) {
+  for (const envoyNamespace of refused) {
     assertPreflightFailure(
       "openclaw",
       baseInput({ controlPlane: { ...controlPlane, envoyNamespace } }),
@@ -1576,20 +1719,77 @@ test("profiles refuse gateway namespaces the compute driver refuses", () => {
     );
     assert.throws(
       () => admit({ ...routing, envoyNamespace }),
-      /Gateway routing Envoy namespace must be a DNS-safe Kubernetes resource name/,
+      /Gateway routing Envoy namespace must be a Kubernetes namespace name/,
     );
   }
-  const namespace = "a".repeat(253);
+  const namespace = "a".repeat(63);
+  const envoyNamespace = `${"b".repeat(62)}9`;
   const output = render(
     "openclaw",
-    baseInput({
-      controlPlane: { ...controlPlane, namespace, envoyNamespace: "gateway.example" },
-    }),
+    baseInput({ controlPlane: { ...controlPlane, namespace, envoyNamespace } }),
   );
   assert.equal(output.summary.ok, true);
   assert.match(output.installation, new RegExp(`gatewayNamespace: ${namespace}`));
-  assert.match(output.installation, /envoyNamespace: gateway\.example/);
-  assert.doesNotThrow(() =>
-    admit({ ...routing, gatewayNamespace: namespace, envoyNamespace: "gateway.example" }),
-  );
+  assert.match(output.installation, new RegExp(`envoyNamespace: ${envoyNamespace}`));
+  assert.doesNotThrow(() => admit({ ...routing, gatewayNamespace: namespace, envoyNamespace }));
+});
+
+test("preflight rejects Codex seccomp paths the compute driver refuses", () => {
+  const message =
+    /runtime\.codexSeccompProfile must be a relative localhost profile path without traversal or unconfined mode/;
+  for (const codexSeccompProfile of [
+    "/profiles/codex.json",
+    "../codex.json",
+    "profiles/../codex.json",
+    "profiles//codex.json",
+    "unconfined",
+    "profiles/unconfined",
+    "profiles\\codex.json",
+  ]) {
+    assertPreflightFailure("codex", codexInput({ runtime: { codexSeccompProfile } }), message);
+  }
+  const accepted = render("codex", codexInput());
+  const installation = loadYaml(accepted.installation);
+  KubernetesComputeDriver.validateConfiguration(installation.drivers.compute.configuration);
+  assert.match(accepted.installation, /codexSeccompProfile: profiles\/codex\.json/);
+});
+
+test("profile transport Secret prefixes agree with controller startup admission", async (t) => {
+  const baseline = render("openclaw", baseInput());
+  t.after(() => rmSync(baseline.directory, { recursive: true, force: true }));
+  const prefixes = [
+    ["transport", true],
+    ["transport-", true],
+    ["tenant.transport", true],
+    ["a".repeat(240), true],
+    ["Bad_Prefix", false],
+    ["transport/agent", false],
+    ["transport.", false],
+    ["a".repeat(241), false],
+  ];
+  for (const [prefix, accepted] of prefixes) {
+    const input = baseInput();
+    input.runtime.transportSecretPrefix = prefix;
+    if (accepted) {
+      const output = render("openclaw", input);
+      t.after(() => rmSync(output.directory, { recursive: true, force: true }));
+      await loadInstallationConfiguration({
+        mode: "production",
+        environment: { OCC_CONFIG_PATH: join(output.directory, "installation.yaml") },
+      });
+    } else {
+      assertPreflightFailure("openclaw", input, /runtime\.transportSecretPrefix/);
+      const installation = loadYaml(baseline.installation);
+      installation.drivers.compute.configuration.runtime.transportSecretPrefix = prefix;
+      const path = join(baseline.directory, "invalid-installation.json");
+      writeFileSync(path, JSON.stringify(installation));
+      await assert.rejects(
+        loadInstallationConfiguration({
+          mode: "production",
+          environment: { OCC_CONFIG_PATH: path },
+        }),
+        /runtime\.transportSecretPrefix/,
+      );
+    }
+  }
 });
