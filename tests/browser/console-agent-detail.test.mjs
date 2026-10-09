@@ -2260,7 +2260,7 @@ test("Agent delete confirmation sends the real delete API and leaves visible que
   assert.equal((await response.json()).data.status, "deleting");
 
   assert.match(page.url(), new RegExp(`/console/agents/${agent.id}`));
-  await page.getByRole("status").getByText("Deletion in progress").waitFor();
+  await page.getByRole("status").getByText("Deletion was requested").waitFor();
   await page.getByRole("button", { name: "Refresh deletion status" }).waitFor();
   assert.deepEqual(
     agentDeleteRequests(requests, namespace.id, agent.id).map((request) => [
@@ -2329,7 +2329,7 @@ test("Agent deletion says access ended when the deleter can no longer read the A
   await page.getByRole("button", { name: "Delete Agent" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete Scoped Candidate?" });
   await dialog.getByRole("button", { name: "Permanently delete Agent" }).click();
-  await page.getByRole("status").getByText("Deletion in progress").waitFor();
+  await page.getByRole("status").getByText("Deletion was requested").waitFor();
   const reads = () => pathRequests(requests, "GET", agentPath).length;
   const accepted = reads();
 
@@ -2348,7 +2348,7 @@ test("Agent deletion says access ended when the deleter can no longer read the A
     );
     return refresh !== undefined && !refresh.disabled;
   });
-  await page.getByRole("status").getByText("Deletion in progress").waitFor();
+  await page.getByRole("status").getByText("Deletion was requested").waitFor();
 
   // Finishing the deletion removes the bindings that target the Agent, so the next read is a
   // real 403 for this member (an administrator would get 404 and return to the list).
@@ -2437,9 +2437,112 @@ test("Agent delete uncertainty requires refresh before another destructive reque
   );
   await page.getByRole("button", { name: "Refresh deletion status" }).click();
   assert.equal((await refresh).status(), 200);
-  await page.getByRole("status").getByText("Deletion in progress").waitFor();
+  await page.getByRole("status").getByText("Deletion was requested").waitFor();
   assert.equal(interceptedDeletes, 1);
   assert.equal(agentDeleteRequests(requests, namespace.id, agent.id).length, 1);
+});
+
+test("An already deleting Agent permits only a confirmed manual repeat DELETE", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Deletion repeat", { ready: true });
+  const agent = await fixture.createAgent(namespace.id, "Repeat cleanup", nativeValues("repeat"));
+  const path = `/namespaces/${namespace.id}/agents/${agent.id}`;
+  assert.equal((await fixture.request("DELETE", path)).status, 202);
+  const { page } = await newPage(t, fixture);
+  const requests = apiRequests(page, fixture.origin);
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id));
+  await page.getByRole("button", { name: "Request deletion again", exact: true }).waitFor();
+  requests.length = 0;
+  const open = () =>
+    page.getByRole("button", { name: "Request deletion again", exact: true }).click();
+  await open();
+  let dialog = page.getByRole("dialog", { name: "Request deletion again for Repeat cleanup?" });
+  await dialog
+    .getByText("Cleanup that is queued or running continues unchanged.", { exact: false })
+    .waitFor();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  assert.deepEqual(nonAuthWriteRequests(requests), []);
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Request deletion again", exact: true })
+      .evaluate((node) => node === node.ownerDocument.activeElement),
+    true,
+  );
+  await open();
+  dialog = page.getByRole("dialog", { name: "Request deletion again for Repeat cleanup?" });
+  const response = page.waitForResponse(
+    (response) =>
+      response.url() === fixture.origin + path && response.request().method() === "DELETE",
+  );
+  await dialog.getByRole("button", { name: "Request deletion again", exact: true }).click();
+  assert.equal((await response).status(), 202);
+  assert.deepEqual(
+    agentDeleteRequests(requests, namespace.id, agent.id).map(({ method, path, body }) => [
+      method,
+      path,
+      body,
+    ]),
+    [["DELETE", path, null]],
+  );
+  assert.equal((await fixture.request("GET", path)).data.status, "deleting");
+});
+
+test("An uncertain repeat deletion stays blocked until a successful deleting readback", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Repeat deletion uncertainty", { ready: true });
+  const agent = await fixture.createAgent(namespace.id, "Uncertain repeat", nativeValues("repeat"));
+  const path = `/namespaces/${namespace.id}/agents/${agent.id}`;
+  assert.equal((await fixture.request("DELETE", path)).status, 202);
+  const { page } = await newPage(t, fixture);
+  const requests = apiRequests(page, fixture.origin);
+  await page.clock.install();
+  let writes = 0;
+  await page.route(`**${path}`, async (route, request) => {
+    if (request.method() !== "DELETE" || ++writes > 1) {
+      await route.continue();
+      return;
+    }
+    await route.fetch();
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "DEPENDENCY_UNAVAILABLE", message: "masked repeat response" },
+        meta: { requestId: "req_00000000-0000-4000-8000-000000000503" },
+      }),
+    });
+  });
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id));
+  const repeat = page.getByRole("button", { name: "Request deletion again", exact: true });
+  await repeat.waitFor();
+  requests.length = 0;
+  await repeat.click();
+  let dialog = page.getByRole("dialog", { name: "Request deletion again for Uncertain repeat?" });
+  await dialog.getByRole("button", { name: "Request deletion again", exact: true }).click();
+  await page.getByText("Outcome unknown. Deletion may have started.").waitFor();
+  assert.equal(await repeat.isDisabled(), true);
+  assert.equal(writes, 1);
+  assert.equal(agentDeleteRequests(requests, namespace.id, agent.id).length, 1);
+  await page.getByRole("button", { name: "Refresh deletion status", exact: true }).click();
+  await repeat.waitFor({ state: "visible" });
+  await page.waitForFunction(() =>
+    [...globalThis.document.querySelectorAll("button")].some(
+      (node) => node.textContent === "Request deletion again" && !node.disabled,
+    ),
+  );
+  assert.equal(writes, 1);
+  assert.equal(agentDeleteRequests(requests, namespace.id, agent.id).length, 1);
+  await repeat.click();
+  dialog = page.getByRole("dialog", { name: "Request deletion again for Uncertain repeat?" });
+  const response = page.waitForResponse(
+    (response) =>
+      response.url() === fixture.origin + path && response.request().method() === "DELETE",
+  );
+  await dialog.getByRole("button", { name: "Request deletion again", exact: true }).click();
+  assert.equal((await response).status(), 202);
+  assert.equal(writes, 2);
 });
 
 test("Agent deletion recovery returns a missing Agent detail to its Namespace list", async (t) => {

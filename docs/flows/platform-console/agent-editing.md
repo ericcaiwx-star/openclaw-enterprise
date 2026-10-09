@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
-updated: 2026-09-29
-last_updated_session: 01a0eb0e-dbc1-78d1-91b0-ea91ee87c00f
+updated: 2026-10-10
+last_updated_session: authoring-run/da61175b-df1b-4e96-b202-94e9e82538f9
 ---
 
 # Console Agent editing and runtime requests
@@ -56,6 +56,7 @@ graph TD
     G -->|accepted or uncertain| H["Refresh exact Agent"]
     G -->|denied| I["Show access denied"]
     H -->|exists| J["Show current Agent state"]
+    J -->|known deleting and manual request| E
     H -->|not found| K["Return to Agents list"]
   end
 ```
@@ -299,8 +300,17 @@ detail page in a deleting state. The page rereads the exact Agent every few
 seconds until it is gone; **Refresh deletion status** reads it on demand, and
 a read error stops the polling. Only a not-found read after
 an accepted or uncertain request, or when an already-deleting Agent is opened,
-returns to the Agents list in the selected Namespace. An uncertain deletion
-blocks writes until a successful read; the browser never retries it.
+returns to the Agents list in the selected Namespace. An already deleting Agent
+keeps **Request deletion again** beside Refresh. It opens a cancel-first confirmation
+and sends the same bodyless DELETE only when the reader confirms. Queued or claimed
+work stays unchanged; terminal work can restart under the controller's existing
+current-permission and retry-ownership checks. The view does not infer a worker
+outcome from the Agent's deleting state or add a separate status contract.
+
+An uncertain initial or repeated deletion blocks writes until a successful exact
+Agent read. A deleting read clears that guard even when the view was already deleting;
+a failed read does not. Cancel returns focus to the repeat-request button, and
+successful writes retain status refresh. The browser never retries DELETE automatically.
 
 `packages/occ/src/index.ts:deleteAgent` owns deletion admission. The
 [Agent deletion reference](../../reference/agents.md#deletion) covers
@@ -337,6 +347,8 @@ worker cleanup and the Namespace-owned resources it preserves.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 01:41: Trace confirmed manual deletion recovery and uncertain repeat readback in the accompanying change. (authoring-run/da61175b-df1b-4e96-b202-94e9e82538f9 - 243b38ba6d951240065e5061e1e4abccdb44410c)
 
 - 2026-09-29 20:00: Trace draft repository editing and save guards. (public-pr/374)
 
