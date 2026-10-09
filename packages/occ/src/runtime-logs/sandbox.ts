@@ -261,8 +261,7 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     checkpoint.hash === sandboxPrefixHash(chunk.lines, checkpoint.seen) &&
     !(
       checkpoint.total !== chunk.bufferTotal &&
-      ((checkpoint.seen === tailLines && checkpoint.total > checkpoint.seen) ||
-        (chunk.lines.length === tailLines && chunk.bufferTotal > chunk.lines.length))
+      (checkpoint.total >= tailLines || chunk.bufferTotal >= tailLines)
     );
   const checkpointLost = checkpoint !== undefined && !replaced && !checkpointValid;
   // A byte-cut window retains the pre-cut overlap baseline. Value-prefix
@@ -370,8 +369,7 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
       // cursor poll without `sinceSeconds` (after an empty page) reads nothing older.
       gapFloor ?? (continuing ? baseTime : (sinceTime ?? null)),
     );
-    const unobservableTail =
-      retainCheckpoint && chunk.lines.length === tailLines && chunk.bufferTotal > tailLines;
+    const unobservableTail = retainCheckpoint && chunk.bufferTotal >= tailLines;
     const records = [
       ...leading,
       ...(unobservableTail && window.overflow === null

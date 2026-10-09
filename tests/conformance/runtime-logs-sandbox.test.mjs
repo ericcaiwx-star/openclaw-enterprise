@@ -949,9 +949,6 @@ test("sandbox byte-window changes report a gap before a fresh value snapshot", a
     });
     fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => row(index));
     const tail = changed === "clipped size" ? 100 : 200;
-    if (changed === "clipped size") {
-      fixture.gateway.state.bufferTotal = 150;
-    }
     const first = await fixture.request(
       "GET",
       fixture.target.logsPath(`source=sandbox&tailLines=${tail}`),
@@ -964,9 +961,7 @@ test("sandbox byte-window changes report a gap before a fresh value snapshot", a
       };
     }
     if (changed === "clipped size") {
-      // The values returned by the full tail stay identical, but the observed
-      // source total proves the clipped window changed.
-      fixture.gateway.state.bufferTotal = 151;
+      fixture.gateway.state.lines.splice(99);
     }
     const next = await fixture.request(
       "GET",
@@ -1063,4 +1058,54 @@ test("sandbox fitting untimed replacement snapshots retain replay progress", asy
       changed,
     );
   }
+});
+
+test("sandbox full untimed checkpoints disclose saturation when total equals the tail", async () => {
+  const fixture = await sandboxFixture();
+  fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => ({
+    sandboxId: SANDBOX_ID,
+    time: null,
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; diagnostic ${'"a" '.repeat(1000)}`,
+    fields: {},
+  }));
+  const seen = [];
+  let cursor;
+  for (let page = 0; page < 10; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(
+        `source=sandbox&tailLines=100${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(
+      response.data.records.some(
+        ({ type, reason }) => type === "gap" && reason === "window_exceeded",
+      ),
+    );
+    seen.push(
+      ...response.data.records
+        .filter(({ type }) => type === "line")
+        .map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])),
+    );
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 100 }, (_, i) => i + 50),
+  );
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=100&cursor=${cursor}`),
+  );
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+  assert.ok(
+    replay.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+  );
 });

@@ -2372,3 +2372,63 @@ test("container byte-window baselines reset when the Driver observes an instance
     );
   }
 });
+
+test("container expanded byte-windows preserve valid conservative PEM cursors", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  for (const changed of ["expanded", "empty"]) {
+    const fixture = await createRuntimeLogFixture();
+    const target = await fixture.deployAgent("container-window-recovery");
+    const time = new Date(Date.now() - 1000).toISOString();
+    const before = new Date(Date.parse(time) - 2000).toISOString();
+    fixture.computeDriver.state.lines = [{ time: before, raw: pemEnd }];
+    const prime = await fixture.request("GET", target.logsPath("source=gateway&tailLines=60"));
+    const older = Array.from({ length: 100 }, (_, i) => ({
+      time: new Date(Date.parse(time) - 1000).toISOString(),
+      raw: `[info] older row=${i}; diagnostic ${'"a" '.repeat(1000)}`,
+    }));
+    const current = wireContainerRows(time);
+    fixture.computeDriver.state.lines = [...older, ...current];
+    const first = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=60&cursor=${prime.data.cursor}`),
+    );
+    assert.equal(first.data.truncated, true);
+    if (changed === "empty") {
+      fixture.computeDriver.state.lines = [];
+    }
+    const seen = [];
+    let cursor = first.data.cursor;
+    for (let page = 0; page < 10; page += 1) {
+      const response = await fixture.request(
+        "GET",
+        target.logsPath(`source=gateway&tailLines=160&cursor=${cursor}`),
+      );
+      assert.equal(response.status, 200, "recovery must not poison the next signed cursor");
+      assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+      const lines = response.data.records.filter(({ type }) => type === "line");
+      seen.push(...lines.map(({ message }) => message.split(";", 1)[0]));
+      cursor = response.data.cursor;
+      if (!response.data.truncated) {
+        break;
+      }
+    }
+    if (changed === "expanded") {
+      assert.deepEqual(
+        seen,
+        [...older, ...current].map(({ raw }) =>
+          raw.startsWith("[info]")
+            ? raw.split(";", 1)[0]
+            : JSON.parse(raw).message.split(";", 1)[0],
+        ),
+      );
+    } else {
+      assert.equal(seen.length, 0);
+    }
+    const replay = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=160&cursor=${cursor}`),
+    );
+    assert.equal(replay.status, 200);
+    assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+  }
+});

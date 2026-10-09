@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/b68ecd62-c0d7-4fbf-82ee-0f440d8ae84c
+last_updated_session: authoring-run/50fe6eec-f154-4d38-9cb5-8e755a82ded9
 ---
 
 # Agent runtime logs flow
@@ -139,12 +139,12 @@ only when it holds fewer than 16 hashes. A page byte cut keeps the count, so
 undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 `window_exceeded`, `cursor_expired` or `truncated` gaps, and passes the rest to
 `runtime-logs/sanitize.ts:sanitizeRuntimeLogChunk`, the only producer of
-`SanitizedRuntimeLogRecord`. `page-budget.ts` measures the serialized page,
-signed cursor and API request-ID envelope against 512 KiB. It tries the full
-page, then bounded prefix builds. Builds reuse admission, read and clocks, deriving sanitization, masking and cursor state from each raw prefix
-without further Driver reads or audits. Fit is guaranteed; maximum filling is
-not. `maskPemBlockLines` masks separate BEGIN/body/END lines in the classified
-prefix. Sandbox pages share the budget helper.
+`SanitizedRuntimeLogRecord`. `page-budget.ts` measures serialized pages,
+signed cursors and the HTTP envelope against 512 KiB. Full candidates precede
+bounded prefix builds; each reuses the admitted read and fixed clocks, deriving
+sanitization, masking and progress without I/O or audits. Fit is checked;
+maximum filling is not promised. `maskPemBlockLines` masks separate BEGIN/body/END
+lines; both sources share the budget.
 
 For container follow polls, the signed cursor also carries optional `pemOpen`
 and `pemAfterTime` state. It describes the delivered boundary, not the start of
@@ -184,9 +184,8 @@ raw-prefix count, original query and pre-cut baseline. Stable windows drain
 before overlap advances, including untimed lines and over-capacity timestamp
 groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
 untimed snapshots retain replay progress. Container UID/restarts reset progress,
-and carried PEM state stays conservative. Complete timed windows resume normal
-overlap. Identical saturated replacements remain unobservable; full checkpoints
-report window gaps. Missing remembered lines or over-capacity timestamps also emit
+and PEM recovery clears inconsistent time boundaries while preserving masking. Complete timed windows resume normal
+overlap. Value-identical replacements remain unobservable; full checkpoints report gaps. Missing remembered lines or over-capacity timestamps also emit
 gaps. gRPC `NOT_FOUND` (absent
 Sandbox, or concealed from a non-member) maps to
 `RUNTIME_LOGS_SANDBOX_NOT_FOUND`, never to an empty page. Lines naming two
@@ -251,6 +250,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 03:27: Keep recovery cursors valid and mark full Sandbox windows. (authoring-run/50fe6eec-f154-4d38-9cb5-8e755a82ded9 - dd55627538daa7b7ae43c431ab9db37ae878cc65)
 
 - 2026-10-10 03:05: Drain container windows across serialized cuts. (authoring-run/b68ecd62-c0d7-4fbf-82ee-0f440d8ae84c - 4e23a961fff52cb453a4114afc922278205d3fec)
 

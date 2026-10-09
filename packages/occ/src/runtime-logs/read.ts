@@ -601,6 +601,14 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
         }
       }
     }
+    // Recovery may return older rows from a fresh window. Preserve masking, but
+    // never encode a PEM time boundary inconsistent with the delivered frontier.
+    if (
+      pemAfterTime !== null &&
+      (lastTime === null || compareRuntimeLogTime(pemAfterTime, lastTime) !== 0)
+    ) {
+      pemAfterTime = null;
+    }
     const position: RuntimeLogCursorPosition = {
       viewId,
       pod: pod.name,
