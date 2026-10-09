@@ -408,6 +408,13 @@ function readJournal(kubectl, storage) {
   return journal;
 }
 
+function journalsOf(kubectl) {
+  return kubectl
+    .list("namespaces", undefined, STORAGE_LABEL)
+    .filter((object) => object.metadata.annotations?.[JOURNAL_ANNOTATION] !== undefined)
+    .map((object) => readJournal(kubectl, object.metadata.name));
+}
+
 function writeJournal(kubectl, journal) {
   kubectl.patch("namespaces", journal.storage, undefined, "merge", {
     metadata: { annotations: { [JOURNAL_ANNOTATION]: JSON.stringify(journal) } },
@@ -654,11 +661,7 @@ export async function applyAdoption(
   // A resumed run, or one after another tenant's apply, finds OCC already stopped: keep the
   // replicas and images recorded before the first stop.
   // --namespace-id narrows the plan, not this: any journal holds the pre-stop record.
-  const anyJournal = kubectl
-    .list("namespaces", undefined, STORAGE_LABEL)
-    .filter((object) => object.metadata.annotations?.[JOURNAL_ANNOTATION] !== undefined)
-    .map((object) => readJournal(kubectl, object.metadata.name))
-    .find((journal) => journal.writers !== undefined);
+  const anyJournal = journalsOf(kubectl).find((journal) => journal.writers !== undefined);
   const recorded =
     anyJournal?.writers ??
     Object.fromEntries(
@@ -757,14 +760,19 @@ async function adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs })
     }
   }
   const moving = new Set(journal.claims.map(({ name }) => name));
-  const mounting = () =>
+  const mountingPods = () =>
     kubectl
       .list("pods", tenant)
-      .filter((pod) => [...mountedClaims([pod])].some((claim) => moving.has(claim)))
-      .map((pod) => pod.metadata.name);
+      .filter((pod) => [...mountedClaims([pod])].some((claim) => moving.has(claim)));
+  const mounting = () => mountingPods().map((pod) => pod.metadata.name);
+  // A Gateway that ignores SIGTERM holds its claim for its whole grace period (330 s).
+  const graceMs = Math.max(
+    0,
+    ...mountingPods().map((pod) => (pod.spec?.terminationGracePeriodSeconds ?? 0) * 1_000),
+  );
   await waitFor(() => mounting().length === 0, `Pods in ${tenant} to release their claims`, {
     sleep,
-    timeoutMs,
+    timeoutMs: timeoutMs + graceMs,
     detail: () => `; still mounting: ${mounting().join(", ")}`,
   });
   log(`${tenant}: workloads stopped`);
@@ -1137,8 +1145,9 @@ export async function main(argv, { run } = {}) {
     throw new AdoptError(usage);
   }
   if (options.command === "apply") {
-    const journals = await applyAdoption(kubectl, { ...common, archive: options.archive });
-    const running = journals.flatMap(({ running }) => running);
+    await applyAdoption(kubectl, { ...common, archive: options.archive });
+    // Earlier runs may have adopted some tenants already; list every journal's Agents.
+    const running = journalsOf(kubectl).flatMap(({ running }) => running);
     log(
       "adopted; OCC stays stopped. Upgrade the controller now, then deploy the Agents that " +
         `were running: ${running.join(" ") || "none"}`,
