@@ -12,7 +12,7 @@ real Installation.
 
 ## 2026-10-09: Dedicated Codex deployment requires the main Agent
 
-**What breaks.** Since #PRNUM, Kubernetes Compute refuses to deploy a dedicated
+**What breaks.** Since #1972, Kubernetes Compute refuses to deploy a dedicated
 Codex Agent whose Configuration names no `main` Agent: an `agents.entries`
 roster without a `main` entry, or `agents.defaults.sessionStore.agentId` or
 `agents.defaults.systemAgent.agentId` set to another Agent. These are the rules
