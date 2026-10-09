@@ -2153,11 +2153,12 @@ function nativeRuntimeSnapshot(revision: AgentRevision): NativeRuntimeSnapshot |
 
 // OpenClaw's default Agent (the sole entry, or a named session store or system owner) keeps
 // its own workspace, while the Gateway, file transfer and workspace files address main. A
-// dedicated Codex Gateway binds only main to its Harness workspace node (finding 969), so the
-// same rules apply to it. A refusal, not a rewrite: OCC skips this on status reads. Each
-// refusal names the setting and the rule it breaks, as requireOpenClawRoster's do. It runs
-// after requireOpenClawRoster, so agents and agents.entries are objects when present, and an
-// explicit roster has at least one entry.
+// dedicated Codex Gateway binds only main to its Harness workspace node (finding 969), and a
+// non-main owner would make chats run as another Agent, so the same rules apply to it. A
+// refusal, not a rewrite: OCC skips this on status reads. Each refusal names the setting and
+// the rule it breaks, as requireOpenClawRoster's do. It runs after requireOpenClawRoster, so
+// agents and agents.entries are objects when present, and an explicit roster has at least one
+// entry.
 function requireDedicatedMainAgentDefault(
   configuration: OpenClawConfigurationDocument,
   topology: "Dedicated OpenClaw" | "Dedicated Codex",

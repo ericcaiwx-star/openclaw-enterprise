@@ -6048,19 +6048,20 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
       );
     }
     // main in any case, as OpenClaw matches it, satisfies every rule.
-    assert.doesNotThrow(
-      () =>
-        driver.validateHarnessAuth(
-          harness,
-          revision.harnessAuth,
-          configure({
-            ownership: "explicit",
-            entries: { Main: {}, helper: {} },
-            defaults: { sessionStore: { agentId: "MAIN" }, systemAgent: { agentId: "main" } },
-          }),
-        ),
-      topology,
-    );
+    for (const agents of [
+      {
+        ownership: "explicit",
+        entries: { Main: {}, helper: {} },
+        defaults: { sessionStore: { agentId: "MAIN" }, systemAgent: { agentId: "main" } },
+      },
+      { ownership: "explicit", entries: { Main: {}, helper_2: {}, "re-viewer": {} } },
+      { list: [] },
+    ]) {
+      assert.doesNotThrow(
+        () => driver.validateHarnessAuth(harness, revision.harnessAuth, configure(agents)),
+        `${topology} ${JSON.stringify(agents)}`,
+      );
+    }
   }
   // A stored revision re-prepared after this check reports the refusal, not a generic failure.
   let refusal;
