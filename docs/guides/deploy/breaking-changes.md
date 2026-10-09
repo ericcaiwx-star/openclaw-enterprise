@@ -29,8 +29,8 @@ development Driver). Gateways without chat state are not affected.
 `uses schema version 23; stop active agents and run openclaw doctor --fix`.
 
 **Steps.** Upgrade the controller to #1986 or later (#2009 for Docker
-development), then deploy the Agent again (`occ agent deploy <id>`). With an older controller, scale the Gateway
-Deployment to zero, run
+development), then deploy the Agent again (`occ agent deploy <id>`). With an
+older controller, scale the Gateway Deployment to zero, run
 `OPENCLAW_CONFIG_READONLY=1 openclaw doctor --fix --non-interactive` once in a
 Pod with the Gateway's template and `sleep` as its command, delete that Pod,
 and scale the Deployment back. Doctor logs `v23 -> v24`. Without
