@@ -8,13 +8,12 @@ last_updated_session: "authoring-run/714d166d-82e8-4e99-a0ae-a49c8ee235c7"
 
 ## Overview
 
-The operator prepares a fresh protected bootstrap PVC, installs Helm with
-approved images, PostgreSQL/authentication credentials, trusted Installation
-YAML and network policy inputs, waits for private API and worker readiness, then
-authenticates `/installation` with the retrieved service key. Tenant Agent
-deployment and model-backed TUI proof follow separately.
+Prepare a fresh protected bootstrap PVC; install Helm with approved images,
+PostgreSQL/authentication credentials, trusted Installation YAML and network
+policies. Wait for private API/worker readiness, then authenticate `/installation`
+with the retrieved service key. Tenant deployment/model-backed TUI proof remains separate.
 
-Use the [deployment guide](../guides/deploy.md) for operator commands.
+Use the [deployment guide](../guides/deploy.md) for commands.
 
 ## Entry Points
 
@@ -112,31 +111,29 @@ retrieve generated credentials, or change controller configuration.
 `deploy/helm/openclaw-enterprise/templates/jobs.yaml:8`
 
 `deploy/helm/openclaw-enterprise/templates/bootstrap-networkpolicies.yaml:1`
-installs initialization isolation before the Job starts. Its scoped DNS grant
-and the later dependency, collector, Slack proxy, and Envoy policies allow
-UDP/TCP ports `53` and `5353` to the configured DNS peer; see the
-[Helm DNS contract](../reference/settings/production.md#required-production-controller-environment).
+isolates initialization before the Job starts. Bootstrap, dependency, collector,
+Slack proxy and Envoy policies allow UDP/TCP `53` and `5353` to the configured DNS
+peer ([Helm DNS contract](../reference/settings/production.md#required-production-controller-environment)).
 
 `deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` refuses
 fractional routing ports and custom hostnames Compute rejects. `database.port`
 must be decimal 1–65535 without leading zeros. Empty hostnames retain Service DNS
 derivation for Gateway listeners and Certificate SANs.
 
-The Helm initialization hook preserves the full release name and shortens its
-suffix to Kubernetes' 63-character limit. Both containers mount
-`database.caSecretName` read-only when configured. Migration uses the migrator
-credential; bootstrap uses the lower-privilege application credential, Better Auth
-settings, administrator email, Installation name, and protected output paths.
+The initialization hook retains the full release name and limits its suffix to
+63 characters. Both containers mount `database.caSecretName` read-only when
+configured. Migration uses the migrator credential; bootstrap uses the
+lower-privilege application credential, Better Auth settings, administrator
+email, Installation name and protected output paths.
 
 `scripts/migrate-production.mjs:1`, `scripts/migration-history.mjs:migrateWithHistory`
 
-The migration command verifies the complete SQL source manifest, checks the
+Migration verifies the complete SQL source manifest, checks the
 dedicated role and canonical receipt/catalog state, and holds one advisory lock
-on the connection used by Drizzle's normal transaction. It accepts a fresh
-database, canonical history through migration 0023, or the completed history
+on the connection used by Drizzle's normal transaction. It accepts fresh
+databases, canonical history through migration 0023, or the completed history
 through 0025. Unsupported or mixed development histories fail before migration
-DDL, preventing bootstrap from running. The same preflight serves development
-and production; see [migration history and recovery](../reference/settings/operations.md#migration-history)
+DDL, preventing bootstrap from running. Development and production share this preflight; see [migration history and recovery](../reference/settings/operations.md#migration-history)
 for the read-only check and developer-selected recreation procedure.
 
 `scripts/bootstrap-installation.mjs` creates or verifies the singleton
@@ -323,7 +320,7 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 
 ## Changelog
 
-- 2026-10-10 07:41: Merge hostname and database-CA guidance while retaining bounded database ports. (authoring-run/714d166d-82e8-4e99-a0ae-a49c8ee235c7 - 3bfadece19cdbea1a23574549265953f9d0e54fc)
+- 2026-10-10 07:41: Merge hostname/database-CA guidance and bounded database ports. (authoring-run/714d166d-82e8-4e99-a0ae-a49c8ee235c7 - 3bfadece19cdbea1a23574549265953f9d0e54fc)
 - 2026-10-09 22:28: Refuse invalid database ports before rendering NetworkPolicies. (authoring-run/4363ed9a-5724-4d4f-a14d-f1bc0485443e - dc95c2261d4b46cff8aca703e13e43cdd71d153e)
 
 - 2026-10-09 23:51: Refuse custom Gateway hostnames Compute rejects during production configuration loading. (authoring-run/0d8da3d8-474a-4801-9887-230406a6b7bd - 5b9dd76c497c1b552a2651ee4b984978cdef0a93)
