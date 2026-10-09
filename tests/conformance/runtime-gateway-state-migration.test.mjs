@@ -226,6 +226,7 @@ test("Kubernetes and Docker Gateway programs share the migration step and stay d
 // child processes replaced; agent databases are read from `directory`.
 async function runDockerGateway(directory, doctor = () => assert.fail("Doctor must not run")) {
   const spawned = [];
+  const events = [];
   const errors = [];
   const exits = [];
   const realFs = nodeRequire("node:fs");
@@ -253,7 +254,12 @@ async function runDockerGateway(directory, doctor = () => assert.fail("Doctor mu
     setTimeout: () => ({ unref() {} }),
     require(specifier) {
       if (specifier === "node:fs") {
-        return { ...realFs, chmodSync() {}, mkdirSync() {}, writeFileSync() {} };
+        return {
+          ...realFs,
+          chmodSync() {},
+          mkdirSync() {},
+          writeFileSync: () => events.push("write"),
+        };
       }
       if (specifier === "node:child_process") {
         return {
@@ -261,6 +267,7 @@ async function runDockerGateway(directory, doctor = () => assert.fail("Doctor mu
             const child = new EventEmitter();
             child.kill = () => {};
             spawned.push({ command, args: [...args], env: options.env });
+            events.push(`spawn:${args[1]}`);
             if (args[1] === "doctor") {
               setImmediate(() => doctor(child));
             }
@@ -272,11 +279,12 @@ async function runDockerGateway(directory, doctor = () => assert.fail("Doctor mu
     },
   };
   vm.runInNewContext(DOCKER_GATEWAY_RUNTIME_ENTRYPOINT, context);
+  const synchronousEvents = [...events];
   const gatewayStarted = () => spawned.some(({ args }) => args[1] === "gateway");
   for (let turn = 0; turn < 100 && !gatewayStarted() && exits.length === 0; turn += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
-  return { spawned, errors, exits };
+  return { spawned, events, synchronousEvents, errors, exits };
 }
 
 test("Docker development Gateway starts current state without Doctor", async (t) => {
@@ -286,6 +294,8 @@ test("Docker development Gateway starts current state without Doctor", async (t)
     outcome.spawned.map(({ command, args }) => [command, ...args]),
     [["node", "/app/openclaw.mjs", "gateway", "--port", "8080"]],
   );
+  // Current state adds no await before the spawn.
+  assert.deepEqual(outcome.synchronousEvents, ["write", "spawn:gateway"]);
   assert.deepEqual(outcome.exits, []);
 });
 
@@ -303,7 +313,8 @@ test("Docker development Gateway migrates an older agent database before startin
     ],
   );
   assert.equal(outcome.spawned[0].env.OPENCLAW_CONFIG_READONLY, "1");
-  // The configuration document was written before Doctor and left out of its environment.
+  // Doctor reads the configuration document written before it, not its environment copy.
+  assert.deepEqual(outcome.events, ["write", "spawn:doctor", "spawn:gateway"]);
   assert.equal(outcome.spawned[0].env.OPENCLAW_CONFIG_JSON, undefined);
   assert.deepEqual(outcome.exits, []);
   assert.ok(

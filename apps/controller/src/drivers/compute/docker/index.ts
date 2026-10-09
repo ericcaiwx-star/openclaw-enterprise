@@ -247,10 +247,16 @@ const outdatedDatabases = outdatedAgentDatabases();
 if (outdatedDatabases.length === 0) {
   startGateway();
 } else {
-  migrateGatewayState(outdatedDatabases).then((migrated) => {
-    if (migrated) startGateway();
-    else process.exit(1);
-  });
+  migrateGatewayState(outdatedDatabases).then(
+    (migrated) => {
+      if (migrated) startGateway();
+      else process.exit(1);
+    },
+    (error) => {
+      console.error("Gateway state migration failed: " + (error?.message ?? error));
+      process.exit(1);
+    },
+  );
 }
 } catch (error) {
   if (!holdPluginApproverConfigurationFailure(error)) throw error;

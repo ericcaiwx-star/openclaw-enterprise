@@ -141,6 +141,9 @@ the gateway runs the same agent database migration as a
 read-only, when an agent database uses an older schema. If a database is still
 older afterwards, the container logs `Gateway state migration failed` and exits
 without starting OpenClaw, and the deployment fails as an unready container.
+The Driver then removes the container, so Doctor's output survives only
+through the Docker logging address. A slow migration can also outlast the
+Driver's 120-second readiness budget; deploying again retries it.
 
 ## Gateway authentication
 
