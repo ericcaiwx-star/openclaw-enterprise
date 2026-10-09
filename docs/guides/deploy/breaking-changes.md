@@ -229,10 +229,13 @@ the target release, with cluster-admin `kubectl` for the cluster
    not create in the old namespace, a name taken in the new one, or a missing
    [tenant RoleBinding](production-agents.md#grant-tenant-rolebindings) in the
    `oce-gateways-*` namespace. Grant the bindings there, move or delete foreign
-   objects (`--drop-resource <kind>` deletes a kind you checked is disposable),
-   or use the fallback below for that tenant (`--namespace-id` selects tenants).
-   A Codex Agent signed in with OAuth must sign in again after the move; plan
-   names them, and `--accept-oauth-reconnect` accepts that.
+   objects (`--drop-resource <resource>`, as the refusal names it, deletes a
+   kind you checked is disposable), or use the fallback below for that tenant
+   (`--namespace-id` selects tenants). Codex OAuth sign-ins are bound to the
+   old claim, so plan refuses those Agents unless you pass
+   `--accept-oauth-reconnect`. Their deploy in step 5 then fails until someone
+   connects again, and the new sign-in clears the Agent's Codex home, including
+   its earlier sessions; the export fallback loses those too.
 
 2. Back up the volumes the plan lists with your storage's snapshot or backup
    tool. The script does not back them up.

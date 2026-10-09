@@ -30,6 +30,7 @@ const RESOURCES = {
   serviceaccounts: { kind: "ServiceAccount", apiVersion: "v1" },
   services: { kind: "Service", apiVersion: "v1" },
   pods: { kind: "Pod", apiVersion: "v1" },
+  "pods.metrics.k8s.io": { kind: "PodMetrics", apiVersion: "metrics.k8s.io/v1beta1" },
   events: { kind: "Event", apiVersion: "v1" },
   "deployments.apps": { kind: "Deployment", apiVersion: "apps/v1" },
   "rolebindings.rbac.authorization.k8s.io": {
@@ -525,6 +526,8 @@ function releasedInstallation({ reclaimPolicy = "Delete" } = {}) {
     },
     spec: {},
   });
+  // metrics-server lists every Pod again, without its labels.
+  put("pods.metrics.k8s.io", { metadata: { name: "sandbox-0", namespace: tenantNamespace } });
   return cluster;
 }
 
@@ -636,6 +639,13 @@ test("apply adopts the storage namespace, moves claims by rebind and finalize re
   // A second apply has nothing left to do.
   assert.deepEqual(await applyAdoption(kubectl, { archive, ...fast }), []);
   await assert.rejects(finalizeAdoption(kubectl, fast), /upgrade it first/);
+  // Only the archive apply used can bring the routes back; a wrong one changes nothing.
+  const adopted = structuredClone(get("namespaces", undefined, storage));
+  await assert.rejects(
+    revertAdoption(kubectl, { archive: `${archive}-other`, ...fast }),
+    /was adopted with --archive/,
+  );
+  assert.deepEqual(get("namespaces", undefined, storage), adopted);
 
   // The upgrade helper starts the new release.
   for (const component of ["api", "worker"]) {
@@ -647,6 +657,14 @@ test("apply adopts the storage namespace, moves claims by rebind and finalize re
     revertAdoption(kubectl, { archive, ...fast }),
     /revert is only possible before/,
   );
+  // A managed Secret apply never copied would be lost with the namespace.
+  cluster.put("secrets", {
+    metadata: { name: "late-secret", namespace: tenantNamespace, ...owned() },
+    type: "Opaque",
+    data: {},
+  });
+  await assert.rejects(finalizeAdoption(kubectl, fast), /secrets\/late-secret/);
+  cluster.store.delete(`secrets/${tenantNamespace}/late-secret`);
   await finalizeAdoption(kubectl, fast);
   assert.equal(get("namespaces", undefined, tenantNamespace), undefined);
   assert.equal(

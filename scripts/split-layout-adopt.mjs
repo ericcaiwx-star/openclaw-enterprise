@@ -110,7 +110,7 @@ export function createKubectl(run, { warn = () => {} } = {}) {
       const args = ["api-resources", "--verbs=list", "--namespaced", "-o", "name"];
       const result = run(args);
       if (result.status !== 0 && String(result.stdout).trim() === "") {
-        call(args);
+        throw new AdoptError(`kubectl api-resources: ${String(result.stderr).trim()}`);
       }
       if (result.status !== 0) {
         warn(`kubectl api-resources: ${String(result.stderr).trim()}`);
@@ -312,7 +312,10 @@ export function planTenant(
     if (kubectl.get("persistentvolumeclaims", name, plan.storage) !== undefined) {
       refuse(`${plan.storage} already has PersistentVolumeClaim ${name}`);
     }
-    claimUids.add(kubectl.get("persistentvolumeclaims", name, plan.tenant)?.metadata.uid);
+    const uid = kubectl.get("persistentvolumeclaims", name, plan.tenant)?.metadata.uid;
+    if (uid !== undefined) {
+      claimUids.add(uid);
+    }
   }
   // The moved claim gets a new UID, so an OAuth source handed to it needs a new sign-in.
   for (const namespace of [plan.storage, plan.tenant]) {
@@ -717,7 +720,7 @@ async function adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs })
   const save = () => writeJournal(kubectl, journal);
   // The plan ran while OCC still served. With OCC stopped nothing new appears, so take in
   // what appeared meanwhile; anything adoption does not handle stops here, before any change.
-  for (const resource of kubectl.resources()) {
+  for (const resource of kubectl.resources().filter(listedResource)) {
     const kind = resource.split(".")[0];
     if (!["persistentvolumeclaims", "secrets", "pods", ...ROUTE_RESOURCES].includes(kind)) {
       continue;
@@ -731,7 +734,8 @@ async function adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs })
       if (verdict === "move-claim" && !journal.claims.some((entry) => entry.name === name)) {
         journal.claims.push(claimEntry(kubectl, journal, name));
       } else if (verdict === "copy-secret" && !(name in journal.secrets)) {
-        journal.secrets[name] = null;
+        journal.secrets[name] =
+          kubectl.get("secrets", name, storage) === undefined ? null : "preexisting";
       } else if (
         verdict === "route" &&
         !journal.routesArchived &&
@@ -871,6 +875,11 @@ export async function revertAdoption(
     log("nothing to revert");
     return [];
   }
+  for (const journal of journals) {
+    if (journal.routesArchived && journal.archive !== resolve(archive)) {
+      throw new AdoptError(`${journal.storage} was adopted with --archive ${journal.archive}`);
+    }
+  }
   const writers = writerDeployments(kubectl, occNamespace);
   for (const component of WRITERS) {
     const recorded = journals[0].writers[component];
@@ -1008,8 +1017,15 @@ export async function finalizeAdoption(
       const foreign = [];
       for (const resource of kubectl.resources().filter(listedResource)) {
         for (const object of kubectl.list(resource, tenant)) {
-          if (classify(resource, object, id, journal.dropResources) === "refuse") {
-            foreign.push(`${resource}/${object.metadata.name}`);
+          const name = object.metadata.name;
+          const verdict = classify(resource, object, id, journal.dropResources);
+          if (
+            verdict === "refuse" ||
+            (verdict === "copy-secret" && !(name in journal.secrets)) ||
+            (verdict === "route" &&
+              !journal.routes.some((route) => route.resource === resource && route.name === name))
+          ) {
+            foreign.push(`${resource}/${name}`);
           }
         }
       }
