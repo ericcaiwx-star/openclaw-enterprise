@@ -229,11 +229,13 @@ the target release, with cluster-admin `kubectl` for the cluster
    not create in the old namespace, a name taken in the new one, or a missing
    [tenant RoleBinding](production-agents.md#grant-tenant-rolebindings) in the
    `oce-gateways-*` namespace. Grant the bindings there, move or delete foreign
-   objects, or use the fallback below for that tenant (`--namespace-id`
-   selects tenants).
+   objects (`--drop-resource <kind>` deletes a kind you checked is disposable),
+   or use the fallback below for that tenant (`--namespace-id` selects tenants).
+   A Codex Agent signed in with OAuth must sign in again after the move; plan
+   names them, and `--accept-oauth-reconnect` accepts that.
 
-2. Back up the claims the plan lists with your storage's snapshot or backup
-   tool.
+2. Back up the volumes the plan lists with your storage's snapshot or backup
+   tool. The script does not back them up.
 3. Adopt. This stops OCC's API and worker and the old namespace's workloads,
    and leaves OCC stopped:
 
@@ -255,6 +257,9 @@ the target release, with cluster-admin `kubectl` for the cluster
    ```bash
    node scripts/split-layout-adopt.mjs finalize --yes
    ```
+
+   It refuses while the controller still runs the images `apply` recorded,
+   and while the old namespace holds anything that would be lost with it.
 
 **Fallback: export and re-create.** For tenants that can't be adopted.
 
