@@ -1,7 +1,7 @@
 ---
 created: 2026-09-08
-updated: 2026-10-07
-last_updated_session: authoring-run/bc793557-585a-4c1a-9463-b2c55682ea02
+updated: 2026-10-10
+last_updated_session: codex/thirty-compute-07-oct10
 ---
 
 # Agent Plugin Deployment Flow
@@ -236,6 +236,9 @@ revoke access to a still-running old Harness or an established connection. For a
 changed peer, the supervisor publishes non-ready, restarts only OpenClaw and
 rechecks peer startup, Pod, successes and failures after it serves. Changed or
 unavailable peers trigger container restart.
+When the initial configuration is writable, recovery rebuilds only the wrapper's
+unchanged generated Codex bridge from its initial baseline. Other native admin
+edits survive; an edited bridge retains the existing conflict refusal.
 During an outage, the supervisor reports unready. Kubernetes propagates that
 state asynchronously, so the signal alone is not a per-request traffic fence.
 If OpenClaw exits while the supervisor waits for its peer, the wrapper exits
@@ -305,6 +308,8 @@ deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 04:49: Preserve writable native configuration during in-place Harness peer recovery. (codex/thirty-compute-07-oct10 - 8e5a06ce)
 
 - 2026-10-07 19:30: Pass the admitted model to native Codex before reviewer validation. (authoring-run/bc793557-585a-4c1a-9463-b2c55682ea02 - b1be0e0602b9db1035a689ca2a4ac4982f6d0b3b)
 

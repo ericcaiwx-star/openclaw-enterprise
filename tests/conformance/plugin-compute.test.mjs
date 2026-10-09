@@ -3873,8 +3873,11 @@ test("Codex gateway supervisor waits for its Harness plugin status without a dea
 // Runs the Kubernetes Codex Gateway wrapper against a real HTTP Harness peer
 // status endpoint and a real readiness endpoint standing in for OpenClaw. Only
 // process spawning and the filesystem are substituted.
-async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
+async function startCodexGatewaySupervisor(t, { bindingDeviceId, writableConfig = false } = {}) {
   const peerHttp = await import("node:http");
+  const configurationPath = writableConfig
+    ? "/home/node/.openclaw/openclaw.json"
+    : "/etc/openclaw/openclaw.json";
   const revisionId = "revision-plugin-compute-1";
   const initialFailure = {
     pluginId: "codex-plugin:linear@openai-curated-remote",
@@ -3903,7 +3906,7 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
     statusHandler: undefined,
     files: new Map([
       [
-        "/etc/openclaw/openclaw.json",
+        configurationPath,
         JSON.stringify({
           gateway: { port: 8080 },
           plugins: { installs: { keep: { source: "npm" } }, load: { paths: ["existing"] } },
@@ -3963,7 +3966,7 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
         APP_SERVER_URL: `ws://127.0.0.1:${peerPort}`,
         HOME: "/home/node",
         OPENCLAW_AGENT_REVISION_ID: revisionId,
-        OPENCLAW_CONFIG_PATH: "/etc/openclaw/openclaw.json",
+        OPENCLAW_CONFIG_PATH: configurationPath,
         OPENCLAW_GATEWAY_PORT: String(gatewayPort),
         OPENCLAW_PLUGIN_RUNTIME_JSON: JSON.stringify({
           manifest: pluginRuntimeSpecForRevision(
@@ -4076,6 +4079,65 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
   await waitForCondition("gateway supervisor start", () => fixture.children.length === 1);
   return fixture;
 }
+
+test("Codex gateway supervisor preserves native edits when its initial config is writable", async (t) => {
+  const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const [first] = gateway.children;
+  const path = "/home/node/.openclaw/openclaw.json";
+  const edited = JSON.parse(gateway.files.get(path));
+  edited.messages = { responsePrefix: "Native admin edit" };
+  gateway.files.set(path, JSON.stringify(edited));
+  await gateway.pollPeer();
+  assert.equal(gateway.children.length, 1, "the same peer keeps its native process and edits");
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-2",
+    podUid: "agent-pod-2",
+    successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+    failures: [],
+  };
+  const respawn = gateway.pollPeer();
+  await waitForCondition("the stale Gateway stop", () => first.killed.length === 1);
+  first.exit(null, "SIGTERM");
+  await respawn;
+  assert.equal(gateway.children.length, 2);
+  const replacement = gateway.children[1];
+  assert.equal(replacement.config.messages.responsePrefix, "Native admin edit");
+  assert.equal(
+    replacement.config.plugins.entries.codex.config.codexPlugins.plugins.linear.enabled,
+    true,
+  );
+  assert.equal(replacement.token, gateway.token("agent-startup-2"));
+  assert.equal(gateway.status().phase, "ready");
+  assert.deepEqual(gateway.exits, []);
+});
+
+test("Codex gateway supervisor retains refusal of a native-edited managed bridge", async (t) => {
+  const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const [first] = gateway.children;
+  const path = "/home/node/.openclaw/openclaw.json";
+  const edited = JSON.parse(gateway.files.get(path));
+  edited.plugins.entries.codex.config.codexPlugins.plugins.linear.name = "Native edit";
+  gateway.files.set(path, JSON.stringify(edited));
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-2",
+    podUid: "agent-pod-2",
+    successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+    failures: [],
+  };
+  const respawn = gateway.pollPeer();
+  await waitForCondition("the stale Gateway stop", () => first.killed.length === 1);
+  first.exit(null, "SIGTERM");
+  await respawn;
+  assert.equal(gateway.children.length, 1, "an operator edit cannot be overwritten by recovery");
+  assert.equal(
+    JSON.parse(gateway.files.get(path)).plugins.entries.codex.config.codexPlugins.plugins.linear
+      .name,
+    "Native edit",
+  );
+  assert.deepEqual(gateway.exits, [1]);
+});
 
 test("Codex gateway supervisor respawns OpenClaw in place for a changed Harness peer", async (t) => {
   const gateway = await startCodexGatewaySupervisor(t);

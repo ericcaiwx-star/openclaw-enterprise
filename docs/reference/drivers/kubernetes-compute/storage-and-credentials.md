@@ -201,7 +201,9 @@ opt-in shape, including ordinary routed gateways, keep the read-only path.
 
 Native edits change only the copy; Pod replacement or Agent redeployment
 restores the managed snapshot, while the persistent gateway and workspace claims
-retain their data. Edits stay outside OCE Configuration and AgentRevisions; see
+retain their data. In-place Harness peer recovery retains unrelated edits and
+rebuilds only the unchanged wrapper-generated Codex bridge; explicit bridge edits
+retain the existing conflict refusal. Edits stay outside OCE Configuration and AgentRevisions; see
 the [native admin feature boundary](../../agent-native-admin.md#native-authority-and-drift)
 and [deployment procedure](../../../guides/deploy/native-admin.md).
 

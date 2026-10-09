@@ -2580,6 +2580,11 @@ const followsPeerStatus =
   pluginRuntime?.manifest?.kind === "codex" && hasEnabledPluginSelections(pluginRuntime);
 // A respawn configures from the file a container restart would start from.
 const initialConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+const writableInitialConfig = followsPeerStatus && initialConfigPath === writableOpenClawConfigPath();
+const codexBridgePath = ["plugins", "entries", "codex", "config", "codexPlugins"];
+const originalCodexBridge = writableInitialConfig
+  ? objectAtPath(readOpenClawConfig(), codexBridgePath) : undefined;
+let appliedCodexBridge;
 
 // Write the configuration the native Gateway starts with. It depends only on the
 // admitted configuration, the Harness peer status and the workspace node binding,
@@ -2587,6 +2592,17 @@ const initialConfigPath = process.env.OPENCLAW_CONFIG_PATH;
 // installs nothing: the Harness installs the plugins; the Gateway applies its result.
 function configureGateway(peerStatus) {
   process.env.OPENCLAW_CONFIG_PATH = initialConfigPath;
+  // Native admin edits survive a process respawn. Reset only our previous bridge
+  // when this source is also our write target and nobody edited that bridge.
+  if (writableInitialConfig && appliedCodexBridge !== undefined) {
+    const config = readOpenClawConfig();
+    const codexConfig = objectAtPath(config, codexBridgePath.slice(0, -1));
+    if (codexConfig !== undefined && pluginDeepEqual(codexConfig.codexPlugins, appliedCodexBridge)) {
+      if (originalCodexBridge === undefined) delete codexConfig.codexPlugins;
+      else codexConfig.codexPlugins = JSON.parse(JSON.stringify(originalCodexBridge));
+      writeOpenClawConfig(config);
+    }
+  }
   configureNativeWorkerProfile();
   const peerFailures = peerStatus?.failures ?? readPluginFailuresFromEnvironment();
   if (peerStatus !== undefined) {
@@ -2602,6 +2618,9 @@ function configureGateway(peerStatus) {
   }
   if (peerStatus !== undefined) {
     pluginResult.successfulPluginIds = peerStatus.successfulPluginIds;
+  }
+  if (writableInitialConfig) {
+    appliedCodexBridge = objectAtPath(readOpenClawConfig(), codexBridgePath);
   }
   // A native worker profile, or a Gateway whose controller cannot read its runtime
   // status, receives its node in the environment; the others read the binding file.
