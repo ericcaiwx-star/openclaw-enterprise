@@ -158,8 +158,8 @@ provider, not IAM, Compute, OCC, or the Harness.
 - `403`: Missing exact OCC account permission.
 - `404`: Account or Agent is outside its exact Namespace.
 - `409 RESOURCE_CONFLICT`: Duplicate account name, existing credential,
-  referenced-account deletion, missing credential, or unsupported Harness or
-  OAuth deployment, or mismatched managed Backend binding.
+  leftover credential Secret, referenced-account deletion, missing credential,
+  or unsupported Harness or OAuth deployment, or mismatched managed Backend binding.
 - `409 SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED`: The Installation has no ChatGPT
   Backend, so issuance, deploying an Agent bound to an account without an
   access token, and deleting an account that holds one cannot succeed. Configure the
@@ -167,8 +167,32 @@ provider, not IAM, Compute, OCC, or the Harness.
 - Provider denial or Kubernetes failure: Creation fails closed; compensation deletes
   only the newly created exact provider account, provider credential, or
   account-owned Secret when durable state confirms it was not committed.
+- Unknown provider outcome: when an account create's reply is lost or unreadable,
+  OCC cannot prove which provider account is its own (OCC requires only write
+  scope and has no account read, and a name is not proof), so it deletes nothing
+  and answers `503`. Check the workspace for an orphan named
+  `<account name>-sa_…` whose ID no OCC account has. A reply that names a disabled
+  account in this workspace removes that account. Provider deletion cannot be undone: if it applied but the request
+  failed, the account stays in OCC and a retried delete completes.
+- Invalid credential reply: a reply that names a credential under the requested
+  account in this workspace revokes that credential before failing; if that fails,
+  it answers `503`, and the API log says the credential could not be removed.
+- Unknown Secret outcome: a failed token Secret create deletes the account-owned
+  Secret holding this request's token, so issuance can be retried. If it cannot
+  read or delete that Secret, it answers `503`. The leftover Secret then blocks
+  each retry with a `409 RESOURCE_CONFLICT` that names it: `service-account-` plus
+  the first 32 hex digits of the account ID's SHA-256, in the Namespace's control
+  namespace (omitted when that name is long). An operator deletes it, for example
+  `kubectl delete secret -n <namespace> <name>`, then retries. The failed issuance
+  still revokes its token.
 - Expired token: Execution fails closed; automated refresh and rotation are
   not implemented.
+
+Every `503 DEPENDENCY_UNAVAILABLE` above answers the generic "A required platform
+dependency is unavailable." The specific cause, such as "could not be removed" or
+"outcome is unknown", is only in the API's own log: a WARN `http.dependency_unavailable`
+record with the response's `meta.requestId`, the route, the error class and message,
+and its causes' class and code. The logging Collector exports only the event and request ID.
 
 ## Evidence and related references
 

@@ -302,6 +302,64 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
   );
 });
 
+test(
+  "gateway routing refuses fractional YAML ports before emitting resources",
+  tooling,
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "oce-routing-ports-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const valuesFile = join(directory, "ports.yaml");
+    const routingValues = {
+      ...gatewayRoutingValues,
+      "gatewayRouting.sandbox.enabled": "true",
+      "gatewayRouting.sandbox.domain": "previews.example.test",
+      "gatewayRouting.sandbox.tlsSecretName": "preview-wildcard",
+      "gatewayRouting.sandbox.ingressPeers[0].namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name":
+        "public-ingress",
+    };
+    // Values files preserve numeric scalars; --set passes a fractional value as a string.
+    for (const [key, value] of [
+      ["tenantGatewayPort", 8080.5],
+      ["envoyHttpsTargetPort", 10443.5],
+      ["sandbox.listenerPort", 8443.5],
+    ]) {
+      const field = key.startsWith("sandbox.")
+        ? `  sandbox:\n    listenerPort: ${value}\n`
+        : `  ${key}: ${value}\n`;
+      await writeFile(valuesFile, `gatewayRouting:\n${field}`);
+      await assert.rejects(
+        render(routingValues, { valuesFiles: [valuesFile] }),
+        ({ code, stderr }) => code !== 0 && stderr.includes(`gatewayRouting.${key}`),
+        key,
+      );
+    }
+    await writeFile(
+      valuesFile,
+      "gatewayRouting:\n  tenantGatewayPort: 8081\n  envoyHttpsTargetPort: 10444\n  sandbox:\n    listenerPort: 8444\n",
+    );
+    const rendered = await resources(
+      (await render(routingValues, { valuesFiles: [valuesFile] })).stdout,
+    );
+    assert.equal(
+      rendered
+        .find((item) => item.kind === "Gateway")
+        .spec.listeners.find((item) => item.name === "sandbox").port,
+      8444,
+    );
+    const policies = rendered.filter((item) => item.kind === "NetworkPolicy");
+    for (const expected of [8081, 10444, 8444]) {
+      assert.ok(
+        policies.some((policy) =>
+          [...(policy.spec.ingress ?? []), ...(policy.spec.egress ?? [])].some((rule) =>
+            rule.ports?.some((port) => port.port === expected),
+          ),
+        ),
+        `NetworkPolicy port ${expected}`,
+      );
+    }
+  },
+);
+
 // Evaluate the selector-only, numeric-port ingress rules rendered by this chart.
 // This checks additive policy semantics, not live CNI enforcement.
 function matchesPolicySelector(selector = {}, labels = {}) {
@@ -614,6 +672,135 @@ test("production native examples satisfy the current Helm, Installation, and PVC
   assert.deepEqual(bootstrapClaim.spec.accessModes, ["ReadWriteOnce"]);
   assert.equal(bootstrapClaim.spec.resources.requests.storage, "1Gi");
 });
+
+test("Helm refuses a Gateway name Compute refuses", tooling, async () => {
+  await assert.rejects(
+    execute(
+      helm,
+      [
+        "template",
+        "oce",
+        "deploy/helm/openclaw-enterprise",
+        "--namespace",
+        "openclaw-system",
+        "--values",
+        "deploy/examples/production/values.yaml",
+        "--set",
+        "gatewayRouting.gatewayName=Bad_Name",
+      ],
+      { cwd: repository },
+    ),
+    /gatewayRouting\.gatewayName must be a DNS-safe Kubernetes resource name/,
+  );
+  await assert.rejects(
+    execute(
+      helm,
+      [
+        "template",
+        "oce",
+        "deploy/helm/openclaw-enterprise",
+        "--namespace",
+        "openclaw-system",
+        "--values",
+        "deploy/examples/production/values.yaml",
+        "--set-string",
+        "gatewayRouting.gatewayName= oce-agent-gateways ",
+      ],
+      { cwd: repository },
+    ),
+    /gatewayRouting\.gatewayName must be a DNS-safe Kubernetes resource name/,
+  );
+  const sixtyFour = "a".repeat(64);
+  await assert.rejects(
+    execute(
+      helm,
+      [
+        "template",
+        "oce",
+        "deploy/helm/openclaw-enterprise",
+        "--namespace",
+        "openclaw-system",
+        "--values",
+        "deploy/examples/production/values.yaml",
+        "--set-string",
+        `gatewayRouting.gatewayName=${sixtyFour}`,
+      ],
+      { cwd: repository },
+    ),
+    /gatewayRouting\.gatewayName must be a DNS-safe Kubernetes resource name/,
+  );
+  const sixtyThree = "a".repeat(63);
+  const { stdout } = await execute(
+    helm,
+    [
+      "template",
+      "oce",
+      "deploy/helm/openclaw-enterprise",
+      "--namespace",
+      "openclaw-system",
+      "--values",
+      "deploy/examples/production/values.yaml",
+      "--set-string",
+      `gatewayRouting.gatewayName=${sixtyThree}`,
+    ],
+    { cwd: repository, maxBuffer: 2_000_000 },
+  );
+  const gateway = (await resources(stdout)).find((object) => object.kind === "Gateway");
+  assert.equal(gateway?.metadata.name, sixtyThree);
+});
+
+test(
+  "the execution chart refuses a harness Gateway name or Envoy namespace Compute refuses",
+  tooling,
+  async () => {
+    const template = (field, value) =>
+      execute(
+        helm,
+        [
+          "template",
+          "oce",
+          "deploy/helm/openclaw-execution",
+          "--set",
+          "routing.hostname=agents.example.invalid",
+          "--set",
+          "routing.gatewayClassName=private-envoy-gateway",
+          "--set",
+          "routing.tlsSecretName=agents-tls",
+          "--set",
+          "routing.controlPlaneCidrs[0]=198.51.100.0/24",
+          "--set-string",
+          `routing.${field}=${value}`,
+        ],
+        { cwd: repository, maxBuffer: 2_000_000 },
+      );
+    // Compute validateGatewayName: a DNS subdomain, at most 63 characters (a label value).
+    for (const gatewayName of ["Bad_Name", "-gateways", "gateways-", "a..b", "a".repeat(64)]) {
+      await assert.rejects(
+        template("gatewayName", gatewayName),
+        /routing\.gatewayName must be a DNS-safe Kubernetes resource name of at most 63 characters/,
+        gatewayName,
+      );
+    }
+    // Compute isKubernetesNamespaceName: a DNS label, at most 63 characters, no dots.
+    for (const envoyNamespace of ["Envoy", "envoy.system", "-envoy", "envoy-", "a".repeat(64)]) {
+      await assert.rejects(
+        template("envoyNamespace", envoyNamespace),
+        /routing\.envoyNamespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/,
+        envoyNamespace,
+      );
+    }
+    for (const gatewayName of ["gateways.example", "a".repeat(63)]) {
+      const gateways = await resources((await template("gatewayName", gatewayName)).stdout);
+      assert.equal(
+        gateways.find((object) => object.kind === "Gateway")?.metadata.name,
+        gatewayName,
+      );
+    }
+    const envoyNamespace = "a".repeat(63);
+    const envoy = await resources((await template("envoyNamespace", envoyNamespace)).stdout);
+    assert.ok(envoy.some((object) => object.metadata?.namespace === envoyNamespace));
+  },
+);
 
 test("production Helm values example renders the backendless default chart", tooling, async () => {
   const { stdout } = await execute(
@@ -3973,12 +4160,12 @@ test(
   "the chart refuses control-plane node selectors the volume helper refuses",
   tooling,
   async () => {
-    const valueMessage =
-      /controlPlane\.nodeSelector values must be nonempty Kubernetes label values/;
+    const valueMessage = /controlPlane\.nodeSelector values must be Kubernetes label values/;
     const keyMessage = /controlPlane\.nodeSelector keys must be Kubernetes label keys/;
     for (const [key, value, message] of [
       ["oce-role", "not valid", valueMessage],
-      ["oce-role", "", valueMessage],
+      ["oce-role", "-control", valueMessage],
+      ["oce-role", "control.", valueMessage],
       ["oce-role", "a".repeat(64), valueMessage],
       ["a-", "control", keyMessage],
       ["bad key", "control", keyMessage],
@@ -4006,10 +4193,113 @@ test(
         strings: {
           "controlPlane.nodeSelector.oce-role": "control",
           "controlPlane.nodeSelector.topology\\.kubernetes\\.io/zone": "east",
+          "controlPlane.nodeSelector.node-role\\.kubernetes\\.io/infra": "",
+          "controlPlane.nodeSelector.edge": "a_b.c-d",
         },
       },
     );
     assert.match(stdout, /oce-role: control/);
     assert.match(stdout, /topology\.kubernetes\.io\/zone: east/);
+    // Kubernetes allows empty label values; charts before #1848 rendered them.
+    assert.match(stdout, /node-role\.kubernetes\.io\/infra: ""/);
+    assert.match(stdout, /edge: a_b\.c-d/);
+  },
+);
+
+test("execution chart refuses a harness hostname Compute refuses", tooling, async () => {
+  const template = (...values) =>
+    execute(
+      helm,
+      [
+        "template",
+        "oce",
+        "deploy/helm/openclaw-execution",
+        "--set",
+        "routing.gatewayClassName=private-envoy-gateway",
+        "--set",
+        "routing.tlsSecretName=agents-tls",
+        "--set-json",
+        'routing.controlPlaneCidrs=["198.51.100.0/24"]',
+        ...values,
+      ],
+      { cwd: repository, maxBuffer: 2_000_000 },
+    );
+  await assert.rejects(
+    template("--set", "routing.hostname=Bad_Host"),
+    /routing\.hostname must be a DNS hostname without a port or path/,
+  );
+  // --set reads these as a number and a boolean; the chart names the field instead of failing in len.
+  for (const hostname of ["123", "true"]) {
+    await assert.rejects(
+      template("--set", `routing.hostname=${hostname}`),
+      /routing\.hostname must be a string: quote a hostname YAML reads as a number or boolean, or pass it with --set-string/,
+      hostname,
+    );
+  }
+  for (const hostname of ["123", "agents.example.invalid"]) {
+    const { stdout } = await template("--set-string", `routing.hostname=${hostname}`);
+    const gateway = (await resources(stdout)).find((object) => object.kind === "Gateway");
+    assert.equal(gateway?.spec.listeners[0].hostname, hostname);
+  }
+});
+
+test(
+  "execution chart refuses an Envoy HTTPS port or DNS namespace the cluster refuses",
+  tooling,
+  async () => {
+    const template = (...values) =>
+      execute(
+        helm,
+        [
+          "template",
+          "oce",
+          "deploy/helm/openclaw-execution",
+          "--set",
+          "routing.hostname=agents.example.invalid",
+          "--set",
+          "routing.gatewayClassName=private-envoy-gateway",
+          "--set",
+          "routing.tlsSecretName=agents-tls",
+          "--set-json",
+          'routing.controlPlaneCidrs=["198.51.100.0/24"]',
+          ...values,
+        ],
+        { cwd: repository, maxBuffer: 2_000_000 },
+      );
+    const proxyPolicy = async (stdout) =>
+      (await resources(stdout)).find(
+        (object) => object.kind === "NetworkPolicy" && object.metadata.name === "oce-harness-proxy",
+      );
+    // Compute validatePort takes integers from 1 to 65535; Sprig int would truncate 10443.5.
+    // Sprig int turns a value too big for 64 bits into 0, which the lower bound catches.
+    for (const port of ["0", "65536", "10443.5", "-1", "true", "99999999999999999999"]) {
+      await assert.rejects(
+        template("--set", `routing.envoyHttpsTargetPort=${port}`),
+        /routing\.envoyHttpsTargetPort must be an integer TCP port from 1 to 65535/,
+        port,
+      );
+    }
+    for (const port of [1, 65535]) {
+      const policy = await proxyPolicy(
+        (await template("--set", `routing.envoyHttpsTargetPort=${port}`)).stdout,
+      );
+      assert.equal(policy?.spec.ingress[0].ports[0].port, port);
+    }
+    // The DNS egress rule selects kubernetes.io/metadata.name, which holds a Namespace name.
+    for (const namespace of ["Kube-System", "kube.system", "-dns", "a".repeat(64)]) {
+      await assert.rejects(
+        template("--set-string", `dns.namespace=${namespace}`),
+        /dns\.namespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/,
+        namespace,
+      );
+    }
+    const namespace = "a".repeat(63);
+    const policy = await proxyPolicy(
+      (await template("--set-string", `dns.namespace=${namespace}`)).stdout,
+    );
+    assert.equal(
+      policy?.spec.egress[0].to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"],
+      namespace,
+    );
   },
 );

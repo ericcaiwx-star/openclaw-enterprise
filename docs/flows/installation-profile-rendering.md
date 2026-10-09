@@ -1,7 +1,7 @@
 ---
 created: 2026-09-28
 updated: 2026-10-09
-last_updated_session: authoring-run/2e2ce65b-ab3e-4466-8f24-602241488e52
+last_updated_session: authoring-run/9a3fd823-79af-431c-b422-44c0ba255013
 ---
 
 # Installation Profile Rendering Flow
@@ -88,20 +88,45 @@ provisioning for `codex_pat` is optional and renders only when `codex.managedSer
 supplied.
 
 Preflight checks `controlPlane.releaseName` against Helm's lowercase release-name
-syntax and 53-character maximum. The shared `digestImage` check in `buildRendered`
+syntax and 53-character maximum. It also requires `controlPlane.namespace` and,
+when set, `controlPlane.envoyNamespace` to be Kubernetes namespace names: DNS
+labels of at most 63 characters, with no dots. The Compute driver applies the
+same rule to `gatewayNamespace` and `envoyNamespace`, and the chart to
+`gatewayRouting.envoyNamespace`. `controlPlane.apiClients[].namespace` and
+`controlPlane.dns.namespace` follow the same rule, as the chart does for
+`api.clients` and `dns`: NetworkPolicies select those peers by
+`kubernetes.io/metadata.name`, which only holds Namespace names. A dot, a
+slash, an uppercase letter, or a longer name fails before any deployable file
+is written. The shared `digestImage` check in `buildRendered`
 requires the literal `sha256` algorithm and 64 lowercase hexadecimal characters for
 `controlPlane.controllerImage`, `runtime.image`, and enabled `repository.image`.
+`controllerDigestImage` additionally applies the chart and bootstrap-volume
+helper's reference rule to `controlPlane.controllerImage`: a letter or digit
+first, then letters, digits, `.`, `_`, `:`, `/`, or `-` before the digest.
+This controller-specific rule does not change runtime or repository image inputs.
+
 Noncanonical digest casing adds a field-specific diagnostic; the final error
 branch writes only `preflight.json`, leaving no deployable artifacts.
 
+`controlPlane.clusterName` follows the Name rule the chart and the bootstrap Job
+already apply to `installation.name`: 1 to 200 characters, with no leading or
+trailing whitespace and no control characters or line or paragraph separators.
+
 Preflight applies the downstream contracts for IPv4 CIDRs, native-admin DNS
 hostnames and their shared cookie parent domain (not a public suffix, checked
-with the API's `tldts` list), and paired metrics scraper selectors. Invalid
-values therefore fail before `values.yaml` or `installation.yaml` is written.
+with the API's `tldts` list), Google hosted domains (at most 253 characters,
+last label starting with a letter), repository Service names, and paired metrics
+scraper selectors. Invalid values therefore fail before `values.yaml` or
+`installation.yaml` is written.
+
+`scripts/render-installation-profile.mjs:signInProvider` refuses equal client-ID
+and client-secret Secret keys for GitHub, Google and OIDC. It considers the chart's
+`client-id` and `client-secret` defaults when only one key is overridden, so those
+collisions also fail before deployment files are written.
 
 `scripts/render-installation-profile.mjs:controlPlaneNodeSelector` checks
 `controlPlane.nodeSelector` against the chart and bootstrap-volume helper's
-Kubernetes label-key and nonempty label-value rules. Invalid placement labels
+Kubernetes label-key and label-value rules (values may be empty). Invalid placement labels
 fail preflight without deployment files; legal YAML lookalike values remain strings.
 
 ### 4. Build Helm values
@@ -131,8 +156,10 @@ egress, excluding private and reserved ranges, and the proxy authorizes Slack
 hostnames. Repository values render only when the input explicitly sets
 `repository.enabled: true`. Repository provider CIDRs pass through unchanged,
 so operators can keep their existing GitHub ranges without DNS snapshots. The
-renderer copies `repository.serviceName` only when the input sets it, so the
-chart's upgrade guard still requires an explicit current broker Service name.
+renderer copies `repository.serviceName` only when the input sets it, and only
+when that name is a DNS-1035 Service label of at most 63 characters. The
+chart's upgrade guard still requires an explicit current broker Service name,
+and the same DNS-1035 check cannot fail after a successful preflight.
 
 ### 5. Build Installation startup YAML
 
@@ -143,7 +170,10 @@ Kubernetes Compute, Kubernetes Secrets, default Preset seeding, and the profile
 PluginDriver. Compute settings consume the runtime image, DNS peer, trusted
 proxy CIDRs, plugin-status proxy CIDRs, gateway routing identity, runtime
 storage class, node selectors, and transport Secret prefix. The Codex profile
-also consumes the reviewed `runtime.codexSeccompProfile` path. When optional
+also consumes the reviewed `runtime.codexSeccompProfile` path. Preflight applies
+the Compute driver's localhost-profile rule and refuses an absolute path, a
+backslash, an empty, `.`, or `..` segment, or a segment named `unconfined`,
+before writing `installation.yaml`. When optional
 managed ServiceAccount inputs are supplied, it emits the ChatGPT Backend and a
 matching ServiceAccount Driver; otherwise Codex Agents use the existing
 `codex_pat` token path configured at Agent creation. If the chart-managed Slack
@@ -162,6 +192,12 @@ standard Presets. The renderer rejects a non-list value and empty or non-string
 entries, but it does not read the files; controller startup resolves the paths
 and validates their contents. Preset input changes alter the Installation
 checksum like any other startup configuration.
+
+`runtime.transportSecretPrefix` must produce the same DNS-safe name that
+Kubernetes Compute startup requires: `<prefix>-<12 hex characters>`, at most
+253 characters in total. Preflight checks that composed name before writing
+Installation YAML. A trailing hyphen in the prefix remains valid; a trailing
+dot does not, because the suffix would start a new label with a hyphen.
 
 ### 6. Write outputs and preflight
 
@@ -216,11 +252,35 @@ activation, and repository registry creation need separate evidence.
 
 ## Changelog
 
+- 2026-10-09 21:03: Validate controller image references before emitting profile files. (authoring-run/9a3fd823-79af-431c-b422-44c0ba255013 - b62cf404ed354079e1c51b64a1e664b3c66c0262)
+
+- 2026-10-09 20:43: Preserve Google hosted-domain and repository Service-name checks after the main merge. (01a12099-b8bf-7523-b52e-c7a160e191ec - 31a682eba8a8e4e0e0b80fe48cb71ab86db7e985)
+
+- 2026-10-09 20:06: Validate transport Secret prefixes before rendering Installation configuration. (authoring-run/8b675a82-44c5-4fc1-a404-dad5edd03858 - cd468c23101b201b3969fa1a4077a18042d3396b)
+
+- 2026-10-09 19:54: Reject external sign-in credential-key collisions during profile preflight. (authoring-run/d628d0ae-29d8-405c-b812-0534f00d5821 - 60a837dfd798e8fac90b53c47436c4bc7a36e8e4)
+
+- 2026-10-09: Check API client and DNS peer namespaces as DNS labels of at most 63 characters.
+
+- 2026-10-09: Check gateway and Envoy namespaces as DNS labels of at most 63 characters.
+
+- 2026-10-09: Accept empty control-plane placement label values, as Kubernetes does.
+
 - 2026-10-09 19:42: Validate control-plane placement labels before writing profile output. (authoring-run/2e2ce65b-ab3e-4466-8f24-602241488e52 - 3a1e29fb461d2ad61a9276ae4af432bcf2d04c88)
 
 - 2026-10-09 08:40: Integrate database CA-key validation with current renderer guards and regressions. (authoring-run/4108453c-660a-45ca-87c8-ff328a767f38 - 1f8c782e69d5d097b622ba13b964d87f1088a2ff)
 
+- 2026-10-09: Refuse Google hosted domains the chart and API refuse.
+
+- 2026-10-09: Refuse a repository broker Service name the chart's DNS-1035 check refuses.
+
+- 2026-10-09: Refuse gateway and Envoy namespaces the Compute driver refuses.
+
+- 2026-10-09: Refuse Codex seccomp paths the Compute driver refuses.
+
 - 2026-10-08: Refuse database CA keys the chart refuses.
+
+- 2026-10-08: Refuse installation names the chart and the bootstrap Job refuse.
 
 - 2026-10-07 12:07: Unify imported and managed PAT authentication while preserving source ownership and existing OAuth behavior. (01a0e5ec-d802-7800-9eb6-8022c1ac0d06 - be5006e62)
 

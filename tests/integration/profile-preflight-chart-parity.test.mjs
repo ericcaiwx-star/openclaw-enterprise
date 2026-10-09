@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { clientAddressConfiguration } from "../../apps/controller/src/auth/client-address.ts";
+import { createKubernetesComputeDriver } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
+import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
 
 // Each case runs through the profile preflight and through `helm template`, so the
 // renderer cannot accept a value the chart then refuses (or refuse one it accepts).
@@ -178,6 +180,96 @@ test(
   },
 );
 
+// A Kubernetes Namespace name is a DNS label of at most 63 characters, with no dots.
+const namespaceCases = [
+  ["envoy-gateway-system", true],
+  ["a", true],
+  ["1abc", true],
+  ["a".repeat(63), true],
+  ["a".repeat(64), false],
+  ["a".repeat(253), false],
+  ["gateway.example", false],
+  ["a.b", false],
+  ["Envoy", false],
+  ["-system", false],
+  ["system-", false],
+  ["envoy/system", false],
+  ["foo_bar", false],
+];
+
+test(
+  "envoy namespaces get the same verdict from the preflight, the chart and Compute",
+  { skip: helmSkip },
+  () => {
+    const configured = conformanceKubernetesOptions({
+      gatewayTrustedProxyCidrs: ["10.42.0.0/16"],
+    });
+    const { gatewayClients: _gatewayClients, ...network } = configured.network;
+    const routing = {
+      hostname: "agents.example.internal",
+      gatewayName: "oce-agent-gateways",
+      gatewayNamespace: "openclaw-system",
+    };
+    const chartError =
+      /gatewayRouting\.envoyNamespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/;
+    for (const [envoyNamespace, accepted] of namespaceCases) {
+      const label =
+        envoyNamespace.length > 40 ? `${envoyNamespace.length} characters` : envoyNamespace;
+      assertParity({
+        label,
+        controlPlane: { envoyNamespace },
+        values: { gatewayRouting: { envoyNamespace } },
+        accepted,
+        chartError,
+      });
+      let driverAccepted = true;
+      try {
+        createKubernetesComputeDriver({
+          ...configured,
+          network,
+          gatewayRouting: { ...routing, envoyNamespace },
+        });
+      } catch (error) {
+        assert.match(
+          error.message,
+          /Gateway routing Envoy namespace must be a Kubernetes namespace name/,
+          label,
+        );
+        driverAccepted = false;
+      }
+      assert.equal(driverAccepted, accepted, `${label}: Compute`);
+    }
+  },
+);
+
+test(
+  "API client and DNS peer namespaces get the same verdict from the preflight and the chart",
+  { skip: helmSkip },
+  () => {
+    const podLabels = { app: "occ-operator" };
+    const dnsLabels = { "k8s-app": "kube-dns" };
+    for (const [namespace, accepted] of namespaceCases) {
+      const label = namespace.length > 40 ? `${namespace.length} characters` : namespace;
+      assertParity({
+        label: `apiClients ${label}`,
+        controlPlane: { apiClients: [{ namespace, podLabels }] },
+        values: { api: { clients: [{ namespace, podLabels }] } },
+        accepted,
+        chartError:
+          /api\.clients\[0\]\.namespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/,
+      });
+      assertParity({
+        label: `dns ${label}`,
+        controlPlane: { dns: { namespace, podLabels: dnsLabels } },
+        values: { dns: { namespace, podLabels: dnsLabels } },
+        accepted,
+        chartError:
+          /dns\.namespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/,
+      });
+    }
+  },
+);
+
 // The API is looser than the chart on input outside this table: it trims whitespace and
 // takes a bare address as a single host. Preflight and the chart refuse both.
 test("every trusted proxy CIDR in the table gets the API's verdict, apart from zone IDs", () => {
@@ -205,6 +297,16 @@ test(
       [{ "topology.kubernetes.io/zone": "east" }, true],
       [{ spot: "no", scale: "1e3", hex: "0x1f" }, true],
       [{ ["a".repeat(63)]: "b".repeat(63) }, true],
+      // Kubernetes allows empty label values, a common node-role pattern.
+      [{ "node-role.kubernetes.io/infra": "" }, true],
+      [{ "node-role.kubernetes.io/infra": "", "oce-role": "control" }, true],
+      [{ "oce-role": "a" }, true],
+      [{ "oce-role": "A_b.c-9" }, true],
+      [{ "oce-role": "-control" }, false],
+      [{ "oce-role": "control-" }, false],
+      [{ "oce-role": "_control" }, false],
+      [{ "oce-role": "control." }, false],
+      [{ "oce-role": " " }, false],
       [{ "oce-role": "not valid" }, false],
       [{ "oce-role": "control\n" }, false],
       [{ "zone\n": "east" }, false],
@@ -225,6 +327,73 @@ test(
         values: { controlPlane: { nodeSelector } },
         accepted,
         chartError: /controlPlane\.nodeSelector (keys|values) must be/,
+      });
+    }
+  },
+);
+
+test(
+  "external sign-in credential keys get the same verdict from preflight and the chart",
+  { skip: helmSkip },
+  () => {
+    const keyCases = [
+      [{}, true],
+      [{ clientIdKey: "id" }, true],
+      [{ clientSecretKey: "secret" }, true],
+      [{ clientIdKey: "id", clientSecretKey: "secret" }, true],
+      [{ clientIdKey: "same-key", clientSecretKey: "same-key" }, false],
+      [{ clientIdKey: "client-secret" }, false],
+      [{ clientSecretKey: "client-id" }, false],
+    ];
+    for (const provider of ["github", "google", "oidc"]) {
+      const endpoints =
+        provider === "oidc"
+          ? {
+              issuer: "https://sso.example.com/realm",
+              authorizationUrl: "https://sso.example.com/authorize",
+              tokenUrl: "https://sso.example.com/token",
+              jwksUrl: "https://sso.example.com/keys",
+            }
+          : {};
+      for (const [keys, accepted] of keyCases) {
+        const settings = { ...endpoints, ...keys };
+        assertParity({
+          label: `${provider}: ${JSON.stringify(keys)}`,
+          controlPlane: { github: undefined, [provider]: settings },
+          values: {
+            auth: { github: { enabled: false }, [provider]: { enabled: true, ...settings } },
+          },
+          accepted,
+          chartError:
+            /auth\.(github|google|oidc) client ID and client secret must use different Secret keys/,
+        });
+      }
+    }
+  },
+);
+
+test(
+  "controller image references get the same verdict from preflight and the chart",
+  { skip: helmSkip },
+  () => {
+    const digest = `@sha256:${"a".repeat(64)}`;
+    const refs = [
+      ["registry.example.invalid/controller", true],
+      ["registry.example.invalid/foo_bar", true],
+      ["registry.example.invalid:5000/team/controller:release_1", true],
+      ["registry.example.invalid/foo+bar", false],
+      ["registry.example.invalid/controller?tag", false],
+      ["-registry.example.invalid/controller", false],
+      ["_registry.example.invalid/controller", false],
+    ];
+    for (const [name, accepted] of refs) {
+      const controllerImage = name + digest;
+      assertParity({
+        label: name,
+        controlPlane: { controllerImage },
+        values: { images: { controller: controllerImage } },
+        accepted,
+        chartError: /images\.controller must be an approved immutable SHA-256 image reference/,
       });
     }
   },

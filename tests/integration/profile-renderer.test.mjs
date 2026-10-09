@@ -6,8 +6,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { loadStartupConfigurationSnapshot } from "../../apps/controller/src/composition/installation-config.ts";
-import { KubernetesComputeDriver } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
+import {
+  loadInstallationConfiguration,
+  loadStartupConfigurationSnapshot,
+} from "../../apps/controller/src/composition/installation-config.ts";
+import {
+  createKubernetesComputeDriver,
+  KubernetesComputeDriver,
+} from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
+import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
 
 const digestA = "a".repeat(64);
@@ -330,6 +337,32 @@ test("managed ChatGPT service-account wiring is optional and explicit", () => {
   assert.match(codex.preflight.warnings.join("\n"), /issuance is wired but remains unverified/);
 });
 
+test("profiles refuse ChatGPT workspace IDs the controller refuses", () => {
+  const message =
+    /codex\.managedServiceAccounts\.workspaceId must be a UUID the controller accepts for a ChatGPT workspace/;
+  for (const workspaceId of [
+    "not-a-uuid",
+    "00000000-0000-0000-0000-000000000000",
+    "11111111-1111-4111-0111-111111111111",
+    "11111111-1111-0111-8111-111111111111",
+  ]) {
+    assertPreflightFailure(
+      "codex",
+      managedCodexInput({
+        codex: {
+          managedServiceAccounts: {
+            workspaceId,
+            adminSecretName: "occ-chatgpt-admin",
+            adminSecretKey: "admin-key",
+            providerCidr: "192.0.2.21/32",
+          },
+        },
+      }),
+      message,
+    );
+  }
+});
+
 test("profiles reject invalid Helm release names before emitting deployment files", (t) => {
   for (const profile of ["openclaw", "codex"]) {
     const input = profile === "codex" ? codexInput() : baseInput();
@@ -542,6 +575,7 @@ test("label values that YAML 1.1 would retype stay strings", () => {
     hex: "0x1f",
     octal: "0o17",
     yes: "keep",
+    "node-role.kubernetes.io/infra": "",
   };
   const input = baseInput();
   input.controlPlane.nodeSelector = labels;
@@ -569,7 +603,7 @@ test("Helm renders YAML 1.1 lookalike label values as strings", { skip: helmSkip
   assertPreflightFailure(
     "openclaw",
     rejected,
-    /controlPlane\.nodeSelector values must be nonempty Kubernetes label values/,
+    /controlPlane\.nodeSelector values must be Kubernetes label values/,
   );
 });
 
@@ -596,6 +630,17 @@ test("repository opt-in is explicit and keeps the two-stage placeholders separat
     output.preflight.warnings.join("\n"),
     /Active repository sessions are not restored after broker loss/,
   );
+});
+
+test("preflight rejects a repository serviceName the chart refuses", () => {
+  const repositoryInput = repositoryConfiguration();
+  for (const serviceName of ["1git", "git.openclaw-system.svc", "a".repeat(64), "Git"]) {
+    assertPreflightFailure(
+      "codex",
+      codexInput({ repository: { ...repositoryInput, serviceName } }),
+      /repository\.serviceName must be a Kubernetes Service DNS-1035 label of at most 63 characters/,
+    );
+  }
 });
 
 test("repository serviceName is left to the chart so its upgrade guard applies", () => {
@@ -1200,6 +1245,24 @@ test("preflight rejects external sign-in and trusted proxy inputs Helm would rej
   );
 });
 
+test("profiles refuse installation names the chart and the bootstrap Job refuse", () => {
+  const accepted = render(
+    "openclaw",
+    baseInput({
+      controlPlane: { ...baseInput().controlPlane, clusterName: "n".repeat(200) },
+    }),
+  );
+  assert.equal(accepted.summary.ok, true, accepted.preflight.errors.join("\n"));
+  assert.match(accepted.values, /name: n{200}\n/);
+  for (const clusterName of [" profile", `${"n".repeat(201)}`, "bad\nname", "\uD800"]) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({ controlPlane: { ...baseInput().controlPlane, clusterName } }),
+      /controlPlane.clusterName must be 1 to 200 characters/,
+    );
+  }
+});
+
 test("preflight rejects CIDR prefixes with a leading zero", () => {
   const controlPlane = baseInput().controlPlane;
   assertPreflightFailure(
@@ -1428,4 +1491,170 @@ test("profiles refuse ChatGPT credential lifetimes the API refuses", () => {
     }),
     /codex.managedServiceAccounts.credentialTtlSeconds must be an integer from 1 through 2592000/,
   );
+});
+
+test("profiles refuse administrator emails the bootstrap Job refuses", () => {
+  const accepted = render(
+    "openclaw",
+    baseInput({
+      controlPlane: { ...baseInput().controlPlane, adminEmail: " Admin@Example.invalid " },
+    }),
+  );
+  assert.equal(accepted.summary.ok, true, accepted.preflight.errors.join("\n"));
+  assert.match(accepted.values, /adminEmail: " Admin@Example.invalid "/);
+  for (const adminEmail of ["not-an-email", "admin@example", "a @b.c"]) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({ controlPlane: { ...baseInput().controlPlane, adminEmail } }),
+      /controlPlane.adminEmail must be a valid administrator email/,
+    );
+  }
+});
+
+test("preflight rejects a Google hosted domain the chart and API refuse", () => {
+  const label63 = `a${"b".repeat(61)}c`;
+  const domain254 = [label63, label63, label63, `d${"e".repeat(60)}f`].join(".");
+  const domain253 = [label63, label63, label63, `d${"e".repeat(59)}f`].join(".");
+  assert.equal(domain254.length, 254);
+  assert.equal(domain253.length, 253);
+  const googleInput = (allowedDomains) =>
+    externalSignInInput({
+      github: undefined,
+      google: { allowedDomains },
+    });
+  for (const allowedDomains of [["example.123"], ["example.1"], [domain254]]) {
+    assertPreflightFailure(
+      "openclaw",
+      googleInput(allowedDomains),
+      /controlPlane\.google\.allowedDomains\[0\] must be a lowercase DNS domain name of at most 253 characters whose last label starts with a letter, such as example\.com/,
+    );
+  }
+  const accepted = render("openclaw", googleInput([domain253]));
+  assert.equal(accepted.summary.ok, true, accepted.preflight.errors.join("\n"));
+  assert.match(accepted.values, new RegExp(domain253));
+});
+
+test("profiles refuse gateway namespaces the compute driver refuses", () => {
+  const configured = conformanceKubernetesOptions({
+    gatewayTrustedProxyCidrs: ["10.42.0.0/16"],
+  });
+  const { gatewayClients: _gatewayClients, ...network } = configured.network;
+  const routing = {
+    hostname: "agents.example.internal",
+    gatewayName: "oce-agent-gateways",
+    gatewayNamespace: "openclaw-system",
+    envoyNamespace: "envoy-gateway-system",
+  };
+  const admit = (gatewayRouting) =>
+    createKubernetesComputeDriver({ ...configured, network, gatewayRouting });
+  // A Kubernetes Namespace name is a DNS label of at most 63 characters, with no dots.
+  // The Gateway namespace is also an owning-gateway-namespace label value.
+  const namespaceMessage =
+    /controlPlane\.namespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/;
+  const envoyMessage =
+    /controlPlane\.envoyNamespace must be a Kubernetes namespace name \(a DNS label of at most 63 characters\)/;
+  const controlPlane = baseInput().controlPlane;
+  const refused = [
+    "openclaw/system",
+    "OpenClaw",
+    "foo_bar",
+    "-system",
+    "system-",
+    "a".repeat(64),
+    "a".repeat(253),
+    "gateway.example",
+    "openclaw-system ",
+  ];
+  for (const namespace of refused) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({ controlPlane: { ...controlPlane, namespace } }),
+      namespaceMessage,
+    );
+    assert.throws(
+      () => admit({ ...routing, gatewayNamespace: namespace }),
+      /Gateway routing Gateway namespace must be a Kubernetes namespace name/,
+    );
+  }
+  for (const envoyNamespace of refused) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({ controlPlane: { ...controlPlane, envoyNamespace } }),
+      envoyMessage,
+    );
+    assert.throws(
+      () => admit({ ...routing, envoyNamespace }),
+      /Gateway routing Envoy namespace must be a Kubernetes namespace name/,
+    );
+  }
+  const namespace = "a".repeat(63);
+  const envoyNamespace = `${"b".repeat(62)}9`;
+  const output = render(
+    "openclaw",
+    baseInput({ controlPlane: { ...controlPlane, namespace, envoyNamespace } }),
+  );
+  assert.equal(output.summary.ok, true);
+  assert.match(output.installation, new RegExp(`gatewayNamespace: ${namespace}`));
+  assert.match(output.installation, new RegExp(`envoyNamespace: ${envoyNamespace}`));
+  assert.doesNotThrow(() => admit({ ...routing, gatewayNamespace: namespace, envoyNamespace }));
+});
+
+test("preflight rejects Codex seccomp paths the compute driver refuses", () => {
+  const message =
+    /runtime\.codexSeccompProfile must be a relative localhost profile path without traversal or unconfined mode/;
+  for (const codexSeccompProfile of [
+    "/profiles/codex.json",
+    "../codex.json",
+    "profiles/../codex.json",
+    "profiles//codex.json",
+    "unconfined",
+    "profiles/unconfined",
+    "profiles\\codex.json",
+  ]) {
+    assertPreflightFailure("codex", codexInput({ runtime: { codexSeccompProfile } }), message);
+  }
+  const accepted = render("codex", codexInput());
+  const installation = loadYaml(accepted.installation);
+  KubernetesComputeDriver.validateConfiguration(installation.drivers.compute.configuration);
+  assert.match(accepted.installation, /codexSeccompProfile: profiles\/codex\.json/);
+});
+
+test("profile transport Secret prefixes agree with controller startup admission", async (t) => {
+  const baseline = render("openclaw", baseInput());
+  t.after(() => rmSync(baseline.directory, { recursive: true, force: true }));
+  const prefixes = [
+    ["transport", true],
+    ["transport-", true],
+    ["tenant.transport", true],
+    ["a".repeat(240), true],
+    ["Bad_Prefix", false],
+    ["transport/agent", false],
+    ["transport.", false],
+    ["a".repeat(241), false],
+  ];
+  for (const [prefix, accepted] of prefixes) {
+    const input = baseInput();
+    input.runtime.transportSecretPrefix = prefix;
+    if (accepted) {
+      const output = render("openclaw", input);
+      t.after(() => rmSync(output.directory, { recursive: true, force: true }));
+      await loadInstallationConfiguration({
+        mode: "production",
+        environment: { OCC_CONFIG_PATH: join(output.directory, "installation.yaml") },
+      });
+    } else {
+      assertPreflightFailure("openclaw", input, /runtime\.transportSecretPrefix/);
+      const installation = loadYaml(baseline.installation);
+      installation.drivers.compute.configuration.runtime.transportSecretPrefix = prefix;
+      const path = join(baseline.directory, "invalid-installation.json");
+      writeFileSync(path, JSON.stringify(installation));
+      await assert.rejects(
+        loadInstallationConfiguration({
+          mode: "production",
+          environment: { OCC_CONFIG_PATH: path },
+        }),
+        /runtime\.transportSecretPrefix/,
+      );
+    }
+  }
 });
