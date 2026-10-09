@@ -85,7 +85,10 @@ export function createPresetFields(context, apply) {
                     ...(field.definition.type === "password"
                       ? {}
                       : {
-                          value: field.readValue(),
+                          value:
+                            field.definition.type === "string"
+                              ? field.readValue()
+                              : field.input.value,
                           supplied: field.input.dataset.supplied,
                         }),
                     mode: field.mode?.value,
@@ -212,7 +215,9 @@ export function createPresetFields(context, apply) {
             ? Number(input.value)
             : definition.type === "boolean"
               ? input.value === "true"
-              : field.readValue();
+              : definition.type === "string"
+                ? field.readValue()
+                : input.value;
       }
       const passwordVariable = harnessSecretVariable(selected.template);
       const secretSelection = passwordVariable ? secretSelections.get(passwordVariable) : undefined;

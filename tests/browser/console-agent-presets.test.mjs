@@ -89,6 +89,7 @@ test("Preset string variables preserve multiline defaults, edits and restored dr
         notes: { type: "string", default: scenario.value },
         debounce: { type: "number", default: 0 },
         controlUi: { type: "boolean", default: false },
+        unusedPassword: { type: "password" },
       },
       agent: { initialWorkspaceFiles: { "USER.md": "{{ vars.notes }}" } },
       configuration: {
@@ -122,6 +123,9 @@ test("Preset string variables preserve multiline defaults, edits and restored dr
       await page.goForward();
       await notes.waitFor();
     }
+    // A permitted unreferenced password has no bound Secret selector or saved draft value.
+    // Use only a synthetic placeholder; applying the ordinary template creates no credential.
+    await page.getByLabel("Unused Password", { exact: true }).fill("synthetic-unused-placeholder");
     await page.getByRole("button", { name: "Use Preset", exact: true }).click();
     await openAdvancedSettings(page);
     const values = JSON.parse(
