@@ -72,14 +72,19 @@ through `--ignore-certificate-errors-spki-list`, opens a fresh context per test 
 fills Keycloak's own login form. Browser requests are observed, never stubbed, and the
 controller reaches the token and JWKS endpoints through its production transport.
 
-| Test                                                                                              | Proves                                                                                                                                                       |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Discovery matches the configured endpoints and the JWKS offers an RS256 key of 2,048 bits or more | Production OIDC configuration parsing accepts Keycloak's issuer and endpoints; the controller transport reads the JWKS.                                      |
-| Attached alice signs in with `client_secret_post`                                                 | The authorization request carries `scope=openid`, `S256`, a nonce and the realm's redirect URI; the callback lands on `/console/` with alice's session.      |
-| Attached alice signs in with `client_secret_basic`                                                | The same flow with the API recomposed for HTTP Basic client authentication at the token endpoint.                                                            |
-| Unattached carol is refused                                                                       | Her callback redirects to `/console/?authError=oidc`, the Console shows the refusal, `EXTERNAL_IDENTITY_REJECTED` is audited and no user or session appears. |
+| Test                                                                                              | Proves                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Discovery matches the configured endpoints and the JWKS offers an RS256 key of 2,048 bits or more | Production OIDC configuration parsing accepts Keycloak's issuer and endpoints; the controller transport reads the JWKS.                                                                                                                                                            |
+| Attached alice signs in with `client_secret_post`                                                 | The authorization request carries `scope=openid`, `S256`, a nonce and the realm's redirect URI; the callback lands on `/console/` with alice's session.                                                                                                                            |
+| Attached alice signs in with `client_secret_basic`                                                | The same flow with the API recomposed for HTTP Basic client authentication at the token endpoint.                                                                                                                                                                                  |
+| A higher-priority realm key signs the next sign-in                                                | The admin API adds a 2,048-bit `rsa-generated` key at priority 200; the active `RS256` kid changes, the JWKS publishes it, and alice signs in again through the same controller.                                                                                                   |
+| Unattached carol is refused                                                                       | Her callback redirects to `/console/?authError=oidc`, the Console shows the refusal, `EXTERNAL_IDENTITY_REJECTED` is audited and no user or session appears.                                                                                                                       |
+| Sign-out, one-click sign-in and a disabled user                                                   | Console sign-out deletes alice's OCE session row; one click signs her in again with no login form (Keycloak answers 302) while its session lives. Disabling her in Keycloak leaves that OCE session working, and her next sign-in stops at "Account is disabled" with no callback. |
 
-The suite audit lists the expected test; a skip or a missing case fails the lane.
+The rotation test removes its key afterwards and the lifecycle test enables alice again,
+so the order of the tests does not matter. Every wait is bounded: Playwright's default
+timeout in the browser and ten seconds per Keycloak or JWKS request. The suite audit lists
+the expected tests; a skip or a missing case fails the lane.
 
 ## Run it on a developer host
 
@@ -104,6 +109,14 @@ echo '127.0.0.1 keycloak.oce.localhost' | sudo tee -a /etc/hosts
 The line only helps when `/etc/hosts` is read before other resolvers. If
 `nsswitch.conf` lists `resolve` first, systemd-resolved answers `*.localhost` with
 `::1` as well and the hosts step fails.
+
+The hosts step logs the resolver's answer (`Keycloak hosts: ...`) and whether it added
+a line. Observed behaviour:
+
+| Host                                                               | Answer for `keycloak.oce.localhost`               | Hosts line           |
+| ------------------------------------------------------------------ | ------------------------------------------------- | -------------------- |
+| Developer host, private network namespace with `hosts: files` only | `127.0.0.1` from the bind-mounted `/etc/hosts`    | not added            |
+| `blacksmith-8vcpu-ubuntu-2404` runner                              | `127.0.0.1` and `::1`; `127.0.0.1` after the line | added with `sudo -n` |
 
 ## Troubleshooting
 
