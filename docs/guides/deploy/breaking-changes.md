@@ -186,8 +186,9 @@ and 4 for every Agent it moves.
 
 **What breaks.** Since #925 (`dd344a97c`), a single-cluster Installation keeps
 each Namespace's Gateways and Harnesses in one tenant namespace. Releases before
-it kept Gateways in a separate `oce-gateways-<hash>` namespace. The current API
-and worker refuse to start while such a namespace exists, and the
+it kept Gateways, their state and the canonical Secrets in a separate
+`oce-gateways-<hash>` namespace. The current API and worker refuse to start
+while such a namespace lacks the tenant label, and the
 [image upgrade helper](production-upgrade.md) stops at its startup preflight
 (`Existing split-layout Gateway storage prevents this single-cluster upgrade`)
 before it changes anything. See
@@ -206,8 +207,59 @@ kubectl get namespaces -l openclaw.dev/gateway-namespace -L openclaw.dev/namespa
 
 A row with an empty `NAMESPACE` column is a split-layout tenant.
 
-**What you lose.** No migration moves the old namespaces, so their tenants are
-exported, deleted and re-created under new IDs. A deleted Namespace's name stays
+**Steps: adopt in place.** Each `oce-gateways-<hash>` namespace becomes its
+tenant's namespace. OCC's database is not changed, so IDs, Namespace names,
+revisions, Secrets, service-account credentials, chat history and Harness
+workspaces all stay. The old namespace's workspace and embedded Gateway claims
+move into it by PersistentVolume rebind, and its Agent Secrets are copied. The
+API is down from `apply` until the upgraded controller starts; Agents are down
+until they are deployed again. _ADOPT-TIMING_ Run the commands from a checkout of
+the target release, with cluster-admin `kubectl` for the cluster
+(`--context`/`--kubeconfig` are passed through).
+
+1. Plan. This only reads:
+
+   ```bash
+   node scripts/split-layout-adopt.mjs plan --out /secure/occ/adopt-plan.json
+   ```
+
+   It lists, per tenant, the claims, Secrets and routes to move and the Agents
+   that run. It exits `2` and names the problem when a tenant can't be adopted:
+   an existing namespace selected with `existingNamespace`, an object OCE did
+   not create in the old namespace, a name taken in the new one, or a missing
+   [tenant RoleBinding](production-agents.md#grant-tenant-rolebindings) in the
+   `oce-gateways-*` namespace. Grant the bindings there, move or delete foreign
+   objects, or use the fallback below for that tenant (`--namespace-id`
+   selects tenants).
+
+2. Back up the claims the plan lists with your storage's snapshot or backup
+   tool.
+3. Adopt. This stops OCC's API and worker and the old namespace's workloads,
+   and leaves OCC stopped:
+
+   ```bash
+   node scripts/split-layout-adopt.mjs apply --archive /secure/occ/adopt --yes
+   ```
+
+   It records each step on the `oce-gateways-*` namespace, so running it again
+   after any failure continues. Until step 4 starts the new release,
+   `revert --archive /secure/occ/adopt --yes` restores the old layout and
+   restarts OCC. Keep the archive directory: it holds the old routes.
+
+4. [Upgrade the control plane](production-upgrade.md#upgrade-the-control-plane)
+   and the runtime as usual. The helper accepts the stopped API and worker.
+5. Deploy each Agent `apply` listed as running (`occ agent deploy <id>`) that is
+   not running yet, and check it.
+6. Delete the old namespaces. After this there is no way back:
+
+   ```bash
+   node scripts/split-layout-adopt.mjs finalize --yes
+   ```
+
+**Fallback: export and re-create.** For tenants that can't be adopted.
+
+_What you lose._ The tenants are exported, deleted and re-created under new
+IDs. A deleted Namespace's name stays
 reserved, so each Namespace comes back under a new name. These come back:
 Secrets (you supply the values again), Configurations that an Agent uses,
 Presets, credential sources, Roles, access bindings, service accounts (without
@@ -224,7 +276,7 @@ not come back:
 
 Accounts, Installation service keys and the audit history stay in the database.
 
-**Steps.** Tested on a 2026-09-28 release Installation with three Namespaces
+_Steps._ Tested on a 2026-09-28 release Installation with three Namespaces
 and three Agents: the commands took about two minutes, plus the two image
 releases (about 35 seconds each). Run them from a checkout of the target
 release, with `occ` set up for the old release as an administrator (`OCC_URL`,
