@@ -8,11 +8,11 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import vm from "node:vm";
 import { GATEWAY_RUNTIME_ENTRYPOINT as DOCKER_GATEWAY_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/docker/index.ts";
+import { GATEWAY_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import {
-  GATEWAY_RUNTIME_ENTRYPOINT,
   OPENCLAW_AGENT_DATABASE_SCHEMA_VERSION,
   gatewayStateMigrationHelper,
-} from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
+} from "../../apps/controller/src/drivers/compute/runtime-startup.ts";
 
 // Exercise the state migration step the Kubernetes and Docker Gateway programs
 // share, against real SQLite files. Only Doctor is replaced: the runtime image

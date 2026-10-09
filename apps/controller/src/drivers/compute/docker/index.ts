@@ -31,9 +31,8 @@ import {
   AGENT_READINESS_ENTRYPOINT,
   AGENT_RUNTIME_ENTRYPOINT,
   PLUGIN_RUNTIME_HELPERS,
-  gatewayStateMigrationHelper,
-  startupPhaseHelper,
 } from "../kubernetes/runtime-entrypoints.ts";
+import { gatewayStateMigrationHelper, startupPhaseHelper } from "../runtime-startup.ts";
 import {
   PLUGIN_RUNTIME_READY_MARKER,
   PLUGIN_RUNTIME_READY_MARKER_ENVIRONMENT,
