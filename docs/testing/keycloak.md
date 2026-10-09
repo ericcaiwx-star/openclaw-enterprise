@@ -130,3 +130,4 @@ a line. Observed behaviour:
 
 To bump Keycloak, change `image.json` to a new 26.x digest and rerun the lane; the
 login-form selectors (`#username`, `#password`, `#kc-login`) are tied to that version.
+The Full Integration `openshell` lane's refresh proof shares the pin, so run it too.
