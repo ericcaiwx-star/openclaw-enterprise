@@ -525,13 +525,6 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
     const consumed = end === lines.length ? completeLines.length : prefixEnd;
     // All-untimed prefixes need signed progress after a Driver byte cut. Mixed
     // prefixes resume through their delivered time after draining, disclosing the reset.
-    const advanceTimedCut =
-      !skipStalled &&
-      !pageCut &&
-      checkpoint !== undefined &&
-      chunk.truncated &&
-      !untimedPrefix &&
-      (eligible.some(({ line }) => line.time === null) || lines.length === 0);
     const retainCheckpoint =
       !skipStalled &&
       (pageCut ||
@@ -591,7 +584,10 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
       ...(skipStalled
         ? leading.filter((record) => record.type !== "gap" || record.reason !== "window_exceeded")
         : leading),
-      ...((retainCheckpoint || advanceTimedCut) &&
+      // Closing a full checkpoint cannot establish that identical tail rolling
+      // retained every occurrence; preserve its gap on the final delivered page.
+      ...(!skipStalled &&
+      (retainCheckpoint || checkpoint !== undefined) &&
       (chunk.lines.length >= query.tailLines || chunk.truncated) &&
       !leading.some((record) => record.type === "gap" && record.reason === "window_exceeded")
         ? [runtimeLogGap("window_exceeded", observedStream, earliest)]

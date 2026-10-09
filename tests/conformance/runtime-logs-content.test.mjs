@@ -2078,7 +2078,11 @@ test("runtime container wire pages include escaped messages, cursor and HTTP met
 
 test("runtime container checkpoint suffixes survive append-only growth to a full tail", async () => {
   const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
-  for (const tail of [100, 300]) {
+  for (const { tail, identical } of [
+    { tail: 100, identical: false },
+    { tail: 300, identical: false },
+    { tail: 100, identical: true },
+  ]) {
     const cursorSecret = randomBytes(32).toString("hex");
     const fixture = await createRuntimeLogFixture({
       agentRuntimeLogs: { enabled: true, cursorSecret },
@@ -2093,7 +2097,7 @@ test("runtime container checkpoint suffixes survive append-only growth to a full
           : JSON.stringify({
               level: "info",
               subsystem: "gateway",
-              message: `row=${index}; ${large ? '--option="value" '.repeat(500) : "anchor"}`,
+              message: `row=${identical ? 7 : index}; ${large || identical ? '--option="value" '.repeat(500) : "anchor"}`,
             }),
     });
     const ids = (page) => messages(page).map((message) => Number(/row=(\d+);/.exec(message)[1]));
@@ -2125,13 +2129,21 @@ test("runtime container checkpoint suffixes survive append-only growth to a full
       seen.push(...ids(response.data));
       cuts += response.data.truncated ? 1 : 0;
       cursor = response.data.cursor;
+      if (identical && page > 0) {
+        assert.ok(
+          response.data.records.some(
+            ({ type, reason }) => type === "gap" && reason === "window_exceeded",
+          ),
+          "full identical-value windows retain the conservative gap even when their checkpoint drains",
+        );
+      }
       if (page === 0) {
         assert.equal(
           response.data.truncated,
           true,
           "the short window must cut the serialized page",
         );
-        if (tail === 100) {
+        if (tail === 100 && !identical) {
           // The previous compact cursor had ten window entries and no inherited proof.
           const parts = cursor.split(".");
           const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
@@ -2166,7 +2178,7 @@ test("runtime container checkpoint suffixes survive append-only growth to a full
     }
     assert.deepEqual(
       seen,
-      Array.from({ length: tail }, (_, index) => index),
+      Array.from({ length: tail }, (_, index) => (identical ? 7 : index)),
     );
     const replay = await fixture.request(
       "GET",

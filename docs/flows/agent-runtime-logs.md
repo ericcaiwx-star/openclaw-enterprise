@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/8b207d82-4eff-4478-872a-80762052a959
+last_updated_session: authoring-run/9cfa5b3b-2ef8-4413-a9ec-458eb1ba7fdd
 ---
 
 # Agent runtime logs flow
@@ -241,6 +241,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 07:56: Preserve full-window gaps through final drain. (authoring-run/9cfa5b3b-2ef8-4413-a9ec-458eb1ba7fdd - 5533e03c05db33fdec64574893190f8ec4096bb0)
 
 - 2026-10-10 07:45: Advance mixed byte-cut windows explicitly. (authoring-run/8b207d82-4eff-4478-872a-80762052a959 - 42351dce1d1e1a4faf457edd87da96fa8d6169c4)
 
