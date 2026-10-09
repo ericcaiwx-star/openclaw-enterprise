@@ -10440,6 +10440,48 @@ test("resource quantities written as bare numbers name the field and the quoting
   KubernetesComputeDriver.validateConfiguration(quoted);
 });
 
+// Expected ordering comes from the API server's Quantity.Cmp semantics. These
+// values exercise decimal/binary equivalence, Nano rounding, exact large integers
+// and BinarySI saturation that a floating-point conversion cannot preserve.
+test("resource requests must fit their limits before Namespace or workload preparation", () => {
+  const pairs = [
+    ["cpu", "500m", "250m", false],
+    ["cpu", "0.5", "250m", false],
+    ["cpu", "250m", "0.5", true],
+    ["cpu", "2e-3", "1m", false],
+    ["cpu", "1.00000000001", "1.000000001", true],
+    ["memory", "2Gi", "1.5Gi", false],
+    ["memory", "1.5Gi", "2Gi", true],
+    ["memory", "1.5Ki", "1536", true],
+    ["memory", "0.00000000001", "1n", true],
+    ["memory", "9223372036854775808", "9223372036854775807", false],
+    ["memory", "8Ei", "9223372036854775807", true],
+    ["memory", "9E", "8Ei", true],
+    ["memory", "\u00851Gi\u0085", "1024Mi", true],
+  ];
+  for (const role of ["gateway", "agent", "namespace.containerDefaults"]) {
+    for (const [resource, request, limit, accepted] of pairs) {
+      const configured = separateResources();
+      const selected =
+        role === "namespace.containerDefaults"
+          ? configured.resources.namespace.containerDefaults
+          : configured.resources[role];
+      selected.requests[resource] = request;
+      selected.limits[resource] = limit;
+      if (accepted) {
+        assert.doesNotThrow(() => createKubernetesComputeDriver(configured));
+      } else {
+        assert.throws(
+          () => createKubernetesComputeDriver(configured),
+          (error) =>
+            error.message.includes(`resources.${role}.requests.${resource}`) &&
+            error.message.includes("cannot exceed its limit"),
+        );
+      }
+    }
+  }
+});
+
 test("transport secret prefix must produce a DNS-safe credential Secret name", () => {
   for (const transportSecretPrefix of ["Bad_Prefix", "bad prefix", `${"a".repeat(242)}`]) {
     assert.throws(

@@ -1,3 +1,4 @@
+import { compareResourceQuantities } from "./resource-quantities.ts";
 import {
   asRecord,
   isNonEmptyString,
@@ -1379,10 +1380,32 @@ function validateResources(value: V1ResourceRequirements, description: string, p
   if (requests === undefined || limits === undefined) {
     throw new ConfigurationFailure(`${description} requests and limits must be configured.`);
   }
-  resourceQuantity(requests.cpu, `${description} CPU request`, `${path}.requests.cpu`);
-  resourceQuantity(requests.memory, `${description} memory request`, `${path}.requests.memory`);
-  resourceQuantity(limits.cpu, `${description} CPU limit`, `${path}.limits.cpu`);
-  resourceQuantity(limits.memory, `${description} memory limit`, `${path}.limits.memory`);
+  for (const [resource, kind] of [
+    ["cpu", "CPU"],
+    ["memory", "memory"],
+  ] as const) {
+    const request = resourceQuantity(
+      requests[resource],
+      `${description} ${kind} request`,
+      `${path}.requests.${resource}`,
+    );
+    const limit = resourceQuantity(
+      limits[resource],
+      `${description} ${kind} limit`,
+      `${path}.limits.${resource}`,
+    );
+    const compared = compareResourceQuantities(request, limit);
+    if (compared === undefined) {
+      throw new ConfigurationFailure(
+        `${description} ${kind} requests and limits (${path}) must be Kubernetes quantity strings.`,
+      );
+    }
+    if (compared > 0) {
+      throw new ConfigurationFailure(
+        `${description} ${kind} request (${path}.requests.${resource}) cannot exceed its limit (${path}.limits.${resource}).`,
+      );
+    }
+  }
 }
 
 // Quantities stay strings, as Kubernetes returns them: an unquoted YAML `4` is a
