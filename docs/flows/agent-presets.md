@@ -1,7 +1,7 @@
 ---
 created: 2026-09-21
 updated: 2026-10-10
-last_updated_session: authoring-run/5b89726f-4b6c-43e9-8cfb-ad77c9f3a320
+last_updated_session: authoring-run/0f2600bb-f524-4114-9ba6-7ff3cbee3d29
 ---
 
 # Agent Presets flow
@@ -168,22 +168,21 @@ The shipped `deploy/presets/default-codex.json` also supplies the public
 Harness transitions, then adds model routing. The module contains only the public
 bundled definition; it does not expose installed Namespace templates.
 
-The user
-reviews prefilled scalar defaults and fills typed inputs. Inputs for referenced
-variables without defaults are required, so the browser flags an empty one
-before rendering; defaulted or unreferenced variables stay optional. The bound password
-variable offers a new masked token or an existing same-Namespace Secret. The
-chooser fetches only Secret metadata, validates the original template, and replaces
-the password token with the selected reference in a temporary copy. Mode changes
-clear discarded tokens; stale catalog responses cannot replace a later selection.
+The chooser prefills typed defaults. String controls accept multiple lines;
+untouched defaults and restored drafts retain exact line endings, while edits use
+browser LF. Empty strings override defaults. Referenced variables without defaults
+are required; defaulted or unused variables are optional. The password variable
+offers a masked new token or an existing same-Namespace Secret. The chooser reads
+Secret metadata, validates the original template, then substitutes the selected
+reference in a temporary copy. Changing mode discards tokens; stale catalog
+responses cannot replace a later selection.
 The user then selects **Use Preset**. The shared
 [`renderPresetTemplate`](../../packages/contracts/src/preset-variables.mjs)
 walks JSON once, rejects missing or mistyped inputs and duplicate rendered native
 keys, and preserves runtime placeholders and unresolved SecretRefs.
 
-Rendering makes no requests and fetches no credentials. On success, the chooser
-is replaced by the ordinary Agent form; the form keeps only the rendered
-settings and, when selected, ephemeral existing-Secret metadata for access grants.
+Rendering makes no requests. Success opens the ordinary Agent form with rendered
+settings and optional ephemeral Secret metadata for access grants.
 The chooser lists Presets alphabetically by display name.
 Password values move into the ordinary masked credential input; the
 chooser clears its detached password controls. Preset updates or deletion cannot alter them. Before saving,
@@ -291,6 +290,8 @@ or an immutable admitted revision.
 ## Manual Notes
 
 ## Changelog
+
+- 2026-10-10 04:52: Preserve multiline strings and exact restored defaults in the Preset chooser. (authoring-run/0f2600bb-f524-4114-9ba6-7ff3cbee3d29 - 64dff25990334c8cf1e9372d5452c38cdcadfa61)
 
 - 2026-10-09 19:46: Authorize Preset writes before reading the body. (authoring-run/5b89726f-4b6c-43e9-8cfb-ad77c9f3a320 - deeb84b5e)
 
