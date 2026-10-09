@@ -243,7 +243,7 @@ queued or running cleanup stays unchanged. An uncertain repeat stays disabled un
 a successful status read confirms deletion. Retry ownership and current exact-Agent
 permission remain enforced by the API.
 
-An access denial stays on the detail page and says deletion requires permission.
+An access denial stays visible. A repeat refusal preserves the API’s retry-ownership explanation.
 An unconfirmed outcome may have succeeded; refresh before retrying. The console
 never resends a delete request automatically.
 

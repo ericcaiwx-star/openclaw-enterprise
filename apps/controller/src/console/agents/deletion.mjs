@@ -193,7 +193,11 @@ export function createAgentDeletion(context, path, agent, onDeleting) {
       let text;
       if (error.status === 403) {
         text =
-          "You do not have permission to delete this Agent. Ask an administrator for Agent delete access.";
+          state.deleting &&
+          error.serverMessage !== undefined &&
+          error.serverMessage !== "The exact platform operation was not authorized."
+            ? error.serverMessage
+            : "You do not have permission to delete this Agent. Ask an administrator for Agent delete access.";
       } else if (error.status === 404) {
         state.needsRefresh = true;
         text =

@@ -2488,6 +2488,53 @@ test("An already deleting Agent permits only a confirmed manual repeat DELETE", 
   assert.equal((await fixture.request("GET", path)).data.status, "deleting");
 });
 
+test("Repeat deletion preserves bounded retry ownership feedback and ordinary denial guidance", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Retry refusal feedback", { ready: true });
+  const agent = await fixture.createAgent(namespace.id, "Owned cleanup", nativeValues("repeat"));
+  const path = `/namespaces/${namespace.id}/agents/${agent.id}`;
+  assert.equal((await fixture.request("DELETE", path)).status, 202);
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id));
+  const ownership =
+    "Only the actor that started this deletion can retry it while that actor still holds delete. Retry as that actor, or remove its delete permission first.";
+  let serverMessage = ownership;
+  let writes = 0;
+  // Exercise the bounded API-client error consumer independently of durable worker admission.
+  await page.route(fixture.origin + path, async (route) => {
+    if (route.request().method() !== "DELETE") {
+      await route.continue();
+      return;
+    }
+    writes += 1;
+    await route.fulfill({
+      status: 403,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "FORBIDDEN", message: serverMessage } }),
+    });
+  });
+  const confirm = async () => {
+    await page.getByRole("button", { name: "Request deletion again", exact: true }).click();
+    await page
+      .getByRole("dialog", { name: "Request deletion again for Owned cleanup?" })
+      .getByRole("button", { name: "Request deletion again", exact: true })
+      .click();
+  };
+  await confirm();
+  await page.getByRole("alert").getByText(ownership, { exact: true }).waitFor();
+  await expectNoText(page, "Ask an administrator for Agent delete access");
+  assert.equal(writes, 1);
+  serverMessage = "The exact platform operation was not authorized.";
+  await confirm();
+  await page
+    .getByRole("alert")
+    .getByText("You do not have permission to delete this Agent", { exact: false })
+    .waitFor();
+  assert.equal(writes, 2);
+  assert.equal((await fixture.request("GET", path)).data.status, "deleting");
+});
+
 test("An uncertain repeat deletion stays blocked until a successful deleting readback", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();

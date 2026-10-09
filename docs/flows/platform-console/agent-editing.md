@@ -327,7 +327,8 @@ worker cleanup and the Namespace-owned resources it preserves.
 - Compare saved `Agent.plugins` with the viewed revision's plugin snapshot after
   a plugin edit. A successful Agent update does not install or activate plugins;
   deploy and inspect startup status separately.
-- On `403`, check `delete` permission on the exact Agent; Agent `read` and
+- On repeat `403`, follow the API’s retry-ownership explanation. For ordinary
+  denials, check `delete` on the exact Agent; Agent `read` and
   `operate` do not authorize deletion. Use the displayed request ID when present.
 - An accepted deletion remains in progress until the exact Agent read reports
   not found. A failed refresh does not establish whether cleanup finished.
