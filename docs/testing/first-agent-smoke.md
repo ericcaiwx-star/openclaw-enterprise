@@ -88,6 +88,11 @@ prints which endpoint served each Engine pull; a fallback shows as
 `Attempting next endpoint`. Images that the k3d node's containerd pulls inside
 the cluster still come from their own registries.
 
+`scripts/ci/docker-hub-mirror.sh` does the Engine and client part (`setup`) and
+prints the report (`report`). The Runtime Image Fixture job, also on a
+GitHub-hosted runner, uses it for the Docker Hub base image that its
+`docker build` pulls through the Engine's own builder.
+
 ## Limits
 
 The smoke does not prove real model compatibility, credentials, hosted search,
