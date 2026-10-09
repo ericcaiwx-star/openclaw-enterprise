@@ -121,42 +121,60 @@ export function runtimeLogTimeKey(value: string): string {
 }
 
 function sandboxWindow(value: unknown): SandboxLogWindowCheckpoint | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length !== 6) {
     return undefined;
   }
-  const window = value as Record<string, unknown>;
+  const [since, tailLines, count, seen, hash, total] = value as unknown[];
   if (
-    (window.s !== null && !validRuntimeLogFrontierTime(window.s)) ||
-    !Number.isSafeInteger(window.l) ||
-    (window.l as number) < 1 ||
-    (window.l as number) > 1000 ||
-    !Number.isSafeInteger(window.n) ||
-    (window.n as number) < 0 ||
-    !Number.isSafeInteger(window.z) ||
-    (window.z as number) < (window.n as number) ||
-    (window.z as number) > (window.l as number) ||
-    typeof window.h !== "string" ||
-    !/^[A-Za-z0-9_-]{16}$/.test(window.h) ||
-    !Number.isSafeInteger(window.b) ||
-    (window.b as number) < (window.z as number)
+    (since !== null && !validRuntimeLogFrontierTime(since)) ||
+    !Number.isSafeInteger(tailLines) ||
+    (tailLines as number) < 1 ||
+    (tailLines as number) > 1000 ||
+    !Number.isSafeInteger(count) ||
+    (count as number) < 0 ||
+    !Number.isSafeInteger(seen) ||
+    (seen as number) < (count as number) ||
+    (seen as number) > (tailLines as number) ||
+    typeof hash !== "string" ||
+    !/^[A-Za-z0-9_-]{16}$/.test(hash) ||
+    !Number.isSafeInteger(total) ||
+    (total as number) < (seen as number)
   ) {
     return undefined;
   }
   return {
-    since: window.s as string | null,
-    tailLines: window.l as number,
-    count: window.n as number,
-    seen: window.z as number,
-    hash: window.h,
-    total: window.b as number,
+    since: since as string | null,
+    tailLines: tailLines as number,
+    count: count as number,
+    seen: seen as number,
+    hash,
+    total: total as number,
   };
 }
 
 function containerWindow(value: unknown): ContainerLogWindowCheckpoint | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (value === null || typeof value !== "object") {
     return undefined;
   }
-  const window = value as Record<string, unknown>;
+  const window: Record<string, unknown> = Array.isArray(value)
+    ? value.length === 10
+      ? {
+          sinceTime: value[0],
+          tailLines: value[1],
+          count: value[2],
+          seen: value[3],
+          hash: value[4],
+          truncated: value[5],
+          baseTime: value[6],
+          baseHashes:
+            typeof value[7] === "string" && /^(?:[A-Za-z0-9_-]{16}){0,16}$/.test(value[7])
+              ? (value[7].match(/.{16}/g) ?? [])
+              : undefined,
+          baseComplete: value[8],
+          ...(value[9] === null ? {} : { baseCount: value[9] }),
+        }
+      : {}
+    : (value as Record<string, unknown>);
   if (
     (window.sinceTime !== null && !validRuntimeLogFrontierTime(window.sinceTime)) ||
     (window.baseTime !== null && !validRuntimeLogFrontierTime(window.baseTime)) ||
@@ -203,7 +221,10 @@ function position(value: unknown): RuntimeLogCursorPosition | undefined {
     return undefined;
   }
   const record = value as Record<string, unknown>;
-  const hashes = record.h;
+  if (typeof record.h === "string" && !/^(?:[A-Za-z0-9_-]{16}){0,48}$/.test(record.h)) {
+    return undefined;
+  }
+  const hashes = typeof record.h === "string" ? (record.h.match(/.{16}/g) ?? []) : record.h;
   const window = record.w === undefined ? undefined : sandboxWindow(record.w);
   const container = record.cw === undefined ? undefined : containerWindow(record.cw);
   const hasPem = Object.hasOwn(record, "po") || Object.hasOwn(record, "pt");
@@ -268,7 +289,8 @@ export function createRuntimeLogCursorCodec(secret: string): RuntimeLogCursorCod
           r: value.restartCount,
           pr: value.previous,
           t: value.lastTime,
-          h: value.lastHashes.slice(-MAX_HASHES),
+          // Fixed-width hashes retain every ordered occurrence without punctuation.
+          h: value.lastHashes.slice(-MAX_HASHES).join(""),
           i: value.issuedAt,
           fc: value.frontierComplete,
           fn: value.frontierCount,
@@ -279,15 +301,29 @@ export function createRuntimeLogCursorCodec(secret: string): RuntimeLogCursorCod
           w:
             value.sandboxWindow === undefined
               ? undefined
-              : {
-                  s: value.sandboxWindow.since,
-                  l: value.sandboxWindow.tailLines,
-                  n: value.sandboxWindow.count,
-                  z: value.sandboxWindow.seen,
-                  h: value.sandboxWindow.hash,
-                  b: value.sandboxWindow.total,
-                },
-          cw: value.containerWindow,
+              : [
+                  value.sandboxWindow.since,
+                  value.sandboxWindow.tailLines,
+                  value.sandboxWindow.count,
+                  value.sandboxWindow.seen,
+                  value.sandboxWindow.hash,
+                  value.sandboxWindow.total,
+                ],
+          cw:
+            value.containerWindow === undefined
+              ? undefined
+              : [
+                  value.containerWindow.sinceTime,
+                  value.containerWindow.tailLines,
+                  value.containerWindow.count,
+                  value.containerWindow.seen,
+                  value.containerWindow.hash,
+                  value.containerWindow.truncated,
+                  value.containerWindow.baseTime,
+                  value.containerWindow.baseHashes.join(""),
+                  value.containerWindow.baseComplete,
+                  value.containerWindow.baseCount ?? null,
+                ],
         }),
       ).toString("base64url");
       return `v1.${payload}.${mac(secret, payload)}`;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import test from "node:test";
 
 import { OpenShellGateway } from "../../apps/controller/src/backends/openshell.ts";
@@ -114,12 +114,24 @@ function openShellSandboxDriver(gatewayClient) {
   );
 }
 
-async function sandboxFixture() {
+async function sandboxFixture(options = {}) {
   const gateway = logOnlyGatewayClient();
   const computeDriver = createRuntimeLogComputeDriver({ sandboxNamespace: SANDBOX_NAMESPACE });
+  const sandboxDriver = openShellSandboxDriver(gateway.client);
+  if (options.sandboxName !== undefined) {
+    const read = sandboxDriver.readSandboxLogs.bind(sandboxDriver);
+    // Exercise the core's accepted Driver identity width without replacing paging.
+    sandboxDriver.readSandboxLogs = async (...args) => ({
+      ...(await read(...args)),
+      sandbox: options.sandboxName,
+    });
+  }
   const fixture = await createRuntimeLogFixture({
     computeDriver,
-    sandboxDriver: openShellSandboxDriver(gateway.client),
+    sandboxDriver,
+    ...(options.cursorSecret === undefined
+      ? {}
+      : { agentRuntimeLogs: { enabled: true, cursorSecret: options.cursorSecret } }),
   });
   const target = await fixture.deployAgent("sandbox-logs");
   return { ...fixture, gateway, target };
@@ -1158,60 +1170,76 @@ test("sandbox empty checkpoint recovery suppresses the next single untimed snaps
   assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
 });
 
-test("sandbox cuts from a full overlap baseline keep cursors within route admission limits", async () => {
-  const fixture = await sandboxFixture();
-  const start = Date.now() - 1000;
-  const row = (i, message) => ({
-    sandboxId: SANDBOX_ID,
-    time: new Date(start + i).toISOString().replace("Z", "000000Z"),
-    level: "INFO",
-    target: "supervisor",
-    source: "sandbox",
-    message,
-    fields: {},
-  });
-  const anchors = Array.from({ length: 48 }, (_, i) => row(i, `anchor=${i}`));
-  fixture.gateway.state.lines = anchors;
-  const prime = await fixture.request(
-    "GET",
-    fixture.target.logsPath("source=sandbox&tailLines=200"),
-  );
-  assert.equal(prime.status, 200);
-  fixture.gateway.state.lines = [
-    ...anchors,
-    ...Array.from({ length: 150 }, (_, i) =>
-      row(i + 100, `row=${i}; diagnostic ${'--option="value" '.repeat(500)}`),
-    ),
-  ];
-  let cursor = prime.data.cursor;
-  const seen = [];
-  for (let page = 0; page < 10; page += 1) {
-    const response = await fixture.request(
+for (const wideIdentity of [false, true]) {
+  test(`sandbox full overlap cuts keep ${wideIdentity ? "maximum Driver identities" : "legacy cursors"} within admission limits`, async () => {
+    const cursorSecret = "disposable-legacy-baseline-cursor-secret-32";
+    const fixture = await sandboxFixture({
+      cursorSecret,
+      ...(wideIdentity ? { sandboxName: "s".repeat(253) } : {}),
+    });
+    const start = Date.now() - 1000;
+    const row = (i, message) => ({
+      sandboxId: wideIdentity ? "i".repeat(128) : SANDBOX_ID,
+      time: new Date(start + i).toISOString().replace("Z", "000000Z"),
+      level: "INFO",
+      target: "supervisor",
+      source: "sandbox",
+      message,
+      fields: {},
+    });
+    const anchors = Array.from({ length: 48 }, (_, i) => row(i, `anchor=${i}`));
+    fixture.gateway.state.lines = anchors;
+    const prime = await fixture.request(
+      "GET",
+      fixture.target.logsPath("source=sandbox&tailLines=200"),
+    );
+    assert.equal(prime.status, 200);
+    fixture.gateway.state.lines = [
+      ...anchors,
+      ...Array.from({ length: 150 }, (_, i) =>
+        row(i + 100, `row=${i}; diagnostic ${'--option="value" '.repeat(500)}`),
+      ),
+    ];
+    let cursor = prime.data.cursor;
+    if (!wideIdentity) {
+      // Existing v1 cursors store overlap hashes as an array; retain route decoding.
+      const decoded = JSON.parse(Buffer.from(cursor.split(".")[1], "base64url"));
+      decoded.h = decoded.h.match(/.{16}/g);
+      const payload = Buffer.from(JSON.stringify(decoded)).toString("base64url");
+      const mac = createHmac("sha256", cursorSecret)
+        .update(`occ-runtime-logs-cursor\0${payload}`)
+        .digest("base64url");
+      cursor = `v1.${payload}.${mac}`;
+    }
+    const seen = [];
+    for (let page = 0; page < 10; page += 1) {
+      const response = await fixture.request(
+        "GET",
+        fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
+      );
+      assert.equal(response.status, 200);
+      const lines = response.data.records.filter(({ type }) => type === "line");
+      assert.ok(
+        lines.every(({ message }) => message.startsWith("row=")),
+        "partial checkpoints retain the anchor baseline",
+      );
+      seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+      cursor = response.data.cursor;
+      assert.ok(cursor.length <= 2048);
+      assert.match(cursor, /^v1\.[A-Za-z0-9_-]{1,1900}\.[A-Za-z0-9_-]{43}$/);
+      if (!response.data.truncated) {
+        break;
+      }
+    }
+    assert.deepEqual(
+      seen,
+      Array.from({ length: 150 }, (_, i) => i),
+    );
+    const replay = await fixture.request(
       "GET",
       fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
     );
-    assert.equal(response.status, 200);
-    const lines = response.data.records.filter(({ type }) => type === "line");
-    assert.ok(
-      lines.every(({ message }) => message.startsWith("row=")),
-      "partial checkpoints retain the anchor baseline",
-    );
-    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
-    cursor = response.data.cursor;
-    assert.ok(cursor.length <= 2048);
-    assert.match(cursor, /^v1\.[A-Za-z0-9_-]{1,1900}\.[A-Za-z0-9_-]{43}$/);
-    if (!response.data.truncated) {
-      break;
-    }
-  }
-  assert.deepEqual(
-    seen,
-    Array.from({ length: 150 }, (_, i) => i),
-  );
-  const replay = await fixture.request(
-    "GET",
-    fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
-  );
-  assert.equal(replay.status, 200);
-  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
-});
+    assert.equal(replay.status, 200);
+    assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+  });
+}

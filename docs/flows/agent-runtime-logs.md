@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/c8de19eb-fe81-4a26-b639-a0cb02360f23
+last_updated_session: authoring-run/377d6942-f5b9-4c5f-825c-cdfdfeea7501
 ---
 
 # Agent runtime logs flow
@@ -173,7 +173,8 @@ keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
 Both readers checkpoint serialized cuts with an authenticated window digest,
 raw-prefix count, query floor and pre-cut baseline. Sandbox checkpoints reuse the
-outer time and hashes for that baseline and compact only extra window fields,
+outer time and hashes for that baseline; fixed-width hashes and window tuples
+retain every occurrence without duplicate fields or array punctuation,
 keeping emitted cursors within response and query admission limits. Known container times retain
 the captured floor before digesting; empty checkpoints persist. Stable windows drain
 before overlap advances, including untimed lines and over-capacity timestamp
@@ -244,6 +245,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 05:09: Compact fixed-width hash lists and both private window tuples while retaining legacy hash decoding. (authoring-run/377d6942-f5b9-4c5f-825c-cdfdfeea7501 - 95c76244bcc6f88989993a30730e63dc45b87f65)
 
 - 2026-10-10 05:02: Keep full Sandbox overlap baselines in one cursor location while compacting byte-window observations. (authoring-run/c8de19eb-fe81-4a26-b639-a0cb02360f23 - a0fd14ec40c2e5b8c66537e457ddd2d8202adc6e)
 
