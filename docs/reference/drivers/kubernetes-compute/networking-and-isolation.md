@@ -77,10 +77,10 @@ required-header and device auto-approval settings retain their separate purposes
 
 An optional [loopback password](storage-and-credentials.md#runtime-credentials)
 supports operator verification; it does not change the gateway's authentication mode.
-Native readiness and private traffic require HTTP;
-`gateway.tls.enabled` must be omitted or false. Deployment refuses true before
-creating revisions. Envoy terminates TLS. Docker and SSH support password or
-trusted proxy authentication over native HTTP.
+Kubernetes private status-port `GET /readyz` returns empty `200`/`503`, retaining
+readiness gates; Gateway probes HTTP. `gateway.tls.enabled: true` is refused
+before revision creation; omit/false is valid. Envoy terminates TLS. Docker/SSH
+retain managed-password defaults and explicit trusted-proxy HTTP.
 
 Operators must verify that the configured CIDRs contain the proxy's actual
 source addresses and exclude untrusted sources. CIDRs do not authenticate a
