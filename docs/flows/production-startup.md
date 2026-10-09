@@ -119,9 +119,9 @@ and the later dependency, collector, Slack proxy, and Envoy policies allow
 UDP/TCP ports `53` and `5353` to the configured DNS peer; see the
 [Helm DNS contract](../reference/settings/production.md#required-production-controller-environment).
 
-`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:471` refuses fractional
-routing ports before Kubernetes submission. Sprig `int` truncates YAML numbers
-while the templates emit fractions.
+`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` refuses
+fractional routing ports and requires a decimal `database.port` from 1 to 65535,
+without leading zeros, before emitting NetworkPolicies.
 
 The Helm initialization hook preserves the full release name and shortens its
 suffix to Kubernetes' 63-character limit. Both containers mount

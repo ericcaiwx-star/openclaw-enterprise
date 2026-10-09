@@ -303,6 +303,36 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
 });
 
 test(
+  "database routing refuses invalid ports before emitting NetworkPolicies",
+  tooling,
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "oce-database-port-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const valuesFile = join(directory, "ports.yaml");
+    for (const port of [5342.5, 65536, 0, -1, "05342", "postgresql", "9223372036854775808"]) {
+      await writeFile(valuesFile, `database:\n  port: ${JSON.stringify(port)}\n`);
+      await assert.rejects(
+        render({}, { valuesFiles: [valuesFile] }),
+        ({ code, stderr }) => code !== 0 && stderr.includes("database.port must be"),
+        JSON.stringify(port),
+      );
+    }
+    for (const port of [1, 5433, 65535, "5433"]) {
+      await writeFile(valuesFile, `database:\n  port: ${JSON.stringify(port)}\n`);
+      const objects = await resources((await render({}, { valuesFiles: [valuesFile] })).stdout);
+      const databaseRules = objects
+        .filter((object) => object.kind === "NetworkPolicy")
+        .flatMap((object) => object.spec.egress ?? [])
+        .filter((rule) => rule.to?.some((peer) => peer.ipBlock?.cidr === "10.45.0.12/32"));
+      assert.equal(databaseRules.length, 2, "bootstrap and controller database routing");
+      for (const rule of databaseRules) {
+        assert.deepEqual(rule.ports, [{ protocol: "TCP", port: Number(port) }]);
+      }
+    }
+  },
+);
+
+test(
   "gateway routing refuses fractional YAML ports before emitting resources",
   tooling,
   async (t) => {
