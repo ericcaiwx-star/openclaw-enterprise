@@ -51,9 +51,9 @@ test("a Gateway smoke failure with over 16 KiB of logs keeps their final lines w
   // What the CI reporter keeps of the message.
   const reported = error.message.slice(0, reporterMessageLimit);
   assert.match(reported, /^Gateway container exited before readiness with code 1\.\n/);
-  assert.match(reported, /\[\.\.\. \d+ earlier chars omitted \.\.\.\]/);
-  assert.match(reported, /doctor check 399: x+\n/);
   assert.match(reported, /Migrating agent databases\nwrapper failed: final stderr line/);
+  assert.match(reported, /doctor check 399: x+\n/);
+  assert.match(reported, /\[\.\.\. \d+ earlier chars omitted \.\.\.\]/);
   assert.doesNotMatch(reported, /first doctor line/);
   assert.ok(
     error.message.length <= reporterMessageLimit,
