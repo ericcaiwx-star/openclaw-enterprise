@@ -42,7 +42,7 @@ upgrade or preserve a demo. See the [demo lifecycle](../../testing/kubernetes.md
   if its Secret lacks the required annotation.
 - Run the [split-layout check](../../reference/drivers/kubernetes-compute.md#existing-split-layout-installations).
   If it reports split-layout tenants,
-  [adopt them](breaking-changes.md#2026-10-05-split-layout-tenants-block-the-controller-upgrade)
+  [adopt them](split-layout-upgrade.md)
   first or keep the existing release.
   The script's startup preflight also refuses split-layout tenants and stops
   before it scales the API and worker to zero.

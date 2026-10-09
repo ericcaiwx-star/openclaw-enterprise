@@ -46,8 +46,8 @@ kubectl get namespaces -l openclaw.dev/gateway-namespace -L openclaw.dev/namespa
 In a single cluster, a row with an empty `NAMESPACE` column is a split-layout
 tenant. The two-cluster profile's control-cluster rows are expected.
 
-Adopt each tenant in place with the steps in the
-[breaking-change notice](../../guides/deploy/breaking-changes.md#2026-10-05-split-layout-tenants-block-the-controller-upgrade):
+Adopt each tenant in place with the
+[split-layout upgrade](../../guides/deploy/split-layout-upgrade.md):
 the storage namespace becomes the tenant namespace and keeps its Secrets,
 Configurations and Gateway state, and the old namespace's claims and Agent
 Secrets move into it. Compute accepts the `oce-gateways-<hash>` name as a tenant
