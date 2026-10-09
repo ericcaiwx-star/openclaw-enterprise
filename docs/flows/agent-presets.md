@@ -1,7 +1,7 @@
 ---
 created: 2026-09-21
-updated: 2026-10-06
-last_updated_session: authoring-run/a45c48cd-bde3-41b1-8e3d-57bf774df237
+updated: 2026-10-10
+last_updated_session: authoring-run/6f54c753-eb8a-4e11-b078-b178ba613240
 ---
 
 # Agent Presets flow
@@ -116,6 +116,13 @@ helper before queuing provisioning, so denied or invalid defaults also roll back
 the new Namespace. Disabling defaults leaves persisted copies alone.
 
 ### 2. Admit and store a template
+
+`apps/controller/src/index.ts:createFastifyApp` gives Preset POST/PATCH a
+bounded transport budget derived from the shared 1 MiB JSON limit. It allows
+JSON string escapes and the request envelope while preserving an explicitly
+configured smaller body limit. The ordinary 64 KiB limit cannot hold four
+supported 16 KiB workspace files. Transport overflow returns 413; accepted
+requests still pass through the existing template, IAM and Driver checks.
 
 `packages/occ/src/index.ts:OpenClawController.createPreset`
 
@@ -291,6 +298,8 @@ or an immutable admitted revision.
 ## Manual Notes
 
 ## Changelog
+
+- 2026-10-10 02:23: Admit contract-sized Preset writes at the HTTP boundary; template limits and mutation checks remain unchanged. (authoring-run/6f54c753-eb8a-4e11-b078-b178ba613240 - 5bf37b274fcdfefb49dfa99984a15d99b757dc8e)
 
 - 2026-10-06 22:22: Locate Preset file loading in its adjacent composition module; initialization remains unchanged. (authoring-run/a45c48cd-bde3-41b1-8e3d-57bf774df237 - 17e10b6d34cc2c805b3910fddfef191d3dd1b3f8)
 - 2026-10-05 05:30: Only the API logs Preset warnings.
