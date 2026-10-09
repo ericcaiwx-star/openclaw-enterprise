@@ -392,7 +392,9 @@ test("Preset writes check the grant again in their transaction after the pre-bod
   const preBodyCheck = occ.authorizePresetWrite;
   occ.authorizePresetWrite = async (...args) => {
     await preBodyCheck.apply(occ, args);
-    fixture.policy.bindings.splice(fixture.policy.bindings.indexOf(writer), 1);
+    const index = fixture.policy.bindings.indexOf(writer);
+    assert.notEqual(index, -1);
+    fixture.policy.bindings.splice(index, 1);
   };
   t.after(() => delete occ.authorizePresetWrite);
   for (const [method, path] of [

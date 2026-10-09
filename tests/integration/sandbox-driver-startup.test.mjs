@@ -2459,6 +2459,8 @@ test("OpenShell startup admits exactly the endpoints both consumers can parse an
     ["[::1]:65536", false],
     ["gateway.example.test?x:8080", false],
     ["user@gateway.example.test:8080", false],
+    // An empty userinfo hides a colon before the host.
+    [":@gateway.example.test:8080", false],
     ["http://gateway.example.test", true],
     ["http://gateway.example.test:8080", true],
     ["http://[::1]:8080", true],

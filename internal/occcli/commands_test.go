@@ -300,7 +300,11 @@ func TestServiceAccountForceDeleteRejectsAMalformedSuccess(t *testing.T) {
 			writer.WriteHeader(http.StatusAccepted)
 		}, "OCC returned an unexpected response (HTTP 202)"},
 	} {
-		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodDelete || request.URL.RawQuery != "force=true" {
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			test.respond(writer)
 		}))
 		command := New(&bytes.Buffer{}, &bytes.Buffer{})
