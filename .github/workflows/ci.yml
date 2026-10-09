@@ -417,9 +417,11 @@ jobs:
       # logging records which endpoint served each pull for the last step.
       # Runs before Buildx starts its builder container, which a restart stops.
       - name: Pull Docker Hub images through a mirror
+        shell: bash
         run: |
           config=/etc/docker/daemon.json
-          current="$(sudo cat "$config" 2>/dev/null || echo '{}')"
+          current="$(sudo cat "$config" 2>/dev/null || true)"
+          [[ -n "$current" ]] || current='{}'
           jq '. + {"registry-mirrors": ["https://mirror.gcr.io"], "debug": true}' <<<"$current" |
             sudo tee "$config" >/dev/null
           sudo systemctl restart docker
@@ -464,7 +466,10 @@ jobs:
         run: node scripts/ci/first-agent-smoke.mjs run
       - name: Show Docker Hub pull endpoints
         if: ${{ !cancelled() }}
+        shell: bash
         run: |
+          # An empty list below proves nothing if the storage driver changed.
+          docker info --format 'driver {{.Driver}}, registry mirrors {{json .RegistryConfig.Mirrors}}'
           sudo journalctl -u docker --no-pager -o cat |
             grep -E 'Trying to pull|Attempting next endpoint|toomanyrequests' || true
 

@@ -80,8 +80,9 @@ The job runs on a GitHub-hosted runner whose egress addresses other users share,
 so anonymous Docker Hub pulls can hit Docker Hub's rate limit. Before Buildx
 starts, the job points the runner's Docker Engine and the Buildx builder at the
 public `mirror.gcr.io` mirror, with no credentials. Pinned digests are still
-verified, and an image the mirror lacks falls back to Docker Hub. The last step
-prints which endpoint served each Engine pull. Images that the k3d node's
+verified, and an image the mirror lacks falls back to Docker Hub, which can still
+hit the limit. The last step prints which endpoint served each Engine pull; a
+fallback shows as `Attempting next endpoint`. Images that the k3d node's
 containerd pulls inside the cluster still come from their own registries.
 
 ## Limits
