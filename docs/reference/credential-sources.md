@@ -1,17 +1,20 @@
 # Credential sources
 
 A credential source registers a Namespace Secret with the Installation's
-selected [Credential Gateway](drivers/credential-gateway.md). The gateway copies
-and applies its value outside the Agent workload; the Harness never receives it.
-Agents bind sources through `credentialSources` and select model authentication
-with [`harnessAuth`](agents.md#harness-authentication).
+selected [Credential Gateway](drivers/credential-gateway.md). The gateway keeps
+its own copy of the value and applies it outside the Agent workload, so the
+Harness never receives the real credential. An Agent uses a model source through
+[`harnessAuth`](agents.md#harness-authentication) and other sources through its
+`credentialSources` list.
 
-Sources require a Credential Gateway; [OpenShell](drivers/openshell-credential-gateway.md)
-is the only implementation. Its `openai` type authenticates dedicated Codex models;
-`bearer-token` carries a static token to one API endpoint. With a selected
-[Credential Refresh Driver](drivers/credential-refresh.md), `oauth2-client-credentials`
-and `oauth2-refresh-token` let the gateway mint and refresh OAuth2 access tokens.
-OpenShell is not a supported production Agent path; see its
+Credential sources require a selected Credential Gateway. The only
+implementation is the [OpenShell Credential Gateway](drivers/openshell-credential-gateway.md).
+Its `openai` type authenticates dedicated Codex models, and its `bearer-token`
+type carries a static token to one API endpoint. With a
+[Credential Refresh Driver](drivers/credential-refresh.md) selected, its
+`oauth2-client-credentials` and `oauth2-refresh-token` types carry OAuth2
+access tokens that the gateway mints and refreshes itself. OpenShell is not a supported
+production Agent path; see its
 [qualification requirements](drivers/openshell-sandbox.md#qualification-contract).
 
 ## Register a source
@@ -37,8 +40,11 @@ OpenShell is not a supported production Agent path; see its
    }
    ```
 
-Success (`201`) returns metadata including `id` (prefix `cs_`), binding `ref`,
-and gateway `status`, never credentials. Fields:
+A successful request returns `201` with the source metadata. Its `id` starts
+with `cs_`, and `ref` is the reference used in Agent bindings. The response
+includes the gateway's `status` but never a credential value.
+
+The request fields are:
 
 - `name`: required; unique within the Namespace.
 - `type`: required; a type from the gateway catalog. A type the selected gateway
@@ -50,11 +56,13 @@ and gateway `status`, never credentials. Fields:
   `400 INVALID_REQUEST` before any Secret is read, and a reference to a Secret
   the Namespace does not hold fails with `404`.
 
-OCC rejects unknown and missing required fields before reading through the
-Secret Driver. It sends values to the gateway and stores only references.
-Records start `registering`. Gateway rejection removes any copy and the record;
-an unanswered call, such as a timeout, leaves the record `deleting` because a
-copy may appear later. Send DELETE to remove it.
+OCC rejects unknown fields and missing required fields before it reads any
+Secret. It reads each value through the Secret Driver, sends the values to the
+gateway, and stores only the Secret references. OCC records the source as
+`registering` before the gateway call. If the gateway rejects the registration,
+OCC deletes any copy and the record. If the call fails without an answer, such as
+on a timeout, a copy may still appear later, so the record stays listed as
+`deleting`; send DELETE to remove it.
 
 A `refresh`-type source becomes `ready` only after the gateway mints its first
 token. If the issuer refuses the material or cannot be reached, registration
@@ -81,12 +89,12 @@ bound or deployed.
 
 ## Bind a source to an Agent
 
-List the Agent's sources in `credentialSources`, up to eight
+List every source the Agent uses in its `credentialSources`, up to eight
 entries of `{ "sourceId": "cs_…" }`, on create or update. An update replaces the
 list, `[]` removes it, and a source cannot appear twice. Any catalog type can be
 listed.
 
-For Harness model authentication, also set
+To have the Harness authenticate its model with a source, also set
 `harnessAuth` to `{ "method": "credential_source", "sourceId": "cs_…" }`. It
 names one listed entry whose catalog type has `harnessAuth`; it does not bind
 the source separately. A request that names an unlisted source, or removes the
@@ -185,78 +193,9 @@ update the source to reference it.
 ## Withdraw a source from an Agent
 
 Withdrawal revokes a source from an Agent's active revision while the revision
-keeps running. Send
-`POST /namespaces/:namespaceId/agents/:agentId/credential-sources/:credentialSourceId/withdraw`.
-The caller needs `agent:operate`, and the active revision must have been
-admitted with that source, as its Harness authentication or in
-`credentialSources`. The request returns `202` with the withdrawal in state `pending`.
-A deployment admitted with the source but not yet active gets its own
-withdrawal, so it never attaches the source. A withdrawn Harness source fails
-that deployment with `CREDENTIAL_WITHDRAWN`; otherwise it activates without the
-source, and the read below then returns its withdrawal. An earlier revision
-that still runs because the active revision's deployment has not finished
-replacing it gets its own withdrawal too. A replay returns the
-same withdrawal and makes the caller its `requestedBy`. It queues another
-attempt only if none is queued or running; a queued attempt runs at once.
-
-The worker detaches the source from the revision's Sandbox and records
-`revoked` only after the gateway confirms that the revision's placeholders no
-longer resolve, even in running processes. Requests already forwarded upstream
-are not undone. Read the state with
-`GET /namespaces/:namespaceId/agents/:agentId/credential-sources/:credentialSourceId/withdrawal`,
-which requires `agent:read`. It returns `requestedBy`, the principal whose
-`agent:operate` the worker rechecks, `reason` with `lastAttemptAt` for the
-worker's latest attempt, and `withdrawalInProgress`, which is `true` while an
-attempt is queued or running. A `pending` withdrawal with reason
-`CREDENTIAL_WITHDRAWAL_PENDING` is waiting for the gateway; a Sandbox without a
-running process never confirms revocation. `AUTHORIZATION_DENIED` or
-`ACTOR_REVOKED` means the requester lost `agent:operate`; another operator can
-send the withdraw request again to retry it on their own authority.
-`CREDENTIAL_WITHDRAWAL_MISCONFIGURED` or `CREDENTIAL_WITHDRAWAL_OWNERSHIP_CONFLICT`
-means Compute cannot reach the revision's Sandbox as configured, or found an
-object it does not own; the attempt fails without retries, even with
-maintenance. Correct the cause, then send the request again.
-
-The worker retries an unconfirmed withdrawal a few times with backoff
-(`OCC_WORKER_MAX_ATTEMPTS`; by default about 12 seconds). If those attempts run
-out because the gateway is unreachable or has not confirmed revocation (or the
-last attempt outlived its worker's claim, after a worker restart or a hung
-gateway call), and Compute has no maintenance (the Kubernetes Compute Driver
-has none), the worker queues another series 30 seconds later, then after 1, 2
-and 4 minutes, then every 5 minutes, 15 series in all (about an hour).
-Meanwhile the read shows `pending`, the latest `reason`, and
-`withdrawalInProgress: true`, and the source still resolves in the Sandbox. The first series the gateway confirms
-records `revoked`, with no replay needed. A withdraw request sent while a
-series waits queues nothing more; the series runs at once, on the caller's
-authority.
-
-When the last series fails, or every withdrawal left on the revision is denied
-to its requester, the withdrawal stays `pending` with
-`withdrawalInProgress: false`. Nothing retries it on its own unless the
-revision has maintenance (see below). Send the withdraw request again to queue
-another attempt, with its own series.
-
-A withdrawn source never re-attaches to that revision. If its Sandbox is
-recreated, a withdrawn source is left out and the revision keeps running
-without it, unless `harnessAuth` names it. If a Sandbox create that started
-before the withdrawal finishes after it, the next deployment or maintenance
-pass detaches the source again. A withdrawn Harness source instead fails provisioning with
-`CREDENTIAL_WITHDRAWN`, and maintenance of the revision stops preparing it. While any
-withdrawal is `pending`, each maintenance pass queues another attempt if none is
-outstanding. Maintenance does not recheck grants on withdrawn sources, which never
-attach again, so removing one cannot stop it. After model-source withdrawal,
-maintenance never prepares the revision again. It continues recovering pending
-tool withdrawals even when the model source is already `revoked`, and stops only when every withdrawal is `revoked`.
-Redeploy to resume Compute repair.
-
-Withdrawals of different sources on one revision share one worker attempt, but
-each is authorized by its own `requestedBy`. A requester who lost
-`agent:operate` leaves only their withdrawal `pending` with
-`AUTHORIZATION_DENIED`; the others are still revoked.
-
-The revision still references the source, so the source cannot be deleted until
-a redeploy replaces the revision. Redeploy the Agent with a replacement source
-or another authentication method.
+keeps running, and the source cannot be deleted until a redeploy replaces that
+revision. [Credential source withdrawal](credential-sources/withdrawal.md)
+covers the request, its retries, and maintenance.
 
 ## Delete a source
 
@@ -306,19 +245,20 @@ after the caller's grant and the source lookup. `GET` on such a source reports a
 
 ## Errors
 
-| Status                                  | Meaning                                                                                                                                            |
-| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400 INVALID_REQUEST`                   | Malformed fields, a foreign-Namespace Secret, or an unlisted Harness source.                                                                       |
-| `403 FORBIDDEN`                         | Missing source or Secret permission.                                                                                                               |
-| `404 NOT_FOUND`                         | Source or Secret absent from the Namespace, invalid catalog field, or no matching active-revision source/withdrawal.                               |
-| `409 NAMESPACE_NOT_READY`               | Namespace is not `ready`.                                                                                                                          |
-| `409 RESOURCE_CONFLICT`                 | Source still referenced, not ready, static for rotation, or changed concurrently; unsupported source type; no active revision or required Sandbox. |
-| `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED` | No Credential Gateway for registration, update, rotation, deletion, binding or deployment with source bindings.                                    |
-| `503 DEPENDENCY_UNAVAILABLE`            | Unavailable Gateway, Refresh or Secret Driver; failed gateway call or token mint; source belongs to a previously selected gateway.                 |
+| Status                                  | Meaning                                                                                                                                                                                                                                                |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `400 INVALID_REQUEST`                   | The body or a field name is malformed, a Secret reference names another Namespace, or a credential-source `harnessAuth` is not listed.                                                                                                                 |
+| `403 FORBIDDEN`                         | A required `credential_source` or `secret` permission is missing.                                                                                                                                                                                      |
+| `404 NOT_FOUND`                         | The source or Secret is not in the exact Namespace, or a catalog field is invalid; or the Agent's active revision does not use the source or has no withdrawal for it.                                                                                 |
+| `409 NAMESPACE_NOT_READY`               | The Namespace is not `ready`.                                                                                                                                                                                                                          |
+| `409 RESOURCE_CONFLICT`                 | The source is still referenced, not `ready` for an update or rotation, static for a rotation, or changed during the request; the gateway does not offer its type; the Agent has no active revision to withdraw from; or sources need a Sandbox Driver. |
+| `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED` | Registration, update, rotation, deletion, Agent binding, or deploying an Agent that binds a source, on an Installation that selects no Credential Gateway.                                                                                             |
+| `503 DEPENDENCY_UNAVAILABLE`            | The selected Credential Gateway, Credential Refresh Driver, or Secret Driver is unavailable, the gateway call failed, a `refresh` type could not mint a token, or the source was registered through a previously selected gateway.                     |
 
 ## Related
 
 - [CredentialGatewayDriver contract](drivers/credential-gateway.md)
 - [Credential source lifecycle flow](../flows/credential-source-lifecycle.md)
+- [Credential source withdrawal](credential-sources/withdrawal.md)
 - [Secrets](../guides/topics/secrets.md) and [Permissions](cheatsheets/permissions.md)
 - [HTTP API: credential sources](api.md#credential-sources)
