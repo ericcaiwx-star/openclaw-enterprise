@@ -242,6 +242,10 @@ export function installFixture(scenario, evidence) {
       ? { repositoryBindings: structuredClone(scenario.repositoryBindings) }
       : {}),
   };
+  for (const [name, content] of Object.entries(scenario.workspaceFiles ?? {})) {
+    files.set(`${agent.id}/${name}`, content);
+  }
+
   agents.set(agent.id, agent);
   credentials.set(agent.id, { transportConfigured: scenario.transport !== false });
   function snapshot(owner, id, revision) {

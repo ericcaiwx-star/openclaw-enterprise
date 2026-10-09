@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
-updated: 2026-09-29
-last_updated_session: 01a0eb0e-dbc1-78d1-91b0-ea91ee87c00f
+updated: 2026-10-10
+last_updated_session: authoring-run/04605df7-b242-47e5-9f05-3c9ab4fcc55b
 ---
 
 # Console Agent editing and runtime requests
@@ -250,7 +250,9 @@ Pickers switch references; rotating shared Secret values is separate.
 history reads: workspace contents belong to the live Agent. Without an active
 revision, the Agent gets an unavailable explanation without file requests.
 
-The editor GETs each supported filename. A successful response reauthorizes file
+The editor GETs each supported filename. `renderWorkspaceFiles` compares its
+baseline with the textarea's LF representation, so CRLF reads stay clean without
+rewriting the live file. Only an explicit edit enables Save. A successful response reauthorizes file
 access before restoring retained text,
 including empty edits. Drafts keep their original baseline; Reload replaces them
 with the current file. `404` permits an explicit create attempt, and other
@@ -337,6 +339,8 @@ worker cleanup and the Namespace-owned resources it preserves.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 05:46: Keep untouched CRLF workspace reads clean in the editor. (authoring-run/04605df7-b242-47e5-9f05-3c9ab4fcc55b - cd30d20a297fdb0f2b712122b705aa4c168564ff)
 
 - 2026-09-29 20:00: Trace draft repository editing and save guards. (public-pr/374)
 

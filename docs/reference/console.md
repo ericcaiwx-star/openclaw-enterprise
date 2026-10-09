@@ -282,7 +282,7 @@ Each file has its own **Save** and **Reload**. A save creates or replaces only
 that file through the [workspace file API](agents.md#workspace-files); the editor
 enforces the API's 16 KiB UTF-8 and Unicode limits. Loading requires Agent `read`; saving
 requires `operate`. Writes have no version check: the last writer wins. Reload
-replaces unsaved edits with the current file.
+replaces unsaved edits with the current file. The editor uses LF line endings; reading CRLF text does not enable Save or rewrite the file.
 
 A failed write preserves the editor contents. An unknown outcome disables that
 file's Save until a successful reload, so it is never replayed automatically; review the loaded contents before
