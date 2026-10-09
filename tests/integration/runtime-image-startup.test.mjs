@@ -1134,17 +1134,19 @@ test(
       "/home/node",
     ]);
     const configurationPath = await temporaryGatewayConfiguration(t, "openclaw");
-    const startGateway = () =>
+    const startGateway = (readinessAttempts) =>
       runGatewaySmoke(t, "openclaw", {
         configurationPath: "/etc/openclaw/openclaw.json",
         entrypoint: KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
+        readinessAttempts,
         tmpfs: [],
         volumes: [`${configurationPath}:/etc/openclaw/openclaw.json:ro`, `${volume}:/home/node`],
         withAppServer: false,
       });
 
-    // The current OpenClaw refuses this database until Doctor migrates it.
-    const released = await startGateway();
+    // The current OpenClaw refuses this database until Doctor migrates it. Doctor's
+    // full repair pass takes about 20 s here and over a minute on a busy CI runner.
+    const released = await startGateway(240);
     assert.deepEqual(
       stateMigrationPhases(released.logs).map(({ outcome }) => outcome),
       ["ok"],
