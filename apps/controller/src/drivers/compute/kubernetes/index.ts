@@ -692,10 +692,10 @@ class KubernetesApiFailureEvidence extends Error {
 }
 
 /**
- * The Status reason of a Kubernetes API answer, only when it is a bare CamelCase word. The
- * client keeps an error answer's body as its JSON text.
+ * The bounded Status body of a Kubernetes API answer. The client keeps an error
+ * answer's body as its JSON text.
  */
-function kubernetesStatusReason(error: unknown): string | undefined {
+function kubernetesStatus(error: unknown): Record<string, unknown> | undefined {
   const body = asRecord(error)?.body;
   let status: unknown = body;
   if (typeof body === "string" && body.length <= 65_536) {
@@ -705,8 +705,35 @@ function kubernetesStatusReason(error: unknown): string | undefined {
       return undefined;
     }
   }
-  const reason = asRecord(status)?.reason;
+  return asRecord(status);
+}
+
+function kubernetesStatusReason(error: unknown): string | undefined {
+  const reason = kubernetesStatus(error)?.reason;
   return typeof reason === "string" && /^[A-Za-z]{1,64}$/u.test(reason) ? reason : undefined;
+}
+
+function initialContainerLogUnavailable(error: unknown, pod: unknown, container: string): boolean {
+  const statuses = asRecord(asRecord(pod)?.status)?.containerStatuses;
+  const current = Array.isArray(statuses)
+    ? statuses.map(asRecord).find((status) => status?.name === container)
+    : undefined;
+  const reason = asRecord(asRecord(current?.state)?.waiting)?.reason;
+  if (
+    (reason !== "PodInitializing" && reason !== "ContainerCreating") ||
+    current?.restartCount !== 0 ||
+    isNonEmptyString(current.containerID) ||
+    asRecord(asRecord(current.lastState)?.terminated) !== undefined
+  ) {
+    return false;
+  }
+  const status = kubernetesStatus(error);
+  return (
+    status?.code === 400 &&
+    status.reason === "BadRequest" &&
+    status.message ===
+      `container "${container}" in pod "${asRecord(asRecord(pod)?.metadata)?.name}" is waiting to start: ${reason}`
+  );
 }
 
 function kubernetesApiFailureEvidence(
@@ -3500,8 +3527,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
         ),
       );
     } catch (error) {
-      // A container that never restarted has no previous instance.
-      if (request.previous && numericErrorStatus(error) === 400) {
+      // Initial preparation has no current output yet. Require both owned stream
+      // state and kubelet's exact answer; stale Pod status must not hide live logs.
+      if (
+        numericErrorStatus(error) === 400 &&
+        (request.previous || initialContainerLogUnavailable(error, owned, request.container))
+      ) {
         raw = "";
       } else {
         throw error;

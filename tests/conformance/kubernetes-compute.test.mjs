@@ -15893,6 +15893,8 @@ function runtimeLogDriverFixture({ twoCluster = false } = {}) {
     eventError: undefined,
     eventPage: undefined,
     nodeName: "runtime-logs-node",
+    waitingReason: undefined,
+    containerId: undefined,
     extraEvents: [],
     containerStatus: undefined,
   };
@@ -15912,14 +15914,21 @@ function runtimeLogDriverFixture({ twoCluster = false } = {}) {
     },
     spec: state.nodeName === undefined ? {} : { nodeName: state.nodeName },
     status: {
-      phase: "Running",
-      conditions: [{ type: "Ready", status: "True" }],
+      phase:
+        state.waitingReason === undefined || state.waitingReason === "CrashLoopBackOff"
+          ? "Running"
+          : "Pending",
+      conditions: [{ type: "Ready", status: state.waitingReason === undefined ? "True" : "False" }],
       containerStatuses: [
         {
           name: role,
-          ready: true,
+          ready: state.waitingReason === undefined,
           restartCount: state.restartCount[role],
-          state: { running: { startedAt: new Date("2026-09-30T11:00:00Z") } },
+          state:
+            state.waitingReason === undefined
+              ? { running: { startedAt: new Date("2026-09-30T11:00:00Z") } }
+              : { waiting: { reason: state.waitingReason } },
+          ...(state.containerId === undefined ? {} : { containerID: state.containerId }),
           ...(state.restartCount[role] === 0
             ? {}
             : {
@@ -16533,6 +16542,81 @@ test("Kubernetes runtime log and Event 403s become the typed cluster RBAC error"
     fixture.request("gateway", { previous: true }),
   );
   assert.deepEqual(empty.lines, []);
+});
+
+test("Kubernetes initial container log reads wait without swallowing other failures", async (t) => {
+  for (const source of ["gateway", "agent"]) {
+    for (const reason of ["PodInitializing", "ContainerCreating"]) {
+      await t.test(`${source}: ${reason}`, async () => {
+        const fixture = runtimeLogDriverFixture();
+        fixture.state.waitingReason = reason;
+        fixture.state.restartCount[source] = 0;
+        const waiting = (
+          message = `container "${source}" in pod "${source}-runtime-logs-pod" is waiting to start: ${reason}`,
+        ) =>
+          Object.assign(new Error("Kubernetes BadRequest"), {
+            statusCode: 400,
+            body: JSON.stringify({
+              apiVersion: "v1",
+              kind: "Status",
+              code: 400,
+              reason: "BadRequest",
+              message,
+            }),
+          });
+        fixture.state.logError = waiting();
+        const empty = await fixture.driver.readAgentRuntimeLogs(
+          fixture.binding,
+          fixture.request(source),
+        );
+        assert.deepEqual(empty.lines, []);
+        assert.equal(empty.stream.restartCount, 0);
+        assert.equal(empty.truncated, false);
+
+        // Pod status can lag startup. A readable current instance must still be read.
+        fixture.state.logError = undefined;
+        fixture.state.logs[source] = "2026-09-30T12:00:00Z runtime started\n";
+        const running = await fixture.driver.readAgentRuntimeLogs(
+          fixture.binding,
+          fixture.request(source),
+        );
+        assert.deepEqual(running.lines, [{ time: "2026-09-30T12:00:00Z", raw: "runtime started" }]);
+
+        for (const message of [
+          "sinceSeconds must be greater than 0",
+          `container "${source}" in pod "different-pod" is waiting to start: ${reason}`,
+          `container "different-container" in pod "${source}-runtime-logs-pod" is waiting to start: ${reason}`,
+        ]) {
+          fixture.state.logError = waiting(message);
+          await assert.rejects(
+            fixture.driver.readAgentRuntimeLogs(fixture.binding, fixture.request(source)),
+            fixture.state.logError,
+          );
+        }
+
+        // An assigned instance ID makes initial absence uncertain; keep the failure.
+        fixture.state.waitingReason = "ContainerCreating";
+        fixture.state.logError = waiting(
+          `container "${source}" in pod "${source}-runtime-logs-pod" is waiting to start: ContainerCreating`,
+        );
+        fixture.state.containerId = "containerd://existing-instance";
+        await assert.rejects(
+          fixture.driver.readAgentRuntimeLogs(fixture.binding, fixture.request(source)),
+          fixture.state.logError,
+        );
+        fixture.state.containerId = undefined;
+        fixture.state.restartCount[source] = 1;
+        fixture.state.waitingReason = "CrashLoopBackOff";
+        fixture.state.logError = waiting(
+          `container "${source}" in pod "${source}-runtime-logs-pod" is waiting to start: CrashLoopBackOff`,
+        );
+        await assert.rejects(
+          fixture.driver.readAgentRuntimeLogs(fixture.binding, fixture.request(source)),
+          fixture.state.logError,
+        );
+      });
+    }
+  }
 });
 
 test("Kubernetes runtime log reads drop kubelet's untimestamped log-unavailable answer", async () => {
