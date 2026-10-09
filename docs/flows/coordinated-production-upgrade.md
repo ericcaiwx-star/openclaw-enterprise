@@ -1,7 +1,7 @@
 ---
 created: 2026-09-23
-updated: "2026-10-05"
-last_updated_session: "authoring-run/0b8bd46b-85c0-4664-8dbd-2ee77cd7b602"
+updated: "2026-10-10"
+last_updated_session: "authoring-run/35b00357-b0c6-459f-aec1-b4fb63620dff"
 ---
 
 # Production image upgrade flow
@@ -203,7 +203,11 @@ record a verified accepted response and resume.
 
 The script polls each returned deployment through its authorized status
 operation, confirms active revision selection, and waits for all revision Pods
-to be `Running` and `Ready` on the candidate runtime digest. Embedded execution
+to be `Running` and `Ready` on the candidate runtime digest. Before OpenClaw
+starts, `GATEWAY_RUNTIME_ENTRYPOINT` runs `openclaw doctor --fix
+--non-interactive` once when an agent database uses an older schema, such as a
+2026-09-28 release Gateway's; a database still older holds the Gateway unready
+with check `state-migration`. Embedded execution
 requires one runtime container; dedicated execution requires both gateway and
 Agent containers. Each replacement gateway then runs read-only
 `openclaw doctor --lint --json --severity-min error`. Failures retain dispatch,
@@ -218,6 +222,18 @@ For a runtime release it also proves the recorded deployments and Pods reached
 the checked states and Doctor reported no error. The operator next verifies
 model responses, providers, channels, credentials, workspace continuity, native
 access, and required restore behavior.
+
+### Read-only export after a split-layout refusal
+
+The [split-layout export fallback](../guides/deploy/split-layout-upgrade.md#export-and-re-create)
+begins with the read-only `scripts/split-layout-tenants.mjs export --out FILE`.
+Its `createOccApi.expect` requires a data envelope for each successful resource
+response before `exportTenants` assembles the bundle. Malformed JSON, an empty
+body, or a missing data envelope stops export with a nonzero exit before `main`
+writes the bundle; an actual empty collection remains valid. The next owner is
+the operator, who retries the read after restoring the API response path and
+checks the exported inventory before following the recovery procedure. Empty
+204 deletes and explicitly accepted 404 responses retain their existing meaning.
 
 ## Debugging and Verification
 
@@ -252,6 +268,11 @@ access, and required restore behavior.
 
 ## Changelog
 
+- 2026-10-10 02:10: Require complete successful API responses before publishing the split-layout export bundle. (authoring-run/35b00357-b0c6-459f-aec1-b4fb63620dff - 0886f47d05fdeb2fa4359f4840fb77378d643bac)
+
+- 2026-10-09 21:10: Gateways migrate an older agent database with Doctor before OpenClaw starts. (fix-971)
+
+- 2026-10-09 20:10: Point the split-layout export at the split-layout upgrade page, where in-place adoption comes first. (fix-533-adopt)
 - 2026-10-07 21:20: Refuse a two-cluster upgrade before quiescence when the execution chart lacks this release's tenant grants. (fix-758)
 
 - 2026-10-07 12:00: Say that a controller-only release leaves existing revisions on their old Pod specification until the next deployment. (dogfood-r43)

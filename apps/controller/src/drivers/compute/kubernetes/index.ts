@@ -8,7 +8,7 @@ import {
 import { createHash, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { isAbsolute } from "node:path";
-import { isKubernetesResourceName } from "./resource-name.ts";
+import { isKubernetesNamespaceName, isKubernetesResourceName } from "./resource-name.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -100,6 +100,7 @@ import {
   ConfigurationHarnessError,
   CredentialWithdrawalRefusedError,
   DependencyUnavailableError,
+  requireOpenClawRoster,
   ResourceConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsForbiddenByClusterError,
@@ -149,15 +150,13 @@ import {
   pluginRuntimeSpecForRevision,
 } from "../plugin-runtime.ts";
 import {
-  AGENT_READINESS_ENTRYPOINT,
   AGENT_RUNTIME_ENTRYPOINT,
   AGENT_WITH_NODE_ENTRYPOINT,
   CODEX_OAUTH_BOOTSTRAP_ENTRYPOINT,
   GATEWAY_RUNTIME_ENTRYPOINT,
-  GATEWAY_READINESS_ENTRYPOINT,
   GATEWAY_STOP_TIMEOUT_MS,
   NATIVE_WORKER_ENTRYPOINT,
-  NATIVE_WORKER_READINESS_ENTRYPOINT,
+  RUNTIME_READINESS_PATH,
   RUNTIME_WRAPPER_COMMAND,
   SETUP_WRAPPER_COMMAND,
 } from "./runtime-entrypoints.ts";
@@ -693,10 +692,10 @@ class KubernetesApiFailureEvidence extends Error {
 }
 
 /**
- * The Status reason of a Kubernetes API answer, only when it is a bare CamelCase word. The
- * client keeps an error answer's body as its JSON text.
+ * The bounded Status body of a Kubernetes API answer. The client keeps an error
+ * answer's body as its JSON text.
  */
-function kubernetesStatusReason(error: unknown): string | undefined {
+function kubernetesStatus(error: unknown): Record<string, unknown> | undefined {
   const body = asRecord(error)?.body;
   let status: unknown = body;
   if (typeof body === "string" && body.length <= 65_536) {
@@ -706,8 +705,35 @@ function kubernetesStatusReason(error: unknown): string | undefined {
       return undefined;
     }
   }
-  const reason = asRecord(status)?.reason;
+  return asRecord(status);
+}
+
+function kubernetesStatusReason(error: unknown): string | undefined {
+  const reason = kubernetesStatus(error)?.reason;
   return typeof reason === "string" && /^[A-Za-z]{1,64}$/u.test(reason) ? reason : undefined;
+}
+
+function initialContainerLogUnavailable(error: unknown, pod: unknown, container: string): boolean {
+  const statuses = asRecord(asRecord(pod)?.status)?.containerStatuses;
+  const current = Array.isArray(statuses)
+    ? statuses.map(asRecord).find((status) => status?.name === container)
+    : undefined;
+  const reason = asRecord(asRecord(current?.state)?.waiting)?.reason;
+  if (
+    (reason !== "PodInitializing" && reason !== "ContainerCreating") ||
+    current?.restartCount !== 0 ||
+    isNonEmptyString(current.containerID) ||
+    asRecord(asRecord(current.lastState)?.terminated) !== undefined
+  ) {
+    return false;
+  }
+  const status = kubernetesStatus(error);
+  return (
+    status?.code === 400 &&
+    status.reason === "BadRequest" &&
+    status.message ===
+      `container "${container}" in pod "${asRecord(asRecord(pod)?.metadata)?.name}" is waiting to start: ${reason}`
+  );
 }
 
 function kubernetesApiFailureEvidence(
@@ -936,7 +962,7 @@ const WRITABLE_CONFIGURATION_PATH = "/home/node/.openclaw/openclaw.json";
 const CONFIGURATION_DOCUMENT = "openclaw.json";
 const CONFIGURATION_VOLUME = "openclaw-configuration";
 const PLUGIN_RUNTIME_VOLUME = "openclaw-plugin-runtime";
-const PLUGIN_RUNTIME_STATUS_PORT = 18_791;
+export const PLUGIN_RUNTIME_STATUS_PORT = 18_791;
 const PLUGIN_RUNTIME_STATUS_PATH = "/openclaw/plugin-runtime/status";
 const RUNTIME_STATUS_PATH = "/openclaw/runtime/status";
 const RUNTIME_DIAGNOSTICS_PATH = "/openclaw/runtime/diagnostics";
@@ -1206,13 +1232,21 @@ const RESOURCE_REQUIREMENTS_SCHEMA = Object.freeze({
     },
   },
 });
+const POD_LABEL_VALUE_PATTERN = "^(?:[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?)?$";
+const POD_LABEL_VALUE = new RegExp(POD_LABEL_VALUE_PATTERN);
+const POD_LABELS_SCHEMA = {
+  type: "object",
+  minProperties: 1,
+  additionalProperties: { type: "string", maxLength: 63, pattern: POD_LABEL_VALUE_PATTERN },
+};
+
 const WORKLOAD_PEER_SCHEMA = Object.freeze({
   type: "object",
   required: ["namespace", "podLabels"],
   additionalProperties: false,
   properties: {
     namespace: { type: "string" },
-    podLabels: { type: "object", additionalProperties: { type: "string" } },
+    podLabels: POD_LABELS_SCHEMA,
   },
 });
 
@@ -1221,6 +1255,16 @@ function required(value: unknown, description: string): string {
     throw new ConfigurationFailure(`${description} must be explicitly configured.`);
   }
   return value;
+}
+
+/** Whether an account's credential Secret holds exactly this token (constant-time compare). */
+function storesServiceAccountToken(
+  secret: ManagedKubernetesObject<"Secret">,
+  accessToken: string,
+): boolean {
+  const stored = Buffer.from(secret.data?.[SERVICE_ACCOUNT_TOKEN_KEY] ?? "");
+  const requested = Buffer.from(Buffer.from(accessToken).toString("base64"));
+  return stored.length === requested.length && timingSafeEqual(stored, requested);
 }
 
 /** The wait before retry `attempt + 1`: exponential with jitter, or the server's
@@ -1383,7 +1427,12 @@ function validatePeer(value: KubernetesWorkloadPeer, description: string): void 
   if (asRecord(value) === undefined) {
     throw new ConfigurationFailure(`${description} is required.`);
   }
-  required(value.namespace, `${description} namespace`);
+  // NetworkPolicies select the peer on kubernetes.io/metadata.name, which only ever holds a
+  // Namespace name; anything else matches nothing, or is not even a valid label value.
+  validateKubernetesNamespaceName(
+    required(value.namespace, `${description} namespace`),
+    `${description} namespace`,
+  );
   const labels = asRecord(value.podLabels);
   if (labels === undefined || Object.keys(labels).length === 0) {
     throw new ConfigurationFailure(`${description} Pod labels cannot be empty.`);
@@ -1392,6 +1441,23 @@ function validatePeer(value: KubernetesWorkloadPeer, description: string): void 
     required(key, `${description} label key`);
     if (typeof label !== "string") {
       throw new ConfigurationFailure(`${description} labels must be strings.`);
+    }
+    const parts = key.split("/");
+    const name = parts.at(-1) ?? "";
+    const prefix = parts.length === 2 ? parts[0] : undefined;
+    if (
+      parts.length > 2 ||
+      name.length === 0 ||
+      name.length > 63 ||
+      !POD_LABEL_VALUE.test(name) ||
+      (prefix !== undefined && !isKubernetesResourceName(prefix))
+    ) {
+      throw new ConfigurationFailure(`${description} label keys must be Kubernetes label keys.`);
+    }
+    if (label.length > 63 || !POD_LABEL_VALUE.test(label)) {
+      throw new ConfigurationFailure(
+        `${description} label values must be Kubernetes label values.`,
+      );
     }
   }
 }
@@ -1529,6 +1595,14 @@ function validateKubernetesResourceName(value: string, description: string): voi
   }
 }
 
+function validateKubernetesNamespaceName(value: string, description: string): void {
+  if (!isKubernetesNamespaceName(value)) {
+    throw new ConfigurationFailure(
+      `${description} must be a Kubernetes namespace name: a DNS label of at most 63 characters.`,
+    );
+  }
+}
+
 // Gateway API allows a 253-character Gateway name, but Envoy Gateway labels the proxy Pods
 // with it (gateway.envoyproxy.io/owning-gateway-name), and the NetworkPolicies select on that
 // label. A label value stops at 63 characters, so a longer name could never be applied.
@@ -1647,6 +1721,33 @@ export function kubernetesNamespaceName(namespaceId: string): string {
 const KUBELET_LOG_UNAVAILABLE =
   /^unable to retrieve container logs for [a-z][a-z0-9+.-]{0,31}:\/\/[0-9a-f]{1,128}\r?\n?$/;
 
+function kubernetesRuntimeLogLine(line: string): AgentRuntimeLogChunk["lines"][number] {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2}) (.*)$/s.exec(
+    line,
+  );
+  if (match === null) {
+    return { time: null, raw: line };
+  }
+  const date = match[1]!;
+  const fraction = match[2] ?? "";
+  const zone = match[3]!;
+  const raw = match[4]!;
+  if (zone === "Z") {
+    return { time: `${date}${fraction}Z`, raw };
+  }
+  const parsed = Date.parse(`${date}${zone}`);
+  if (!Number.isFinite(parsed) || new Date(`${date}Z`).toISOString().slice(0, 19) !== date) {
+    return { time: null, raw: line };
+  }
+  const utc = new Date(parsed).toISOString();
+  // The existing UTC cursor format accepts four-digit years only.
+  if (utc.length !== 24) {
+    return { time: null, raw: line };
+  }
+  // Offset conversion changes whole seconds; retain the original nanosecond fraction.
+  return { time: `${utc.slice(0, 19)}${fraction}Z`, raw };
+}
+
 function previousKubernetesNamespaceName(namespaceId: string): string {
   const id = required(namespaceId, "Platform Namespace ID");
   const slug =
@@ -1659,10 +1760,18 @@ function previousKubernetesNamespaceName(namespaceId: string): string {
   return `oce-${slug}-${sha256Hex(id, 12)}`;
 }
 
-function isManagedKubernetesNamespaceName(name: string, namespaceId: string): boolean {
+function isManagedKubernetesNamespaceName(
+  name: string,
+  namespaceId: string,
+  labels: Record<string, string>,
+): boolean {
   return (
     name === kubernetesNamespaceName(namespaceId) ||
-    name === previousKubernetesNamespaceName(namespaceId)
+    name === previousKubernetesNamespaceName(namespaceId) ||
+    // A released split-layout storage namespace adopted as the tenant namespace in place
+    // (docs/guides/deploy/breaking-changes.md, 2026-10-05). It keeps its storage label.
+    (name === kubernetesGatewayNamespaceName(namespaceId) &&
+      labels["openclaw.dev/gateway-namespace"] === namespaceId)
   );
 }
 
@@ -1725,7 +1834,7 @@ function verifiedKubernetesNamespace(
   const external = annotations["openclaw.dev/namespace-lifecycle"] === "external";
   if (!external) {
     if (
-      !isManagedKubernetesNamespaceName(name, namespaceId) ||
+      !isManagedKubernetesNamespaceName(name, namespaceId, labels) ||
       labels["app.kubernetes.io/managed-by"] !== MANAGER
     ) {
       throw new OwnershipFailure(
@@ -2075,96 +2184,18 @@ function nativeRuntimeSnapshot(revision: AgentRevision): NativeRuntimeSnapshot |
   };
 }
 
-// Every topology here (embedded OpenClaw, dedicated OpenClaw or Codex) runs the pinned OpenClaw
-// Gateway on the admitted document. Its config validation rejects these roster shapes and the
-// Gateway then exits at startup (EX_CONFIG) instead of serving, so refuse them here. The
-// Gateway drops only an empty agents.list beside an implicit empty roster, so that one passes.
-// A refusal, not a rewrite: OCC skips this on status reads.
-function requireOpenClawRoster(configuration: OpenClawConfigurationDocument): void {
-  // Each refusal names the setting and the rule it breaks. Keys come from the caller's own
-  // Configuration; agentEntryMessage quotes and bounds them.
-  const agents = asRecord(configuration.agents);
-  if (configuration.agents !== undefined && agents === undefined) {
-    throw new ConfigurationHarnessError("The OpenClaw Gateway requires agents to be an object.");
-  }
-  const roster = asRecord(agents?.entries);
-  if (agents?.entries !== undefined && roster === undefined) {
-    throw new ConfigurationHarnessError(
-      "The OpenClaw Gateway requires agents.entries to be an object keyed by Agent ID.",
-    );
-  }
-  // OpenClaw's schema: entries is a record of objects whose keys stay unique after its
-  // normalizeAgentId (lowercase; a key starting with _ also drops trailing dashes).
-  const entries = Object.entries(roster ?? {});
-  const normalized = new Map<string, string>();
-  for (const [id, entry] of entries) {
-    if (asRecord(entry) === undefined) {
-      throw new ConfigurationHarnessError(
-        agentEntryMessage(id, (path) => `The OpenClaw Gateway requires ${path} to be an object.`),
-      );
-    }
-    if (!/^[a-z0-9_][a-z0-9_-]{0,63}$/i.test(id)) {
-      throw new ConfigurationHarnessError(
-        agentEntryMessage(
-          id,
-          (path) =>
-            `The OpenClaw Gateway rejects the Agent ID in ${path}: use up to 64 letters, digits, _ or -, not starting with -.`,
-        ),
-      );
-    }
-    // A valid ID is plain and at most 64 characters, so both names fit the message cap.
-    const key = id.startsWith("_") ? id.toLowerCase().replace(/-+$/, "") : id.toLowerCase();
-    const first = normalized.get(key);
-    if (first !== undefined) {
-      throw new ConfigurationHarnessError(
-        `The OpenClaw Gateway normalizes agents.entries.${first} and agents.entries.${id} to the same Agent ID: rename one.`,
-      );
-    }
-    normalized.set(key, id);
-  }
-  const rosterSize = entries.length;
-  const explicit = agents?.ownership === "explicit";
-  if (
-    agents?.list !== undefined &&
-    !(Array.isArray(agents.list) && agents.list.length === 0 && rosterSize === 0 && !explicit)
-  ) {
-    throw new ConfigurationHarnessError(
-      "The OpenClaw Gateway rejects agents.list: remove it and configure each Agent under agents.entries, keyed by its Agent ID.",
-    );
-  }
-  const marked = entries.find(([, entry]) => asRecord(entry)?.default !== undefined);
-  if (marked !== undefined) {
-    throw new ConfigurationHarnessError(
-      agentEntryMessage(
-        marked[0],
-        (path) => `The OpenClaw Gateway rejects ${path}.default: remove it.`,
-      ),
-    );
-  }
-  if (agents?.ownership !== undefined && !explicit) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway accepts only "explicit" for agents.ownership: set it to "explicit", or remove it if agents.entries has at most one entry.',
-    );
-  }
-  if (rosterSize > 1 && !explicit) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway needs agents.ownership "explicit" for more than one agents.entries entry: set it, or keep one entry.',
-    );
-  }
-  if (explicit && rosterSize === 0) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway needs at least one agents.entries entry when agents.ownership is "explicit": add one, or remove agents.ownership.',
-    );
-  }
-}
-
 // OpenClaw's default Agent (the sole entry, or a named session store or system owner) keeps
 // its own workspace, while the Gateway, file transfer and workspace files address main. A
+// dedicated Codex Gateway binds only main to its Harness workspace node (finding 969), and a
+// non-main owner would make chats run as another Agent, so the same rules apply to it. A
 // refusal, not a rewrite: OCC skips this on status reads. Each refusal names the setting and
 // the rule it breaks, as requireOpenClawRoster's do. It runs after requireOpenClawRoster, so
 // agents and agents.entries are objects when present, and an explicit roster has at least one
 // entry.
-function requireNativeMainAgentDefault(configuration: OpenClawConfigurationDocument): void {
+function requireDedicatedMainAgentDefault(
+  configuration: OpenClawConfigurationDocument,
+  topology: "Dedicated OpenClaw" | "Dedicated Codex",
+): void {
   const agents = asRecord(configuration.agents);
   const defaults = asRecord(agents?.defaults);
   // OpenClaw matches normalized ids case-insensitively, as the OpenShell workspace pin does.
@@ -2173,7 +2204,7 @@ function requireNativeMainAgentDefault(configuration: OpenClawConfigurationDocum
     const agentId = asRecord(defaults?.[owner])?.agentId;
     if (agentId !== undefined && !isMain(agentId)) {
       throw new ConfigurationHarnessError(
-        `Dedicated OpenClaw serves the main Agent: set agents.defaults.${owner}.agentId to main, or remove it.`,
+        `${topology} serves the main Agent: set agents.defaults.${owner}.agentId to main, or remove it.`,
       );
     }
   }
@@ -2190,13 +2221,13 @@ function requireNativeMainAgentDefault(configuration: OpenClawConfigurationDocum
       agentEntryMessage(
         spelled[0],
         (path) =>
-          `Dedicated OpenClaw rejects the Agent ID in ${path}: use up to 64 letters, digits, _ or -, starting with a letter or digit.`,
+          `${topology} rejects the Agent ID in ${path}: use up to 64 letters, digits, _ or -, starting with a letter or digit.`,
       ),
     );
   }
   if (!entries.some(([id]) => isMain(id))) {
     throw new ConfigurationHarnessError(
-      "Dedicated OpenClaw serves the main Agent: add agents.entries.main, or rename an entry to main.",
+      `${topology} serves the main Agent: add agents.entries.main, or rename an entry to main.`,
     );
   }
 }
@@ -2408,7 +2439,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
                 properties: {
                   hostname: { type: "string" },
                   namespace: { type: "string" },
-                  podLabels: { type: "object", additionalProperties: { type: "string" } },
+                  podLabels: POD_LABELS_SCHEMA,
                   port: { type: "integer" },
                 },
               },
@@ -2559,6 +2590,13 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
     validatePeer(options.network.dns, "DNS peer");
     validatePort(options.network.gatewayPort, "Gateway port");
+    // Plugin status also serves on 18791 without a native runtime (OpenClaw Gateways
+    // with enabled plugins), so the reservation does not depend on options.runtime.
+    if (options.network.gatewayPort === PLUGIN_RUNTIME_STATUS_PORT) {
+      throw new ConfigurationFailure(
+        `Gateway port cannot use the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}.`,
+      );
+    }
     trustedProxyCidrSet(options.network.gatewayTrustedProxyCidrs, "Trusted proxy CIDR");
     if (options.network.pluginStatusProxySourceCidrs !== undefined) {
       if (!Array.isArray(options.network.pluginStatusProxySourceCidrs)) {
@@ -2748,11 +2786,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
       }
       validatePort(routing.endpointPort ?? 443, "Gateway routing endpoint port");
       validateGatewayName(required(routing.gatewayName, "Gateway routing Gateway name"));
-      validateKubernetesResourceName(
+      validateKubernetesNamespaceName(
         required(routing.gatewayNamespace, "Gateway routing Gateway namespace"),
         "Gateway routing Gateway namespace",
       );
-      validateKubernetesResourceName(
+      validateKubernetesNamespaceName(
         required(routing.envoyNamespace, "Gateway routing Envoy namespace"),
         "Gateway routing Envoy namespace",
       );
@@ -2763,6 +2801,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
         validatePort(options.network.gatewayPort + 1, "Gateway sandbox port");
         if (options.runtime === undefined) {
           throw new ConfigurationFailure("Sandbox routing requires a native Gateway runtime.");
+        }
+        if (options.network.gatewayPort + 1 === PLUGIN_RUNTIME_STATUS_PORT) {
+          throw new ConfigurationFailure(
+            `Gateway sandbox port cannot use the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}.`,
+          );
         }
       }
     }
@@ -2859,8 +2902,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
             ) {
               throw new ConfigurationFailure(
                 "Existing split-layout Gateway storage prevents this single-cluster upgrade. " +
-                  "Keep the previous controller version and preserve both namespaces, their " +
-                  "Secrets and PVCs. See the Kubernetes Compute upgrade requirements.",
+                  "Keep the previous controller version and adopt each storage namespace as " +
+                  "its tenant namespace first (scripts/split-layout-adopt.mjs). See the " +
+                  "Kubernetes Compute upgrade requirements.",
               );
             }
           }
@@ -3103,9 +3147,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
         `Dedicated OpenClaw required profile ${NATIVE_WORKER_PROFILE} is owned by the selected Compute Driver.`,
       );
     }
+    // Every topology's Gateway rejects these rosters, so Configuration save refuses them too.
+    // Only dedicated execution serves main, so that rule stays here, at deployment.
     requireOpenClawRoster(configuration);
-    if (native) {
-      requireNativeMainAgentDefault(configuration);
+    if (native || codex) {
+      requireDedicatedMainAgentDefault(
+        configuration,
+        native ? "Dedicated OpenClaw" : "Dedicated Codex",
+      );
     }
     if (
       (!embedded && !codex && !native) ||
@@ -3478,8 +3527,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
         ),
       );
     } catch (error) {
-      // A container that never restarted has no previous instance.
-      if (request.previous && numericErrorStatus(error) === 400) {
+      // Initial preparation has no current output yet. Require both owned stream
+      // state and kubelet's exact answer; stale Pod status must not hide live logs.
+      if (
+        numericErrorStatus(error) === 400 &&
+        (request.previous || initialContainerLogUnavailable(error, owned, request.container))
+      ) {
         raw = "";
       } else {
         throw error;
@@ -3518,10 +3571,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           0,
       },
       observedAt: new Date().toISOString(),
-      lines: lines.map((line) => {
-        const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z) (.*)$/s.exec(line);
-        return match === null ? { time: null, raw: line } : { time: match[1]!, raw: match[2]! };
-      }),
+      lines: lines.map(kubernetesRuntimeLogLine),
       truncated,
     };
   }
@@ -3611,7 +3661,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const [kind, detail] = (["waiting", "running", "terminated"] as const)
       .map((name) => [name, asRecord(state[name])] as const)
       .find(([, value]) => value !== undefined) ?? ["unknown" as const, undefined];
-    const last = asRecord(asRecord(entry.lastState)?.terminated);
+    // A currently terminated instance is the latest exit; lastState is the prior one.
+    const last = kind === "terminated" ? detail : asRecord(asRecord(entry.lastState)?.terminated);
     return {
       name: String(entry.name),
       state: kind,
@@ -3636,56 +3687,81 @@ export class KubernetesComputeDriver implements ComputeDriver {
     scheduled: boolean,
   ): Promise<readonly AgentRuntimeEvent[]> {
     const clients = await this.clients(namespace.plane);
-    const list = asRecord(
-      await this.request(() =>
-        clients.core.listNamespacedEvent({
-          namespace: namespace.name,
-          fieldSelector: `involvedObject.uid=${podUid}`,
-          limit: RUNTIME_LOG_MAX_EVENTS,
-          timeoutSeconds: Math.ceil(RUNTIME_LOG_CALL_TIMEOUT_MS / 1000),
-        }),
-      ),
-    );
-    if (!Array.isArray(list?.items)) {
-      throw new DependencyUnavailableError("The Kubernetes client returned an invalid Event list.");
-    }
-    return list.items
-      .map((item) => asRecord(item))
-      .filter((event): event is Record<string, unknown> => {
-        // The field selector is advisory to this code: keep only this Pod's Events.
-        const involved = asRecord(event?.involvedObject);
-        return (
-          involved?.uid === podUid &&
-          involved.kind === "Pod" &&
-          (involved.namespace === undefined || involved.namespace === namespace.name) &&
-          (event?.type === "Normal" || event?.type === "Warning") &&
-          !settledSchedulingConflict(event, scheduled)
+    const events: AgentRuntimeEvent[] = [];
+    let continuation: string | undefined;
+    // Kubernetes pages in storage order. Keep the newest results across all pages;
+    // the surrounding runtimeLogStep applies one deadline to this entire operation.
+    do {
+      const list = asRecord(
+        await this.request(() =>
+          clients.core.listNamespacedEvent({
+            namespace: namespace.name,
+            fieldSelector: `involvedObject.uid=${podUid}`,
+            limit: RUNTIME_LOG_MAX_EVENTS,
+            ...(continuation === undefined ? {} : { _continue: continuation }),
+            timeoutSeconds: Math.ceil(RUNTIME_LOG_CALL_TIMEOUT_MS / 1000),
+          }),
+        ),
+      );
+      if (!Array.isArray(list?.items)) {
+        throw new DependencyUnavailableError(
+          "The Kubernetes client returned an invalid Event list.",
         );
-      })
-      .map((event) => {
-        const series = asRecord(event.series);
-        return {
-          type: event.type as "Normal" | "Warning",
-          container: runtimeEventContainer(asRecord(event.involvedObject)?.fieldPath),
-          reason: isNonEmptyString(event.reason) ? event.reason : "Unknown",
-          message: typeof event.message === "string" ? event.message : "",
-          count: Math.max(
-            1,
-            Number.isSafeInteger(series?.count)
-              ? (series!.count as number)
-              : Number.isSafeInteger(event.count)
-                ? (event.count as number)
-                : 1,
-          ),
-          lastObservedAt:
-            kubernetesTime(series?.lastObservedTime) ??
-            kubernetesTime(event.lastTimestamp) ??
-            kubernetesTime(event.eventTime) ??
-            kubernetesTime(event.firstTimestamp),
-        };
-      })
-      .sort((left, right) => (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""))
-      .slice(0, RUNTIME_LOG_MAX_EVENTS);
+      }
+      const page = list.items
+        .map((item) => asRecord(item))
+        .filter((event): event is Record<string, unknown> => {
+          // The field selector is advisory to this code: keep only this Pod's Events.
+          const involved = asRecord(event?.involvedObject);
+          return (
+            involved?.uid === podUid &&
+            involved.kind === "Pod" &&
+            (involved.namespace === undefined || involved.namespace === namespace.name) &&
+            (event?.type === "Normal" || event?.type === "Warning") &&
+            !settledSchedulingConflict(event, scheduled)
+          );
+        })
+        .map((event) => {
+          const series = asRecord(event.series);
+          return {
+            type: event.type as "Normal" | "Warning",
+            container: runtimeEventContainer(asRecord(event.involvedObject)?.fieldPath),
+            reason: isNonEmptyString(event.reason) ? event.reason : "Unknown",
+            message: typeof event.message === "string" ? event.message : "",
+            count: Math.max(
+              1,
+              Number.isSafeInteger(series?.count)
+                ? (series!.count as number)
+                : Number.isSafeInteger(event.count)
+                  ? (event.count as number)
+                  : 1,
+            ),
+            lastObservedAt:
+              kubernetesTime(series?.lastObservedTime) ??
+              kubernetesTime(event.lastTimestamp) ??
+              kubernetesTime(event.eventTime) ??
+              kubernetesTime(event.firstTimestamp),
+          };
+        })
+        .sort((left, right) =>
+          (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""),
+        )
+        .slice(0, RUNTIME_LOG_MAX_EVENTS);
+      events.push(...page);
+      events.sort((left, right) =>
+        (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""),
+      );
+      events.splice(RUNTIME_LOG_MAX_EVENTS);
+      const metadata = asRecord(list.metadata);
+      const next = metadata?._continue ?? metadata?.continue;
+      if (next !== undefined && typeof next !== "string") {
+        throw new DependencyUnavailableError(
+          "The Kubernetes client returned invalid Event pagination.",
+        );
+      }
+      continuation = isNonEmptyString(next) ? next : undefined;
+    } while (continuation !== undefined);
+    return events;
   }
 
   async deleteAgentRuntimeCredentials(binding: ComputeAgentBinding): Promise<void> {
@@ -3854,9 +3930,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       // Someone else's object under this name: nothing of this create's is stored.
       return;
     }
-    const stored = Buffer.from(existing.data?.[SERVICE_ACCOUNT_TOKEN_KEY] ?? "");
-    const requested = Buffer.from(Buffer.from(accessToken).toString("base64"));
-    if (stored.length !== requested.length || !timingSafeEqual(stored, requested)) {
+    if (!storesServiceAccountToken(existing, accessToken)) {
       // The account's Secret, but not this request's token: not this create's either.
       return;
     }
@@ -3883,13 +3957,26 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
   }
 
+  /**
+   * Removes the account's credential Secret. Account deletion passes no token and removes the
+   * Secret the account owns. A failed issuance's compensation passes its own token: it runs
+   * after the transaction's ROLLBACK released the account row lock, so another issuance may
+   * already have stored its Secret under this same deterministic name (finding 944). It then
+   * deletes the Secret only while it holds that token, with uid and resourceVersion
+   * preconditions, and leaves another token's Secret alone.
+   */
   async deleteServiceAccountCredential(input: {
     readonly namespaceId: string;
     readonly serviceAccountId: string;
     readonly secretRef: { readonly name: string; readonly key: string };
+    readonly accessToken?: string;
   }): Promise<void> {
     const namespaceId = required(input.namespaceId, "ServiceAccount Namespace ID");
     const serviceAccountId = required(input.serviceAccountId, "ServiceAccount ID");
+    const accessToken =
+      input.accessToken === undefined
+        ? undefined
+        : required(input.accessToken, "ServiceAccount access token");
     const name = `service-account-${sha256Hex(serviceAccountId, 32)}`;
     if (input.secretRef.name !== name || input.secretRef.key !== SERVICE_ACCOUNT_TOKEN_KEY) {
       throw new OwnershipFailure("Refusing another ServiceAccount's credential Secret.");
@@ -3901,25 +3988,60 @@ export class KubernetesComputeDriver implements ComputeDriver {
       return;
     }
     this.verifyGatewayNamespace(tenant, { namespaceId });
-    const existing = await this.getOwned("Secret", name, namespace, {
-      namespaceId,
-      serviceAccountId,
-    });
+    const existing = await this.get("Secret", name, namespace);
     if (existing === undefined) {
       return;
     }
+    try {
+      this.verifyOwnership(existing, { namespaceId, serviceAccountId });
+    } catch (error) {
+      if (accessToken === undefined) {
+        throw error;
+      }
+      // Someone else's object under this name: a compensation leaves it alone, as the
+      // failed-create cleanup does.
+      return;
+    }
     const clients = await this.clients(namespace.plane);
-    await this.request(
-      () =>
-        clients.core.deleteNamespacedSecret({
-          name,
-          namespace: namespace.name,
-          ...(existing.metadata.uid === undefined
-            ? {}
-            : { body: { preconditions: { uid: existing.metadata.uid } } }),
-        }),
-      { mutating: true },
-    );
+    if (accessToken === undefined) {
+      await this.request(
+        () =>
+          clients.core.deleteNamespacedSecret({
+            name,
+            namespace: namespace.name,
+            ...(existing.metadata.uid === undefined
+              ? {}
+              : { body: { preconditions: { uid: existing.metadata.uid } } }),
+          }),
+        { mutating: true },
+      );
+      return;
+    }
+    if (!storesServiceAccountToken(existing, accessToken)) {
+      // Another issuance's Secret: this request's own is already gone.
+      return;
+    }
+    const { uid, resourceVersion } = existing.metadata;
+    if (!isNonEmptyString(uid) || !isNonEmptyString(resourceVersion)) {
+      throw new DependencyUnavailableError(
+        "The ServiceAccount credential Secret has no exact identity to delete.",
+      );
+    }
+    try {
+      await this.request(
+        () =>
+          clients.core.deleteNamespacedSecret({
+            name,
+            namespace: namespace.name,
+            body: { preconditions: { uid, resourceVersion } },
+          }),
+        { mutating: true },
+      );
+    } catch (error) {
+      if (numericErrorStatus(error) !== 404) {
+        throw error;
+      }
+    }
   }
 
   async ensureNamespace(namespace: Namespace): Promise<NamespaceEnsureResult> {
@@ -10169,6 +10291,26 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         `must grant only ${TRUSTED_PROXY_IDENTITY} operator.admin when set`,
       );
     }
+    // OpenClaw binds its MCP Apps sandbox listener on mcp.apps.sandboxPort, else
+    // gatewayPort + 1: at startup when MCP Apps are enabled, lazily otherwise. The private
+    // status listener binds first, so the Gateway would fail with EADDRINUSE on 18791.
+    const apps = asRecord(asRecord(configuration.mcp)?.apps);
+    if (apps?.sandboxPort === PLUGIN_RUNTIME_STATUS_PORT) {
+      throw new GatewaySettingFailure(
+        "mcp.apps.sandboxPort",
+        `cannot use the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}`,
+      );
+    }
+    if (
+      apps?.sandboxPort === undefined &&
+      apps?.enabled === true &&
+      this.options.network.gatewayPort + 1 === PLUGIN_RUNTIME_STATUS_PORT
+    ) {
+      throw new GatewaySettingFailure(
+        "mcp.apps.sandboxPort",
+        `must be set when MCP Apps are enabled: its default, the Gateway port + 1, is the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}`,
+      );
+    }
     return {
       ...configuration,
       gateway: {
@@ -13198,17 +13340,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
                 readinessProbe: {
                   ...(runtime !== undefined
                     ? {
-                        exec: {
-                          command: [
-                            "node",
-                            "-e",
-                            role === "gateway"
-                              ? GATEWAY_READINESS_ENTRYPOINT
-                              : nativeRuntime === undefined
-                                ? AGENT_READINESS_ENTRYPOINT
-                                : NATIVE_WORKER_READINESS_ENTRYPOINT,
-                          ],
-                        },
+                        httpGet: { path: RUNTIME_READINESS_PATH, port: "plugin-status" },
                       }
                     : { httpGet: { path: "/readyz", port } }),
                   periodSeconds: 2,
