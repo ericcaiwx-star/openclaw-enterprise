@@ -76,14 +76,17 @@ upstream resolver on Linux Docker by default, and the smoke sets nothing. See
 
 ## Docker Hub mirror
 
-The job runs on a GitHub-hosted runner whose egress addresses other users share,
-so anonymous Docker Hub pulls can hit Docker Hub's rate limit. Before Buildx
-starts, the job points the runner's Docker Engine and the Buildx builder at the
-public `mirror.gcr.io` mirror, with no credentials. Pinned digests are still
-verified, and an image the mirror lacks falls back to Docker Hub, which can still
-hit the limit. The last step prints which endpoint served each Engine pull; a
-fallback shows as `Attempting next endpoint`. Images that the k3d node's
-containerd pulls inside the cluster still come from their own registries.
+The job runs on a GitHub-hosted runner whose egress addresses other users share.
+When the runner's own Docker Hub sign-in fails, its pulls hit Docker Hub's
+anonymous rate limit. Before Buildx starts, the job points the runner's Docker
+Engine and the Buildx builder at the public `mirror.gcr.io` mirror. The mirror
+refuses any credentials, and the Engine forwards the client's Docker Hub
+sign-in to it, so later steps use a Docker client configuration without
+credentials. Pinned digests are still verified. An image the mirror lacks falls
+back to Docker Hub anonymously, which can still hit the limit. The last step
+prints which endpoint served each Engine pull; a fallback shows as
+`Attempting next endpoint`. Images that the k3d node's containerd pulls inside
+the cluster still come from their own registries.
 
 ## Limits
 

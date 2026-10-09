@@ -410,12 +410,15 @@ jobs:
           cache: true
       - name: Set up CI tools
         run: bash scripts/ci/setup-tools.sh k3d
-      # Hosted runners share egress addresses, so anonymous Docker Hub pulls hit
-      # its rate limit (finding 973). Pull Docker Hub images through Google's
-      # public mirror instead, without credentials. Pinned digests are still
-      # verified, and an image the mirror lacks falls back to Docker Hub. Debug
-      # logging records which endpoint served each pull for the last step.
-      # Runs before Buildx starts its builder container, which a restart stops.
+      # When the hosted runner's Docker Hub sign-in fails, its pulls count against
+      # the anonymous rate limit of addresses other users share (finding 973).
+      # Pull Docker Hub images through Google's public mirror instead. The mirror
+      # refuses any credentials, and the Engine forwards the runner's Docker Hub
+      # sign-in to it, so later steps use a Docker client configuration without
+      # credentials. Pinned digests are still verified, and an image the mirror
+      # lacks falls back to Docker Hub anonymously. Debug logging records which
+      # endpoint served each pull for the last step. This runs before Buildx
+      # starts its builder container, which the restart would stop.
       - name: Pull Docker Hub images through a mirror
         shell: bash
         run: |
@@ -426,7 +429,20 @@ jobs:
             sudo tee "$config" >/dev/null
           sudo systemctl restart docker
           timeout 60 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-          docker info --format 'registry mirrors: {{json .RegistryConfig.Mirrors}}'
+          source="${DOCKER_CONFIG:-$HOME/.docker}"
+          target="$RUNNER_TEMP/docker-config"
+          mkdir -p "$target"
+          client='{}'
+          if [[ -s "$source/config.json" ]]; then
+            client="$(jq 'del(.auths, .credsStore, .credHelpers)' "$source/config.json")"
+          fi
+          printf '%s\n' "$client" >"$target/config.json"
+          if [[ -d "$source/cli-plugins" ]]; then
+            ln -s "$source/cli-plugins" "$target/cli-plugins"
+          fi
+          echo "DOCKER_CONFIG=$target" >>"$GITHUB_ENV"
+          docker info --format 'registry mirrors {{json .RegistryConfig.Mirrors}}'
+          echo "client credentials: $(jq '[.auths // {} | keys[]] | length' "$target/config.json")"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           # GitHub-hosted runners are per-job VMs; removing the builder took 8-33 s,
