@@ -25,6 +25,7 @@ import { captureK3dDiagnostics, k3dHostMetrics } from "./k3d-diagnostics.mjs";
 import { prepareGatewayRouting } from "./routing.mjs";
 import { prepareLogging, readDefaultCollectorImage } from "./logging.mjs";
 import { pullImage } from "./image-pull.mjs";
+import { keycloakResourceKind, prepareKeycloak } from "./keycloak.mjs";
 import { metricsMonitoringImages } from "./metrics-monitoring-images.mjs";
 import {
   prepareRepositoryCredentials,
@@ -2726,6 +2727,27 @@ async function prepareLane({ lane, statePath }) {
     }
     case "helper-timeout":
       break;
+  }
+
+  if (lanePrepare(name).keycloak) {
+    const keycloak = await timedPreparation(name, "keycloak-start", () =>
+      prepareKeycloak({
+        stateDirectory: dirname(resolvedStatePath),
+        name: ownedName("openclaw-ci-kc", state.prefix, { maxLength: 63 }),
+        execFile,
+        docker: process.env.OCC_DOCKER_BIN ?? "docker",
+        ensureImage: (image) => ensureDockerSourceImage(state, image, "Keycloak image"),
+        reservePort: reserveLoopbackPort,
+        registerResource: async (details) => {
+          const resource = addResource(state, keycloakResourceKind, details);
+          await writeState(resolvedStatePath, state);
+          return resource;
+        },
+        saveState: () => writeState(resolvedStatePath, state),
+      }),
+    );
+    Object.assign(env, keycloak.env);
+    await markResourceReady(resolvedStatePath, state, keycloak.resource);
   }
 
   applyLaneEnv(name, env);

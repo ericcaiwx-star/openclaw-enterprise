@@ -833,6 +833,10 @@
                         "label": "First Agent Smoke"
                       },
                       {
+                        "page": "testing/keycloak",
+                        "label": "Keycloak OIDC Lane"
+                      },
+                      {
                         "page": "testing/ci-manual-integration",
                         "label": "Manual Integration Lanes"
                       },

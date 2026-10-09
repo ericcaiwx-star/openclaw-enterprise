@@ -158,6 +158,9 @@
       "path": "tests/integration/ci-image-pull.test.mjs"
     },
     {
+      "path": "tests/integration/ci-keycloak.test.mjs"
+    },
+    {
       "path": "tests/integration/ci-download-pinned.test.mjs"
     },
     {

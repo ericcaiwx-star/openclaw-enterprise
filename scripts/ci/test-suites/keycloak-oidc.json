@@ -1,0 +1,24 @@
+{
+  "requiredEnv": [
+    "OCC_TEST_KEYCLOAK_ISSUER",
+    "OCC_TEST_KEYCLOAK_CONSOLE_PORT",
+    "OCC_TEST_KEYCLOAK_SECRETS_FILE",
+    "OCC_TEST_KEYCLOAK_CA_CERT",
+    "OCC_TEST_KEYCLOAK_CONSOLE_CERT",
+    "OCC_TEST_KEYCLOAK_CONSOLE_KEY",
+    "OCC_TEST_KEYCLOAK_CONTAINER",
+    "NODE_EXTRA_CA_CERTS"
+  ],
+  "prepare": {
+    "keycloak": true,
+    "requiresPreparedStateForFile": true
+  },
+  "files": [
+    {
+      "path": "tests/integration/keycloak-oidc-sign-in.test.mjs",
+      "expectedTests": [
+        "Keycloak discovery matches the configured endpoints and its JWKS offers an RS256 key of 2,048 bits or more"
+      ]
+    }
+  ]
+}
