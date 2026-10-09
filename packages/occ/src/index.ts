@@ -685,7 +685,10 @@ export interface AgentCredentialSourceInput {
 export interface UpdateCredentialSourceInput {
   readonly namespaceId: string;
   readonly credentialSourceId: string;
-  /** Replacement references for the same fields; omit to re-send the current Secret values. */
+  /**
+   * Replacement references for the same fields; omit to re-send the current Secret values. A
+   * field the catalog marks `issuerRotated` must name a different Secret than the recorded one.
+   */
   readonly secrets?: Readonly<Record<string, SecretReference>>;
 }
 
