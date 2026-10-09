@@ -32,6 +32,7 @@ export interface ContainerLogWindowCheckpoint {
   readonly baseTime: string | null;
   readonly baseHashes: readonly string[];
   readonly baseComplete: boolean;
+  readonly basePositional?: boolean;
   readonly baseCount?: number;
 }
 
@@ -157,7 +158,7 @@ function containerWindow(value: unknown): ContainerLogWindowCheckpoint | undefin
     return undefined;
   }
   const window: Record<string, unknown> = Array.isArray(value)
-    ? value.length === 10
+    ? value.length === 10 || value.length === 11
       ? {
           sinceTime: value[0],
           tailLines: value[1],
@@ -171,6 +172,9 @@ function containerWindow(value: unknown): ContainerLogWindowCheckpoint | undefin
               ? (value[7].match(/.{16}/g) ?? [])
               : undefined,
           baseComplete: value[8],
+          ...(value.length === 10
+            ? {}
+            : { basePositional: value[10] === 0 || value[10] === 1 ? value[10] === 1 : value[10] }),
           ...(value[9] === null ? {} : { baseCount: value[9] }),
         }
       : {}
@@ -190,6 +194,7 @@ function containerWindow(value: unknown): ContainerLogWindowCheckpoint | undefin
     !/^[A-Za-z0-9_-]{16}$/.test(window.hash) ||
     typeof window.truncated !== "boolean" ||
     typeof window.baseComplete !== "boolean" ||
+    (window.basePositional !== undefined && typeof window.basePositional !== "boolean") ||
     !Array.isArray(window.baseHashes) ||
     window.baseHashes.length > 16 ||
     !window.baseHashes.every(
@@ -212,6 +217,7 @@ function containerWindow(value: unknown): ContainerLogWindowCheckpoint | undefin
     baseTime: window.baseTime as string | null,
     baseHashes: window.baseHashes as string[],
     baseComplete: window.baseComplete,
+    ...(window.basePositional === undefined ? {} : { basePositional: window.basePositional }),
     ...(window.baseCount === undefined ? {} : { baseCount: window.baseCount as number }),
   };
 }
@@ -323,6 +329,7 @@ export function createRuntimeLogCursorCodec(secret: string): RuntimeLogCursorCod
                   value.containerWindow.baseHashes.join(""),
                   value.containerWindow.baseComplete,
                   value.containerWindow.baseCount ?? null,
+                  value.containerWindow.basePositional === true ? 1 : 0,
                 ],
         }),
       ).toString("base64url");

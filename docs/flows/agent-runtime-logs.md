@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/377d6942-f5b9-4c5f-825c-cdfdfeea7501
+last_updated_session: authoring-run/858ce292-681c-43ab-a4d3-0640d3380971
 ---
 
 # Agent runtime logs flow
@@ -136,8 +136,8 @@ It emits `stream_replaced`,
 `SanitizedRuntimeLogRecord`. `page-budget.ts` measures serialized pages,
 signed cursors and the HTTP envelope against 512 KiB. Full candidates precede
 bounded prefix builds reuse admission and clocks without I/O or audits. Fit is
-checked; maximum filling is not promised. Fetched masking/withholding survive prefix builds; persistent state advances only
-through delivered rows. Sources share the budget.
+checked, without maximum filling guarantees. Fetched masking/withholding persist;
+state advances through delivered rows.
 
 For container follow polls, the signed cursor also carries optional `pemOpen`
 and `pemAfterTime` state. It describes the delivered boundary, not the start of
@@ -176,9 +176,9 @@ raw-prefix count, query floor and pre-cut baseline. Sandbox checkpoints reuse th
 outer time and hashes for that baseline; fixed-width hashes and window tuples
 retain every occurrence without duplicate fields or array punctuation,
 keeping emitted cursors within response and query admission limits. Known container times retain
-the captured floor before digesting; empty checkpoints persist. Stable windows drain
-before overlap advances, including untimed lines and over-capacity timestamp
-groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
+the captured floor; empty checkpoints persist. A matching checkpoint retains
+observed positional proof across append-only growth and later cuts. Stable windows
+drain, including untimed lines and over-capacity timestamp groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
 UID/restarts reset container progress,
 and PEM recovery clears inconsistent time boundaries while preserving masking. Timed windows resume overlap. Value-identical replacements remain unobservable; full checkpoints report gaps. Missing remembered lines or over-capacity timestamps also emit
 gaps. gRPC `NOT_FOUND` (absent
@@ -245,6 +245,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 07:17: Retain validated positional progress as the tail fills. (authoring-run/858ce292-681c-43ab-a4d3-0640d3380971 - a9176a61cf209915e2ccab3f862db9a2bc750754)
 
 - 2026-10-10 05:09: Compact fixed-width hash lists and both private window tuples while retaining legacy hash decoding. (authoring-run/377d6942-f5b9-4c5f-825c-cdfdfeea7501 - 95c76244bcc6f88989993a30730e63dc45b87f65)
 

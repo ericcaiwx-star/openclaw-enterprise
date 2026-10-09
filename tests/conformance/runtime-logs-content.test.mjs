@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomInt, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -2074,6 +2074,110 @@ test("runtime container wire pages include escaped messages, cursor and HTTP met
   const download = await fixture.request("GET", target.logsPath("source=gateway&download=true"));
   assert.equal(download.status, 200);
   assert.ok(Buffer.byteLength(download.text, "utf8") <= 512 * 1024);
+});
+
+test("runtime container checkpoint suffixes survive append-only growth to a full tail", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  for (const tail of [100, 300]) {
+    const cursorSecret = randomBytes(32).toString("hex");
+    const fixture = await createRuntimeLogFixture({
+      agentRuntimeLogs: { enabled: true, cursorSecret },
+    });
+    const target = await fixture.deployAgent("wire-budget-growing-tail");
+    const time = new Date(Date.now() - 1000).toISOString();
+    const row = (index, large = false) => ({
+      time,
+      raw:
+        large && tail === 300
+          ? `[info] row=${index}; process arguments: ${'"'.repeat(3000)}`
+          : JSON.stringify({
+              level: "info",
+              subsystem: "gateway",
+              message: `row=${index}; ${large ? '--option="value" '.repeat(500) : "anchor"}`,
+            }),
+    });
+    const ids = (page) => messages(page).map((message) => Number(/row=(\d+);/.exec(message)[1]));
+    fixture.computeDriver.state.lines = Array.from({ length: 20 }, (_, index) => row(index));
+    const prime = await fixture.request("GET", target.logsPath(`source=gateway&tailLines=${tail}`));
+    assert.equal(prime.status, 200);
+    const seen = ids(prime.data);
+    assert.equal(seen.length, 20, "the baseline exceeds the retained frontier hash history");
+    fixture.computeDriver.state.lines.push(
+      ...Array.from({ length: tail - 21 }, (_, index) => row(index + 20, true)),
+    );
+    assert.ok(
+      fixture.computeDriver.state.lines.reduce(
+        (bytes, line) => bytes + Buffer.byteLength(line.raw) + 32,
+        0,
+      ) <
+        1024 * 1024,
+    );
+    let cursor = prime.data.cursor;
+    let cuts = 0;
+    for (let page = 0; page < 10; page += 1) {
+      const response = await fixture.request(
+        "GET",
+        target.logsPath(`source=gateway&tailLines=${tail}&cursor=${cursor}`),
+      );
+      assert.equal(response.status, 200);
+      assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+      assert.ok(response.data.cursor.length <= 2048);
+      seen.push(...ids(response.data));
+      cuts += response.data.truncated ? 1 : 0;
+      cursor = response.data.cursor;
+      if (page === 0) {
+        assert.equal(
+          response.data.truncated,
+          true,
+          "the short window must cut the serialized page",
+        );
+        if (tail === 100) {
+          // The previous compact cursor had ten window entries and no inherited proof.
+          const parts = cursor.split(".");
+          const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+          if (payload.cw.length === 11) {
+            payload.cw.pop();
+          }
+          const legacyPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+          const mac = createHmac("sha256", cursorSecret)
+            .update("occ-runtime-logs-cursor")
+            .update("\0")
+            .update(legacyPayload)
+            .digest("base64url");
+          const legacy = await fixture.request(
+            "GET",
+            target.logsPath(`source=gateway&tailLines=100&cursor=v1.${legacyPayload}.${mac}`),
+          );
+          assert.equal(
+            legacy.status,
+            200,
+            "legacy windows remain usable on their stable short source",
+          );
+          assert.deepEqual(
+            ids(legacy.data),
+            Array.from({ length: 99 - seen.length }, (_, index) => index + seen.length),
+          );
+        }
+        fixture.computeDriver.state.lines.push(row(tail - 1, true));
+      }
+      if (!response.data.truncated) {
+        break;
+      }
+    }
+    assert.deepEqual(
+      seen,
+      Array.from({ length: tail }, (_, index) => index),
+    );
+    const replay = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=${tail}&cursor=${cursor}`),
+    );
+    assert.equal(replay.status, 200);
+    assert.deepEqual(ids(replay.data), []);
+    if (tail === 300) {
+      assert.ok(cuts >= 2, "positional proof survives multiple full-tail cuts");
+    }
+  }
 });
 
 test("runtime container wire budgeting handles empty, single and grouped withheld pages", async () => {

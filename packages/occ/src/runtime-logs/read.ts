@@ -419,7 +419,10 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
       dedupResumeCount !== undefined &&
       group.length >= dedupResumeCount &&
       ((earliest !== null && compareRuntimeLogTime(earliest, lastTime) < 0) ||
-        (chunk.lines.length < query.tailLines && !chunk.truncated)) &&
+        (chunk.lines.length < query.tailLines && !chunk.truncated) ||
+        // A matching checkpoint retains positional proof from the original
+        // window across growth and subsequent cuts, without inferring it anew.
+        (checkpointValid && checkpoint.basePositional === true)) &&
       timed.every(
         (line, index) =>
           validRuntimeLogFrontierTime(line.time) &&
@@ -666,6 +669,7 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
               baseTime: dedupResume?.lastTime ?? null,
               baseHashes: dedupResume?.lastHashes.slice(-RUNTIME_LOG_MAX_FRONTIER_HASHES) ?? [],
               baseComplete: dedupResume?.frontierComplete === true,
+              basePositional: positional,
               ...(dedupResumeCount === undefined ? {} : { baseCount: dedupResumeCount }),
             },
           }
