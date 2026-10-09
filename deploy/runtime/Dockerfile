@@ -29,9 +29,11 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
 # The runtime's credential client compiles from its own sources only: the
 # client directory and client-contracts.ts, the only modules the client
 # closure in scripts/build-repository-credentials.mjs accepts. Other controller
-# and package changes then keep this stage cached. Their types are not checked
-# here (Static Checks and the service build below check them), and the emitted
-# files match the full build's (tests/integration/repository-credentials-package).
+# and package changes then keep this stage cached. tsconfig.client.json keeps
+# the controller's compiler options and turns off only project build outputs
+# (declarations, build info) and the type check; Static Checks and the service
+# build below check types. The emitted files match the full build's
+# (tests/integration/repository-credentials-package.test.mjs).
 FROM repository-credentials-deps AS repository-client-build
 COPY tsconfig.base.json ./
 COPY apps/controller/tsconfig.json apps/controller/tsconfig.json

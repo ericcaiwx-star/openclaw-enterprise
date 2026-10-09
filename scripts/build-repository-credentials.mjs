@@ -118,8 +118,9 @@ async function closure(name, entrypoints) {
   return files;
 }
 
-// Validate both closures before replacing either artifact. Source-only types and
-// unrelated controller modules stay outside these separate runtimes.
+// Validate every staged closure before replacing any artifact; `--client-only`
+// validates and stages only the client. Source-only types and unrelated
+// controller modules stay outside these separate runtimes.
 const service = clientOnly
   ? undefined
   : await closure("service", [

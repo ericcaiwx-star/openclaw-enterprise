@@ -662,11 +662,23 @@ test("runtime image client stage emits the full build's client from its own inpu
   const stages = new Map(
     recipe.split(/^(?=FROM )/mu).map((stage) => [stage.match(/^FROM \S+ AS (\S+)$/mu)?.[1], stage]),
   );
+  // Destinations below are relative to /build, and the root .dockerignore
+  // drops dist, node_modules and log files from every COPY source.
+  assert.match(
+    stages.get("repository-credentials-deps") ?? "",
+    /^FROM \S+ AS \S+\nWORKDIR \/build$/mu,
+  );
+  assert.doesNotMatch(stages.get("repository-client-build") ?? "", /^WORKDIR /mu);
+  const ignored = (path) =>
+    /(?:^|\/)(?:dist|node_modules)(?:\/|$)|\.log$/u.test(relative(root, path));
   const stage = join(temporary, "stage");
   let copied = 0;
   for (const name of ["repository-credentials-deps", "repository-client-build"]) {
     assert.ok(stages.has(name), `runtime Dockerfile must define ${name}`);
-    for (const [, operands] of stages.get(name).matchAll(/^COPY (?!--)(.+)$/gmu)) {
+    for (const [, flags, operands] of stages.get(name).matchAll(/^COPY((?: --\S+)*) (.+)$/gmu)) {
+      if (flags.includes(" --from=")) {
+        continue;
+      }
       const paths = operands.trim().split(/\s+/u);
       const destination = paths.pop();
       for (const source of paths) {
@@ -675,7 +687,10 @@ test("runtime image client stage emits the full build's client from its own inpu
             ? join(stage, destination, source.split("/").pop())
             : join(stage, destination);
         await mkdir(join(target, ".."), { recursive: true });
-        await cp(join(root, source), target, { recursive: true });
+        await cp(join(root, source), target, {
+          recursive: true,
+          filter: (path) => !ignored(path),
+        });
         copied += 1;
       }
     }
