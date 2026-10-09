@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-09
-last_updated_session: authoring-run/ce414344-4cec-4d51-accd-f66b2ece9e0f
+last_updated_session: authoring-run/9f37d8ec-6a5b-4676-a134-8a6fb5c54f3a
 ---
 
 # Agent runtime logs flow
@@ -104,7 +104,13 @@ with one older than an hour, or a cursor whose Pod is gone, starts a view: the c
 `openclaw.agents.runtime_logs.view`, an `access` audit event naming the admitting
 action, before any log read. The Driver re-checks
 Pod ownership, calls `readNamespacedPodLog` with `tailLines`, `sinceSeconds`,
-`previous`, a 1 MiB `limitBytes` and timestamps, and re-reads the Pod. A cursor
+`previous`, a 1 MiB `limitBytes` and timestamps, and re-reads the Pod. Before an
+owned container's first start, `PodInitializing` or `ContainerCreating` with zero
+restarts and no current or previous instance can return kubelet's exact `400`
+waiting-to-start Status. The Driver treats only that matching Pod/container/reason
+answer as an empty page. It still requests logs, so a stale waiting status cannot
+hide output already available from kubelet. Other current-instance failures keep
+their error mapping. A cursor
 poll derives `sinceSeconds` from the cursor: from its newest delivered line, or,
 when the view has delivered nothing yet, from the previous read (a full or
 byte-cut tail then emits `window_exceeded`). When a resumed read delivers nothing
@@ -234,6 +240,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-09 23:09: Continue current-container log reads through initial Pod preparation without concealing unrelated failures. (authoring-run/9f37d8ec-6a5b-4676-a134-8a6fb5c54f3a - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)
 
 - 2026-10-09 22:24: Authenticate frontier completeness and retain conservative suppression for cut or legacy timestamp groups. (authoring-run/ce414344-4cec-4d51-accd-f66b2ece9e0f - f060fefd260b552e44d5549f549436d6147a474c)
 

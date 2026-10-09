@@ -166,7 +166,9 @@ Events and log sources of a revision, or one source without Events;
 `readAgentRuntimeLogs(binding, request)` returns bounded **raw** lines from a
 listed Pod. Drivers re-check ownership and raise
 `RuntimeLogsForbiddenByClusterError` for a cluster `403`; OCC [redacts and bounds](../../guides/topics/agent-logs.md) output. Without them,
-or with `runtimeLogging: "driver"`, both routes answer `501`.
+or with `runtimeLogging: "driver"`, both routes answer `501`. Kubernetes current
+log reads can return no lines while initial Pod/container preparation finishes;
+see [log availability](../../guides/topics/agent-logs.md).
 
 ### Runtime logging ownership
 
