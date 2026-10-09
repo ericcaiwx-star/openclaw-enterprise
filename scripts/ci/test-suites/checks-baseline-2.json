@@ -5,6 +5,7 @@
   "fileConcurrency": 8,
   "parallelFiles": [
     "tests/integration/ci-prepare.test.mjs",
+    "tests/integration/ci-prepare-k3d.test.mjs",
     "tests/conformance/repository-credentials-source-boundary.test.mjs",
     "tests/integration/repository-credentials-admission.test.mjs",
     "tests/conformance/ssh-compute.test.mjs",
@@ -149,6 +150,9 @@
     },
     {
       "path": "tests/integration/ci-prepare.test.mjs"
+    },
+    {
+      "path": "tests/integration/ci-prepare-k3d.test.mjs"
     },
     {
       "path": "tests/integration/ci-image-pull.test.mjs"
