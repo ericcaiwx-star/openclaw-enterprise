@@ -356,7 +356,7 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
           : remaining[end - 1]!.index + 1;
     const consumedLines = eligible.filter(({ index }) => index < consumed).map(({ line }) => line);
     const retainCheckpoint =
-      pageCut || (checkpointValid && consumedLines.some((line) => line.time === null));
+      pageCut || (checkpoint !== undefined && consumedLines.some((line) => line.time === null));
     const sanitized = sanitizeSandboxLogLines(stream, delivered);
     const window = overlapWindow(
       [

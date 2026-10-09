@@ -1018,3 +1018,49 @@ test("sandbox byte-window checkpoints notice changes to an undelivered suffix", 
     next.data.records.some(({ type, reason }) => type === "gap" && reason === "buffer_lost"),
   );
 });
+
+test("sandbox fitting untimed replacement snapshots retain replay progress", async () => {
+  for (const changed of ["tail", "buffer"]) {
+    const fixture = await sandboxFixture();
+    fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => ({
+      sandboxId: SANDBOX_ID,
+      time: null,
+      level: "INFO",
+      target: "supervisor",
+      source: "sandbox",
+      message: `row=${index}; quoted diagnostic ${'"a" '.repeat(1000)}`,
+      fields: {},
+    }));
+    const first = await fixture.request(
+      "GET",
+      fixture.target.logsPath("source=sandbox&tailLines=200"),
+    );
+    assert.equal(first.data.truncated, true);
+    if (changed === "buffer") {
+      fixture.gateway.state.lines.splice(25);
+    }
+    const tail = changed === "tail" ? 25 : 200;
+    const replacement = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=${tail}&cursor=${first.data.cursor}`),
+    );
+    assert.equal(replacement.status, 200);
+    assert.equal(replacement.data.truncated, false);
+    assert.ok(
+      replacement.data.records.some(
+        ({ type, reason }) => type === "gap" && ["buffer_lost", "window_exceeded"].includes(reason),
+      ),
+    );
+    assert.equal(replacement.data.records.filter(({ type }) => type === "line").length, 25);
+    const replay = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=${tail}&cursor=${replacement.data.cursor}`),
+    );
+    assert.equal(replay.status, 200);
+    assert.deepEqual(
+      replay.data.records.filter(({ type }) => type === "line"),
+      [],
+      changed,
+    );
+  }
+});
