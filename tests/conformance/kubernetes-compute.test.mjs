@@ -15663,8 +15663,10 @@ function runtimeLogDriverFixture({ twoCluster = false } = {}) {
     logs: { agent: "", gateway: "" },
     logError: undefined,
     eventError: undefined,
+    eventPage: undefined,
     nodeName: "runtime-logs-node",
     extraEvents: [],
+    containerStatus: undefined,
   };
   const pod = (role) => ({
     apiVersion: "v1",
@@ -15701,6 +15703,7 @@ function runtimeLogDriverFixture({ twoCluster = false } = {}) {
                   },
                 },
               }),
+          ...state.containerStatus,
         },
       ],
     },
@@ -15744,8 +15747,18 @@ function runtimeLogDriverFixture({ twoCluster = false } = {}) {
         }
         return { apiVersion: "v1", kind: "PodList", items };
       },
-      async listNamespacedEvent({ namespace, fieldSelector, limit }) {
-        calls.push({ plane, call: "listNamespacedEvent", namespace, fieldSelector, limit });
+      async listNamespacedEvent({ namespace, fieldSelector, limit, _continue }) {
+        calls.push({
+          plane,
+          call: "listNamespacedEvent",
+          namespace,
+          fieldSelector,
+          limit,
+          _continue,
+        });
+        if (state.eventPage !== undefined) {
+          return state.eventPage({ namespace, fieldSelector, limit, _continue });
+        }
         if (state.eventError !== undefined) {
           throw state.eventError;
         }
@@ -15913,6 +15926,180 @@ test("Kubernetes runtime description reads each plane's Pods and only their own 
     /invalid Pod/,
   );
 });
+
+test("Kubernetes runtime description retains newest Events across API pages", async () => {
+  const fixture = runtimeLogDriverFixture();
+  const event = (index, type = "Normal") => ({
+    type,
+    reason: type === "Warning" ? "BackOff" : "Pulled",
+    message: type === "Warning" ? "Back-off restarting failed container" : "Image already present",
+    count: 1,
+    lastTimestamp: new Date(Date.UTC(2026, 8, 30, 11, 0, index)),
+    involvedObject: {
+      kind: "Pod",
+      uid: "gateway-runtime-logs-uid",
+      namespace: fixture.namespaceName,
+    },
+  });
+  fixture.state.eventPage = ({ _continue, limit, fieldSelector }) => {
+    assert.equal(limit, 100);
+    assert.equal(fieldSelector, "involvedObject.uid=gateway-runtime-logs-uid");
+    if (_continue === undefined) {
+      return {
+        items: Array.from({ length: 100 }, (_, index) => event(index)),
+        metadata: { _continue: "filtered" },
+      };
+    }
+    if (_continue === "filtered") {
+      // A page may contain only Events excluded by the exact-Pod projection.
+      return {
+        items: [{ ...event(999, "Warning"), involvedObject: { kind: "Pod", uid: "foreign-pod" } }],
+        metadata: { _continue: "latest" },
+      };
+    }
+    assert.equal(_continue, "latest");
+    return {
+      items: Array.from({ length: 101 }, (_, index) =>
+        event(index + 100, index === 100 ? "Warning" : "Normal"),
+      ),
+      metadata: { _continue: "" },
+    };
+  };
+  const description = await fixture.driver.describeAgentRuntime(
+    fixture.binding,
+    new AbortController().signal,
+    { source: "gateway" },
+  );
+  const events = description.pods[0].events;
+  assert.equal(events.length, 100);
+  assert.equal(events[0].reason, "BackOff");
+  assert.deepEqual(
+    events.map(({ lastObservedAt }) => lastObservedAt),
+    Array.from({ length: 100 }, (_, index) => event(200 - index).lastTimestamp.toISOString()),
+  );
+  assert.deepEqual(
+    fixture.calls
+      .filter(({ call }) => call === "listNamespacedEvent")
+      .map(({ _continue }) => _continue),
+    [undefined, "filtered", "latest"],
+  );
+});
+
+test("Kubernetes runtime Event pagination preserves later-page RBAC failures", async () => {
+  const fixture = runtimeLogDriverFixture();
+  fixture.state.eventPage = ({ _continue }) => {
+    if (_continue === undefined) {
+      return { items: [], metadata: { _continue: "next" } };
+    }
+    throw { code: 403 };
+  };
+  await assert.rejects(
+    fixture.driver.describeAgentRuntime(fixture.binding, new AbortController().signal, {
+      source: "gateway",
+    }),
+    (error) => error.name === "RuntimeLogsForbiddenByClusterError",
+  );
+});
+
+test("Kubernetes runtime Event pagination remains bounded by the caller abort", async () => {
+  const fixture = runtimeLogDriverFixture();
+  const abort = new AbortController();
+  const reason = new Error("Runtime Event observation cancelled");
+  let timer;
+  fixture.state.eventPage = ({ _continue }) => {
+    if (_continue === undefined) {
+      return { items: [], metadata: { _continue: "next" } };
+    }
+    timer = setTimeout(() => abort.abort(reason), 25);
+    const signal = currentComputeAbortSignal();
+    assert.ok(signal instanceof AbortSignal);
+    return new Promise((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  };
+  try {
+    await assert.rejects(
+      fixture.driver.describeAgentRuntime(fixture.binding, abort.signal, { source: "gateway" }),
+      (error) => error === reason,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+const previousRuntimeTermination = {
+  reason: "Error",
+  exitCode: 17,
+  finishedAt: new Date("2026-10-09T16:00:00Z"),
+};
+for (const scenario of [
+  {
+    name: "first current exit",
+    state: {
+      terminated: { ...previousRuntimeTermination, startedAt: new Date("2026-10-09T15:59:00Z") },
+    },
+    lastState: {},
+    expected: previousRuntimeTermination,
+  },
+  {
+    name: "newest current exit",
+    state: {
+      terminated: {
+        reason: "Completed",
+        exitCode: 0,
+        finishedAt: new Date("2026-10-09T16:01:00Z"),
+      },
+    },
+    lastState: { terminated: previousRuntimeTermination },
+    expected: { reason: "Completed", exitCode: 0, finishedAt: new Date("2026-10-09T16:01:00Z") },
+  },
+  {
+    name: "running prior exit",
+    state: { running: { startedAt: new Date("2026-10-09T16:01:00Z") } },
+    lastState: { terminated: previousRuntimeTermination },
+    expected: previousRuntimeTermination,
+  },
+  {
+    name: "waiting prior exit",
+    state: { waiting: { reason: "CrashLoopBackOff" } },
+    lastState: { terminated: previousRuntimeTermination },
+    expected: previousRuntimeTermination,
+  },
+  {
+    name: "running without an exit",
+    state: { running: { startedAt: new Date("2026-10-09T16:01:00Z") } },
+    lastState: {},
+    expected: null,
+  },
+  {
+    name: "waiting without an exit",
+    state: { waiting: { reason: "ContainerCreating" } },
+    lastState: {},
+    expected: null,
+  },
+]) {
+  test(`Kubernetes runtime termination status retains ${scenario.name}`, async () => {
+    const fixture = runtimeLogDriverFixture();
+    fixture.state.containerStatus = {
+      state: scenario.state,
+      lastState: scenario.lastState,
+      restartCount: scenario.lastState.terminated === undefined ? 0 : 1,
+      ready: scenario.state.running !== undefined,
+    };
+    const description = await fixture.driver.describeAgentRuntime(
+      fixture.binding,
+      new AbortController().signal,
+    );
+    const expected =
+      scenario.expected === null
+        ? null
+        : { ...scenario.expected, finishedAt: scenario.expected.finishedAt.toISOString() };
+    for (const pod of description.pods) {
+      assert.deepEqual(pod.containers[0].lastTermination, expected, pod.role);
+      assert.equal(pod.containers[0].state, Object.keys(scenario.state)[0]);
+    }
+  });
+}
 
 test("Kubernetes runtime description drops only a settled VolumeBinding conflict", async () => {
   const fixture = runtimeLogDriverFixture();

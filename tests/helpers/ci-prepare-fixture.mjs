@@ -299,6 +299,14 @@ if (command === "docker" || command === "podman") {
     state.runtime = args[args.indexOf("-t") + 1];
     finish();
   }
+  // The main image cache warm job keeps its runtime image under a tag naming its ID.
+  if (state.runtime && equals(args, ["image", "inspect", "--format", "{{.Id}}", state.runtime])) {
+    finish(configId + "\n");
+  }
+  if (args[0] === "tag" && args[2]?.startsWith("localhost/openclaw-ci-main/")) {
+    assert.deepEqual(args, ["tag", state.runtime, "localhost/openclaw-ci-main/runtime:bbbbbbbbbbbb"]);
+    finish();
+  }
   if (equals(args.slice(0, 3), ["build", "--pull=false", "-t"]) && args.length === 5) {
     // The fixture build overlaps cluster creation, so its tag cannot name the cluster.
     assert.match(args[3], /^localhost\/openclaw-ci-image-[a-z0-9-]+\/fixture:local$/);

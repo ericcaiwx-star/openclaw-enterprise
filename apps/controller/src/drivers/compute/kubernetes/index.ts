@@ -100,6 +100,7 @@ import {
   ConfigurationHarnessError,
   CredentialWithdrawalRefusedError,
   DependencyUnavailableError,
+  requireOpenClawRoster,
   ResourceConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsForbiddenByClusterError,
@@ -2150,89 +2151,6 @@ function nativeRuntimeSnapshot(revision: AgentRevision): NativeRuntimeSnapshot |
   };
 }
 
-// Every topology here (embedded OpenClaw, dedicated OpenClaw or Codex) runs the pinned OpenClaw
-// Gateway on the admitted document. Its config validation rejects these roster shapes and the
-// Gateway then exits at startup (EX_CONFIG) instead of serving, so refuse them here. The
-// Gateway drops only an empty agents.list beside an implicit empty roster, so that one passes.
-// A refusal, not a rewrite: OCC skips this on status reads.
-function requireOpenClawRoster(configuration: OpenClawConfigurationDocument): void {
-  // Each refusal names the setting and the rule it breaks. Keys come from the caller's own
-  // Configuration; agentEntryMessage quotes and bounds them.
-  const agents = asRecord(configuration.agents);
-  if (configuration.agents !== undefined && agents === undefined) {
-    throw new ConfigurationHarnessError("The OpenClaw Gateway requires agents to be an object.");
-  }
-  const roster = asRecord(agents?.entries);
-  if (agents?.entries !== undefined && roster === undefined) {
-    throw new ConfigurationHarnessError(
-      "The OpenClaw Gateway requires agents.entries to be an object keyed by Agent ID.",
-    );
-  }
-  // OpenClaw's schema: entries is a record of objects whose keys stay unique after its
-  // normalizeAgentId (lowercase; a key starting with _ also drops trailing dashes).
-  const entries = Object.entries(roster ?? {});
-  const normalized = new Map<string, string>();
-  for (const [id, entry] of entries) {
-    if (asRecord(entry) === undefined) {
-      throw new ConfigurationHarnessError(
-        agentEntryMessage(id, (path) => `The OpenClaw Gateway requires ${path} to be an object.`),
-      );
-    }
-    if (!/^[a-z0-9_][a-z0-9_-]{0,63}$/i.test(id)) {
-      throw new ConfigurationHarnessError(
-        agentEntryMessage(
-          id,
-          (path) =>
-            `The OpenClaw Gateway rejects the Agent ID in ${path}: use up to 64 letters, digits, _ or -, not starting with -.`,
-        ),
-      );
-    }
-    // A valid ID is plain and at most 64 characters, so both names fit the message cap.
-    const key = id.startsWith("_") ? id.toLowerCase().replace(/-+$/, "") : id.toLowerCase();
-    const first = normalized.get(key);
-    if (first !== undefined) {
-      throw new ConfigurationHarnessError(
-        `The OpenClaw Gateway normalizes agents.entries.${first} and agents.entries.${id} to the same Agent ID: rename one.`,
-      );
-    }
-    normalized.set(key, id);
-  }
-  const rosterSize = entries.length;
-  const explicit = agents?.ownership === "explicit";
-  if (
-    agents?.list !== undefined &&
-    !(Array.isArray(agents.list) && agents.list.length === 0 && rosterSize === 0 && !explicit)
-  ) {
-    throw new ConfigurationHarnessError(
-      "The OpenClaw Gateway rejects agents.list: remove it and configure each Agent under agents.entries, keyed by its Agent ID.",
-    );
-  }
-  const marked = entries.find(([, entry]) => asRecord(entry)?.default !== undefined);
-  if (marked !== undefined) {
-    throw new ConfigurationHarnessError(
-      agentEntryMessage(
-        marked[0],
-        (path) => `The OpenClaw Gateway rejects ${path}.default: remove it.`,
-      ),
-    );
-  }
-  if (agents?.ownership !== undefined && !explicit) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway accepts only "explicit" for agents.ownership: set it to "explicit", or remove it if agents.entries has at most one entry.',
-    );
-  }
-  if (rosterSize > 1 && !explicit) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway needs agents.ownership "explicit" for more than one agents.entries entry: set it, or keep one entry.',
-    );
-  }
-  if (explicit && rosterSize === 0) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway needs at least one agents.entries entry when agents.ownership is "explicit": add one, or remove agents.ownership.',
-    );
-  }
-}
-
 // OpenClaw's default Agent (the sole entry, or a named session store or system owner) keeps
 // its own workspace, while the Gateway, file transfer and workspace files address main. A
 // refusal, not a rewrite: OCC skips this on status reads. Each refusal names the setting and
@@ -3190,6 +3108,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
         `Dedicated OpenClaw required profile ${NATIVE_WORKER_PROFILE} is owned by the selected Compute Driver.`,
       );
     }
+    // Every topology's Gateway rejects these rosters, so Configuration save refuses them too.
+    // Only dedicated OpenClaw serves main, so that rule stays here, at deployment.
     requireOpenClawRoster(configuration);
     if (native) {
       requireNativeMainAgentDefault(configuration);
@@ -3695,7 +3615,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const [kind, detail] = (["waiting", "running", "terminated"] as const)
       .map((name) => [name, asRecord(state[name])] as const)
       .find(([, value]) => value !== undefined) ?? ["unknown" as const, undefined];
-    const last = asRecord(asRecord(entry.lastState)?.terminated);
+    // A currently terminated instance is the latest exit; lastState is the prior one.
+    const last = kind === "terminated" ? detail : asRecord(asRecord(entry.lastState)?.terminated);
     return {
       name: String(entry.name),
       state: kind,
@@ -3720,56 +3641,81 @@ export class KubernetesComputeDriver implements ComputeDriver {
     scheduled: boolean,
   ): Promise<readonly AgentRuntimeEvent[]> {
     const clients = await this.clients(namespace.plane);
-    const list = asRecord(
-      await this.request(() =>
-        clients.core.listNamespacedEvent({
-          namespace: namespace.name,
-          fieldSelector: `involvedObject.uid=${podUid}`,
-          limit: RUNTIME_LOG_MAX_EVENTS,
-          timeoutSeconds: Math.ceil(RUNTIME_LOG_CALL_TIMEOUT_MS / 1000),
-        }),
-      ),
-    );
-    if (!Array.isArray(list?.items)) {
-      throw new DependencyUnavailableError("The Kubernetes client returned an invalid Event list.");
-    }
-    return list.items
-      .map((item) => asRecord(item))
-      .filter((event): event is Record<string, unknown> => {
-        // The field selector is advisory to this code: keep only this Pod's Events.
-        const involved = asRecord(event?.involvedObject);
-        return (
-          involved?.uid === podUid &&
-          involved.kind === "Pod" &&
-          (involved.namespace === undefined || involved.namespace === namespace.name) &&
-          (event?.type === "Normal" || event?.type === "Warning") &&
-          !settledSchedulingConflict(event, scheduled)
+    const events: AgentRuntimeEvent[] = [];
+    let continuation: string | undefined;
+    // Kubernetes pages in storage order. Keep the newest results across all pages;
+    // the surrounding runtimeLogStep applies one deadline to this entire operation.
+    do {
+      const list = asRecord(
+        await this.request(() =>
+          clients.core.listNamespacedEvent({
+            namespace: namespace.name,
+            fieldSelector: `involvedObject.uid=${podUid}`,
+            limit: RUNTIME_LOG_MAX_EVENTS,
+            ...(continuation === undefined ? {} : { _continue: continuation }),
+            timeoutSeconds: Math.ceil(RUNTIME_LOG_CALL_TIMEOUT_MS / 1000),
+          }),
+        ),
+      );
+      if (!Array.isArray(list?.items)) {
+        throw new DependencyUnavailableError(
+          "The Kubernetes client returned an invalid Event list.",
         );
-      })
-      .map((event) => {
-        const series = asRecord(event.series);
-        return {
-          type: event.type as "Normal" | "Warning",
-          container: runtimeEventContainer(asRecord(event.involvedObject)?.fieldPath),
-          reason: isNonEmptyString(event.reason) ? event.reason : "Unknown",
-          message: typeof event.message === "string" ? event.message : "",
-          count: Math.max(
-            1,
-            Number.isSafeInteger(series?.count)
-              ? (series!.count as number)
-              : Number.isSafeInteger(event.count)
-                ? (event.count as number)
-                : 1,
-          ),
-          lastObservedAt:
-            kubernetesTime(series?.lastObservedTime) ??
-            kubernetesTime(event.lastTimestamp) ??
-            kubernetesTime(event.eventTime) ??
-            kubernetesTime(event.firstTimestamp),
-        };
-      })
-      .sort((left, right) => (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""))
-      .slice(0, RUNTIME_LOG_MAX_EVENTS);
+      }
+      const page = list.items
+        .map((item) => asRecord(item))
+        .filter((event): event is Record<string, unknown> => {
+          // The field selector is advisory to this code: keep only this Pod's Events.
+          const involved = asRecord(event?.involvedObject);
+          return (
+            involved?.uid === podUid &&
+            involved.kind === "Pod" &&
+            (involved.namespace === undefined || involved.namespace === namespace.name) &&
+            (event?.type === "Normal" || event?.type === "Warning") &&
+            !settledSchedulingConflict(event, scheduled)
+          );
+        })
+        .map((event) => {
+          const series = asRecord(event.series);
+          return {
+            type: event.type as "Normal" | "Warning",
+            container: runtimeEventContainer(asRecord(event.involvedObject)?.fieldPath),
+            reason: isNonEmptyString(event.reason) ? event.reason : "Unknown",
+            message: typeof event.message === "string" ? event.message : "",
+            count: Math.max(
+              1,
+              Number.isSafeInteger(series?.count)
+                ? (series!.count as number)
+                : Number.isSafeInteger(event.count)
+                  ? (event.count as number)
+                  : 1,
+            ),
+            lastObservedAt:
+              kubernetesTime(series?.lastObservedTime) ??
+              kubernetesTime(event.lastTimestamp) ??
+              kubernetesTime(event.eventTime) ??
+              kubernetesTime(event.firstTimestamp),
+          };
+        })
+        .sort((left, right) =>
+          (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""),
+        )
+        .slice(0, RUNTIME_LOG_MAX_EVENTS);
+      events.push(...page);
+      events.sort((left, right) =>
+        (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""),
+      );
+      events.splice(RUNTIME_LOG_MAX_EVENTS);
+      const metadata = asRecord(list.metadata);
+      const next = metadata?._continue ?? metadata?.continue;
+      if (next !== undefined && typeof next !== "string") {
+        throw new DependencyUnavailableError(
+          "The Kubernetes client returned invalid Event pagination.",
+        );
+      }
+      continuation = isNonEmptyString(next) ? next : undefined;
+    } while (continuation !== undefined);
+    return events;
   }
 
   async deleteAgentRuntimeCredentials(binding: ComputeAgentBinding): Promise<void> {
