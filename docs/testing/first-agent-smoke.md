@@ -77,8 +77,8 @@ upstream resolver on Linux Docker by default, and the smoke sets nothing. See
 ## Docker Hub mirror
 
 The job runs on a GitHub-hosted runner whose egress addresses other users share.
-When the runner's own Docker Hub sign-in fails, its pulls hit Docker Hub's
-anonymous rate limit. Before Buildx starts, the job points the runner's Docker
+Pulls carrying the runner's built-in Docker Hub sign-in have been refused with
+Docker Hub's anonymous rate limit. Before Buildx starts, the job points the runner's Docker
 Engine and the Buildx builder at the public `mirror.gcr.io` mirror. The mirror
 refuses any credentials, and the Engine forwards the client's Docker Hub
 sign-in to it, so later steps use a Docker client configuration without

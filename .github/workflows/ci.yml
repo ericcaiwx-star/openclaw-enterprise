@@ -410,9 +410,10 @@ jobs:
           cache: true
       - name: Set up CI tools
         run: bash scripts/ci/setup-tools.sh k3d
-      # When the hosted runner's Docker Hub sign-in fails, its pulls count against
-      # the anonymous rate limit of addresses other users share (finding 973).
-      # Pull Docker Hub images through Google's public mirror instead. The mirror
+      # Pulls carrying the hosted runner's built-in Docker Hub sign-in have been
+      # refused with the anonymous rate limit of addresses other users share,
+      # and that account's token endpoint has timed out (finding 973). Pull
+      # Docker Hub images through Google's public mirror instead. The mirror
       # refuses any credentials, and the Engine forwards the runner's Docker Hub
       # sign-in to it, so later steps use a Docker client configuration without
       # credentials. Pinned digests are still verified, and an image the mirror
@@ -433,8 +434,10 @@ jobs:
           target="$RUNNER_TEMP/docker-config"
           mkdir -p "$target"
           client='{}'
+          removed=0
           if [[ -s "$source/config.json" ]]; then
             client="$(jq 'del(.auths, .credsStore, .credHelpers)' "$source/config.json")"
+            removed="$(jq '[.auths // {} | keys[]] | length' "$source/config.json")"
           fi
           printf '%s\n' "$client" >"$target/config.json"
           if [[ -d "$source/cli-plugins" ]]; then
@@ -442,7 +445,7 @@ jobs:
           fi
           echo "DOCKER_CONFIG=$target" >>"$GITHUB_ENV"
           docker info --format 'registry mirrors {{json .RegistryConfig.Mirrors}}'
-          echo "client credentials: $(jq '[.auths // {} | keys[]] | length' "$target/config.json")"
+          echo "registry sign-ins removed from the Docker client configuration: $removed"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           # GitHub-hosted runners are per-job VMs; removing the builder took 8-33 s,
