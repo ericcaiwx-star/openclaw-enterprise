@@ -3641,56 +3641,81 @@ export class KubernetesComputeDriver implements ComputeDriver {
     scheduled: boolean,
   ): Promise<readonly AgentRuntimeEvent[]> {
     const clients = await this.clients(namespace.plane);
-    const list = asRecord(
-      await this.request(() =>
-        clients.core.listNamespacedEvent({
-          namespace: namespace.name,
-          fieldSelector: `involvedObject.uid=${podUid}`,
-          limit: RUNTIME_LOG_MAX_EVENTS,
-          timeoutSeconds: Math.ceil(RUNTIME_LOG_CALL_TIMEOUT_MS / 1000),
-        }),
-      ),
-    );
-    if (!Array.isArray(list?.items)) {
-      throw new DependencyUnavailableError("The Kubernetes client returned an invalid Event list.");
-    }
-    return list.items
-      .map((item) => asRecord(item))
-      .filter((event): event is Record<string, unknown> => {
-        // The field selector is advisory to this code: keep only this Pod's Events.
-        const involved = asRecord(event?.involvedObject);
-        return (
-          involved?.uid === podUid &&
-          involved.kind === "Pod" &&
-          (involved.namespace === undefined || involved.namespace === namespace.name) &&
-          (event?.type === "Normal" || event?.type === "Warning") &&
-          !settledSchedulingConflict(event, scheduled)
+    const events: AgentRuntimeEvent[] = [];
+    let continuation: string | undefined;
+    // Kubernetes pages in storage order. Keep the newest results across all pages;
+    // the surrounding runtimeLogStep applies one deadline to this entire operation.
+    do {
+      const list = asRecord(
+        await this.request(() =>
+          clients.core.listNamespacedEvent({
+            namespace: namespace.name,
+            fieldSelector: `involvedObject.uid=${podUid}`,
+            limit: RUNTIME_LOG_MAX_EVENTS,
+            ...(continuation === undefined ? {} : { _continue: continuation }),
+            timeoutSeconds: Math.ceil(RUNTIME_LOG_CALL_TIMEOUT_MS / 1000),
+          }),
+        ),
+      );
+      if (!Array.isArray(list?.items)) {
+        throw new DependencyUnavailableError(
+          "The Kubernetes client returned an invalid Event list.",
         );
-      })
-      .map((event) => {
-        const series = asRecord(event.series);
-        return {
-          type: event.type as "Normal" | "Warning",
-          container: runtimeEventContainer(asRecord(event.involvedObject)?.fieldPath),
-          reason: isNonEmptyString(event.reason) ? event.reason : "Unknown",
-          message: typeof event.message === "string" ? event.message : "",
-          count: Math.max(
-            1,
-            Number.isSafeInteger(series?.count)
-              ? (series!.count as number)
-              : Number.isSafeInteger(event.count)
-                ? (event.count as number)
-                : 1,
-          ),
-          lastObservedAt:
-            kubernetesTime(series?.lastObservedTime) ??
-            kubernetesTime(event.lastTimestamp) ??
-            kubernetesTime(event.eventTime) ??
-            kubernetesTime(event.firstTimestamp),
-        };
-      })
-      .sort((left, right) => (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""))
-      .slice(0, RUNTIME_LOG_MAX_EVENTS);
+      }
+      const page = list.items
+        .map((item) => asRecord(item))
+        .filter((event): event is Record<string, unknown> => {
+          // The field selector is advisory to this code: keep only this Pod's Events.
+          const involved = asRecord(event?.involvedObject);
+          return (
+            involved?.uid === podUid &&
+            involved.kind === "Pod" &&
+            (involved.namespace === undefined || involved.namespace === namespace.name) &&
+            (event?.type === "Normal" || event?.type === "Warning") &&
+            !settledSchedulingConflict(event, scheduled)
+          );
+        })
+        .map((event) => {
+          const series = asRecord(event.series);
+          return {
+            type: event.type as "Normal" | "Warning",
+            container: runtimeEventContainer(asRecord(event.involvedObject)?.fieldPath),
+            reason: isNonEmptyString(event.reason) ? event.reason : "Unknown",
+            message: typeof event.message === "string" ? event.message : "",
+            count: Math.max(
+              1,
+              Number.isSafeInteger(series?.count)
+                ? (series!.count as number)
+                : Number.isSafeInteger(event.count)
+                  ? (event.count as number)
+                  : 1,
+            ),
+            lastObservedAt:
+              kubernetesTime(series?.lastObservedTime) ??
+              kubernetesTime(event.lastTimestamp) ??
+              kubernetesTime(event.eventTime) ??
+              kubernetesTime(event.firstTimestamp),
+          };
+        })
+        .sort((left, right) =>
+          (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""),
+        )
+        .slice(0, RUNTIME_LOG_MAX_EVENTS);
+      events.push(...page);
+      events.sort((left, right) =>
+        (right.lastObservedAt ?? "").localeCompare(left.lastObservedAt ?? ""),
+      );
+      events.splice(RUNTIME_LOG_MAX_EVENTS);
+      const metadata = asRecord(list.metadata);
+      const next = metadata?._continue ?? metadata?.continue;
+      if (next !== undefined && typeof next !== "string") {
+        throw new DependencyUnavailableError(
+          "The Kubernetes client returned invalid Event pagination.",
+        );
+      }
+      continuation = isNonEmptyString(next) ? next : undefined;
+    } while (continuation !== undefined);
+    return events;
   }
 
   async deleteAgentRuntimeCredentials(binding: ComputeAgentBinding): Promise<void> {
