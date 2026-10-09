@@ -12,11 +12,13 @@
 #
 # The runner's built-in Docker Hub sign-in has been refused with the anonymous
 # rate limit of addresses other users share, and that account's token endpoint
-# has timed out. The mirror refuses any credentials, and the Engine forwards
-# the client's Docker Hub sign-in to it, so the sign-in is removed from the
-# client configuration. Pinned digests are still verified, and an image the
-# mirror lacks falls back to Docker Hub anonymously. Buildx builder containers
-# pull on their own and need their own mirror setting.
+# has timed out. The mirror refuses any credentials, and the Engine's image
+# puller forwards the client's Docker Hub sign-in to it, so the sign-in is
+# removed from the client configuration. The Engine's own builder does not send
+# it to the mirror, but would on a fallback to Docker Hub. Pinned digests are
+# still verified, and an image the mirror lacks falls back to Docker Hub
+# anonymously. Buildx builder containers pull on their own and need their own
+# mirror setting.
 set -euo pipefail
 
 mirror="https://mirror.gcr.io"
@@ -49,17 +51,23 @@ setup() {
 }
 
 report() {
-  local journal hub
+  local journal hub served suppressed
   # An empty list below proves nothing if the storage driver changed.
   docker info --format 'driver {{.Driver}}, registry mirrors {{json .RegistryConfig.Mirrors}}'
-  journal="$(sudo journalctl -u docker --no-pager -o cat)"
+  journal="$(sudo journalctl -u docker --no-pager -o cat || true)"
   # `docker pull` and image pulls for containers log "Trying to pull"; a
   # fallback from the mirror logs "Attempting next endpoint".
   grep -E 'Trying to pull|Attempting next endpoint|toomanyrequests' <<<"$journal" || true
-  # The Engine's own BuildKit (`docker build`) logs registry requests by host.
-  grep -oE 'host="?[A-Za-z0-9.-]+' <<<"$journal" | sort | uniq -c || true
+  # The Engine's own builder (`docker build --builder default`) logs the
+  # registry host it resolves each image on.
+  grep -oE '(^| )host="?[A-Za-z0-9.:-]+' <<<"$journal" | sed 's/^ //' | sort | uniq -c || true
   hub="$(grep -cE 'registry-1\.docker\.io|auth\.docker\.io|index\.docker\.io' <<<"$journal" || true)"
-  echo "Engine log lines naming a Docker Hub endpoint: ${hub:-0}"
+  served="$(grep -c 'mirror\.gcr\.io' <<<"$journal" || true)"
+  # journald drops lines over its rate limit, which would hide Docker Hub lines.
+  suppressed="$(sudo journalctl -u systemd-journald --no-pager -o cat 2>/dev/null |
+    grep -c 'Suppressed.*docker\.service' || true)"
+  echo "Engine log lines: $(wc -l <<<"$journal"), naming mirror.gcr.io: ${served:-0}, naming a Docker Hub endpoint: ${hub:-0}"
+  echo "journald rate-limit notices for docker.service: ${suppressed:-0}"
 }
 
 case "${1:-}" in
