@@ -2432,3 +2432,94 @@ test("container expanded byte-windows preserve valid conservative PEM cursors", 
     assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
   }
 });
+
+test("container empty checkpoint recovery suppresses the next single untimed snapshot", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("container-empty-window");
+  fixture.computeDriver.state.lines = wireContainerRows(null);
+  const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=60"));
+  assert.equal(first.data.truncated, true);
+  fixture.computeDriver.state.lines = [];
+  const empty = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=60&cursor=${first.data.cursor}`),
+  );
+  assert.equal(empty.status, 200);
+  fixture.computeDriver.state.lines = [
+    {
+      time: null,
+      raw: JSON.stringify({ level: "info", subsystem: "gateway", message: "worker ready" }),
+    },
+  ];
+  const single = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=60&cursor=${empty.data.cursor}`),
+  );
+  assert.equal(single.data.records.filter(({ type }) => type === "line").length, 1);
+  const replay = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=60&cursor=${single.data.cursor}`),
+  );
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+});
+
+test("container checkpoint windows remain stable when relative seconds round outward", async () => {
+  const { createRuntimeLogFixture, createRuntimeLogComputeDriver } =
+    await import("../helpers/runtime-logs.mjs");
+  for (const skew of [0, 2000]) {
+    const underlying = createRuntimeLogComputeDriver();
+    const read = underlying.readAgentRuntimeLogs.bind(underlying);
+    const driver = {
+      ...underlying,
+      async readAgentRuntimeLogs(binding, request) {
+        const chunk = await read(binding, request);
+        const floor = Date.now() - skew - request.sinceSeconds * 1000;
+        return {
+          ...chunk,
+          lines:
+            request.sinceSeconds === undefined
+              ? chunk.lines
+              : chunk.lines.filter(({ time }) => time === null || Date.parse(time) >= floor),
+        };
+      },
+    };
+    const fixture = await createRuntimeLogFixture({ computeDriver: driver });
+    const target = await fixture.deployAgent("container-relative-window");
+    const now = Date.now();
+    const time = new Date(now - (skew === 0 ? 1000 : 11000)).toISOString();
+    const rows = wireContainerRows(time);
+    underlying.state.lines = [
+      {
+        time: new Date(now - skew - 10050).toISOString(),
+        raw: JSON.stringify({
+          level: "info",
+          subsystem: "gateway",
+          message: "older than original window",
+        }),
+      },
+      ...rows,
+    ];
+    const first = await fixture.request(
+      "GET",
+      target.logsPath("source=gateway&tailLines=61&sinceSeconds=10"),
+    );
+    assert.equal(first.data.truncated, true);
+    const rest = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=61&cursor=${first.data.cursor}`),
+    );
+    assert.equal(rest.status, 200);
+    assert.equal(rest.data.truncated, false);
+    const seen = [...first.data.records, ...rest.data.records]
+      .filter(({ type }) => type === "line")
+      .map(({ message }) => message.split(";", 1)[0]);
+    assert.deepEqual(
+      seen,
+      rows.map(({ raw }) => JSON.parse(raw).message.split(";", 1)[0]),
+    );
+    assert.ok(
+      !rest.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+    );
+  }
+});

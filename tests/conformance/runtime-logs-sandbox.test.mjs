@@ -1109,3 +1109,51 @@ test("sandbox full untimed checkpoints disclose saturation when total equals the
     replay.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
   );
 });
+
+test("sandbox empty checkpoint recovery suppresses the next single untimed snapshot", async () => {
+  const fixture = await sandboxFixture();
+  fixture.gateway.state.lines = Array.from({ length: 150 }, (_, index) => ({
+    sandboxId: SANDBOX_ID,
+    time: null,
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; ${'"a" '.repeat(1000)}`,
+    fields: {},
+  }));
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=200"),
+  );
+  assert.equal(first.data.truncated, true);
+  fixture.gateway.state.lines = [];
+  const empty = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&cursor=${first.data.cursor}`),
+  );
+  assert.equal(empty.status, 200);
+  assert.ok(
+    empty.data.records.some(({ type, reason }) => type === "gap" && reason === "buffer_lost"),
+  );
+  fixture.gateway.state.lines = [
+    {
+      sandboxId: SANDBOX_ID,
+      time: null,
+      level: "INFO",
+      target: "supervisor",
+      source: "sandbox",
+      message: "worker ready",
+      fields: {},
+    },
+  ];
+  const single = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&cursor=${empty.data.cursor}`),
+  );
+  assert.equal(single.data.records.filter(({ type }) => type === "line").length, 1);
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&cursor=${single.data.cursor}`),
+  );
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+});

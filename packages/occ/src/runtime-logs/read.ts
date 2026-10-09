@@ -263,7 +263,7 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
           ? secondsSince(quiet.issuedAt)
           : query.sinceSeconds;
   const readStartedAt = now();
-  const windowSinceTime =
+  let windowSinceTime =
     checkpoint !== undefined
       ? checkpoint.sinceTime
       : sinceSeconds === undefined
@@ -307,7 +307,30 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
     leading.push(runtimeLogGap("stream_replaced", observedStream));
   }
   // The byte limit cuts the final line; a partial line may end inside a token.
-  const completeLines = chunk.truncated ? chunk.lines.slice(0, -1) : chunk.lines;
+  const fetchedLines = chunk.truncated ? chunk.lines.slice(0, -1) : chunk.lines;
+  // Relative seconds can round the next read outward. Canonicalize the observed
+  // window before hashing/counting it so earlier rows cannot cause a false reset.
+  // The initial floor must also retain every timestamp the backend actually read,
+  // even when its clock differs from OCC's.
+  if (checkpoint === undefined && windowSinceTime !== null) {
+    for (const line of fetchedLines) {
+      if (
+        validRuntimeLogFrontierTime(line.time) &&
+        compareRuntimeLogTime(line.time, windowSinceTime) < 0
+      ) {
+        windowSinceTime = line.time;
+      }
+    }
+  }
+  const completeLines =
+    checkpoint?.sinceTime == null
+      ? fetchedLines
+      : fetchedLines.filter(
+          (line) =>
+            !validRuntimeLogFrontierTime(line.time) ||
+            compareRuntimeLogTime(line.time, checkpoint.sinceTime!) >= 0,
+        );
+
   const checkpointValid =
     checkpoint !== undefined &&
     !replacedDuringRead &&
@@ -495,7 +518,11 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
       end === 0 ? (checkpointValid ? checkpoint.count : 0) : remaining[end - 1]!.index + 1;
     const consumed = end === lines.length ? completeLines.length : prefixEnd;
     const retainCheckpoint =
-      pageCut || (checkpoint !== undefined && eligible.some(({ line }) => line.time === null));
+      !skipStalled &&
+      (pageCut ||
+        (checkpoint !== undefined &&
+          !chunk.truncated &&
+          (eligible.some(({ line }) => line.time === null) || lines.length === 0)));
     const prefix = completeLines.slice(0, prefixEnd);
     const ordered = prefix.every(
       (line, index) =>
