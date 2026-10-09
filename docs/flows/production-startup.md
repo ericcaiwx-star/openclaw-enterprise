@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
 updated: "2026-10-09"
-last_updated_session: "authoring-run/b1433176-2fef-435b-bc30-c52bc7fa09e4"
+last_updated_session: "authoring-run/4363ed9a-5724-4d4f-a14d-f1bc0485443e"
 ---
 
 # Production Startup Flow
@@ -114,10 +114,9 @@ retrieve generated credentials, or change controller configuration.
 `deploy/helm/openclaw-enterprise/templates/jobs.yaml:8`
 
 `deploy/helm/openclaw-enterprise/templates/bootstrap-networkpolicies.yaml:1`
-installs initialization isolation before the Job starts. Its scoped DNS grant
-and the later dependency, collector, Slack proxy, and Envoy policies allow
-UDP/TCP ports `53` and `5353` to the configured DNS peer; see the
-[Helm DNS contract](../reference/settings/production.md#required-production-controller-environment).
+installs initialization isolation. Bootstrap, dependency, collector, Slack and
+Envoy policies allow UDP/TCP `53` and `5353` to the configured DNS peer
+([Helm DNS contract](../reference/settings/production.md#required-production-controller-environment)).
 
 `deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` refuses
 fractional routing ports and requires a decimal `database.port` from 1 to 65535,
@@ -323,6 +322,8 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-09 22:28: Refuse invalid database ports before rendering NetworkPolicies. (authoring-run/4363ed9a-5724-4d4f-a14d-f1bc0485443e - dc95c2261d4b46cff8aca703e13e43cdd71d153e)
 
 - 2026-10-09 21:04: Refuse fractional routing ports before Helm emits Kubernetes resources. (authoring-run/b1433176-2fef-435b-bc30-c52bc7fa09e4 - 78677c21f)
 
