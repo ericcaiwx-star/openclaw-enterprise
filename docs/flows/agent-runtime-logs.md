@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
-updated: 2026-10-09
-last_updated_session: fix-949-950
+updated: 2026-10-10
+last_updated_session: authoring-run-9eade0ab-4aa4-4b21-9faa-e7478c6a8983
 ---
 
 # Agent runtime logs flow
@@ -84,7 +84,8 @@ two-cluster profile reads dedicated Gateways in its control target and Harnesses
 in its execution target. It lists Events by
 `involvedObject.uid`, keeps only that Pod's Events, drops the scheduler's
 `FailedScheduling` retry after a lost PVC update race once the Pod has a node,
-caps them at 100 and takes each
+follows Event-list continuation under the same five-second deadline, retains
+the newest 100 eligible Events across all pages, and takes each
 Event's `container` from `involvedObject.fieldPath` (`spec.containers{name}` or
 the init or ephemeral form; `null` for Pod-level Events such as `Scheduled`). A log
 read passes `{ source, events: false }`, so it lists only that source's Pods and
@@ -242,6 +243,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 00:33: Read Pod Event continuation pages before returning the newest 100 diagnostics. (authoring-run-9eade0ab-4aa4-4b21-9faa-e7478c6a8983 - 3e34cc0f4b469d29fc79d2c10a33f87a0921ee47)
 
 - 2026-10-09 15:42: Count container lines delivered at the cursor time, so a timestamp group larger than the 16-hash history neither replays nor hides later lines; a full history without that evidence stays suppressed. (fix-949-950)
 
