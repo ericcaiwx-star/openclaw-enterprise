@@ -110,10 +110,7 @@ redacts environment values and secret shapes in lines and event messages, and
 adds the record to the same report under `containerLogs`. The platform recovery
 test follows its fixture gateway, which logs its drain, across Agent stop.
 
-The job log and results keep 600 characters of a failure message. In every lane,
-the runner adds each failed file's whole messages and stacks (16 KiB each, 20
-cases) and its last 400 stdout, stderr and diagnostic lines to the same report
-under `failures`, for the first 8 failed files (`omittedFailureFiles` counts the rest). They get the failure-message
+Results/job logs keep 600-character failure messages. Diagnostic reports keep whole messages/stacks (16 KiB each, 20 cases) and the last 400 stdout/stderr/diagnostic lines under `failures` for eight files; `omittedFailureFiles` counts the rest. Labelled causes and aggregate errors share each field cap, across at most 32 values/eight nested levels. Cycles/limits are marked; shared siblings remain separate. They get the failure-message
 redaction, and lines naming a credential are dropped whole. Test output reaches an
 artifact only here; a runtime-minted value without a known shape is not redacted,
 so tests must not print secrets. Each record has a `reason`. A file stopped at the

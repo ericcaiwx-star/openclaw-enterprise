@@ -1863,6 +1863,37 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
       '  t.diagnostic("phase timings 1234 ms");',
       '  assert.fail(`${"stage line\\n".repeat(80)}decisive line ${process.env.CI_RUNNER_FIXTURE_CREDENTIAL}`);',
       "});",
+      'test("plain failure", () => { throw new Error("ordinary plain failure"); });',
+      'test("nested cause", () => { throw new Error("ordinary wrapper", { cause: new Error("ordinary underlying failure") }); });',
+      'test("aggregate failure", () => {',
+      '  throw new AggregateError([new Error("ordinary primary failure"), new Error("ordinary cleanup failure", { cause: new Error("ordinary cleanup cause") })], "ordinary aggregate");',
+      "});",
+      'test("shared sibling", () => {',
+      '  const shared = new Error("ordinary shared failure");',
+      '  throw new AggregateError([shared, shared], "ordinary sibling aggregate");',
+      "});",
+      'test("circular aggregate", () => {',
+      '  const aggregate = new AggregateError([new Error("ordinary first sibling")], "ordinary circular aggregate");',
+      '  aggregate.errors.push(aggregate, new Error("ordinary later sibling"));',
+      "  throw aggregate;",
+      "});",
+      'test("wide circular aggregate", () => {',
+      '  const aggregate = new AggregateError([], "ordinary wide circular aggregate");',
+      "  aggregate.errors.push(...Array(100).fill(aggregate));",
+      "  throw aggregate;",
+      "});",
+      'test("deep cause", () => {',
+      '  let error = new Error("ordinary deepest failure");',
+      '  for (let i = 0; i < 20; i += 1) error = new Error("ordinary cause wrapper " + i, { cause: error });',
+      "  throw error;",
+      "});",
+      'test("wide aggregate", () => {',
+      '  throw new AggregateError(Array.from({ length: 100 }, (_, i) => new Error("ordinary branch " + i)), "ordinary wide aggregate");',
+      "});",
+      'test("bounded aggregate text", () => {',
+      '  throw new AggregateError(Array.from({ length: 3 }, (_, i) => new Error("ordinary long branch " + i + " " + "x".repeat(10_000))), "ordinary bounded aggregate");',
+      "});",
+      'test("primitive cause", () => { throw new Error("ordinary primitive wrapper", { cause: "ordinary primitive cause" }); });',
       "",
     ].join("\n"),
   );
@@ -1927,6 +1958,90 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
     "stdout: progress before the failure",
   ]);
   assert.equal(record.output.omittedLines, 0);
+  const details = new Map(record.tests.map((entry) => [entry.name, entry]));
+  assert.equal(details.get("plain failure").message, "ordinary plain failure");
+  assert.equal(details.get("plain failure").stack.includes("cause:"), false);
+  assert.match(details.get("nested cause").message, /cause: ordinary underlying failure/);
+  assert.match(details.get("nested cause").stack, /cause:\nat /);
+  const aggregate = details.get("aggregate failure");
+  assert.match(aggregate.message, /errors\[0\]: ordinary primary failure/);
+  assert.match(aggregate.message, /errors\[1\]: ordinary cleanup failure/);
+  assert.match(aggregate.message, /errors\[1\]\.cause: ordinary cleanup cause/);
+  assert.match(aggregate.stack, /errors\[0\]:\nat /);
+  assert.match(aggregate.stack, /errors\[1\]\.cause:\nat /);
+  const siblings = details.get("shared sibling").message;
+  assert.match(siblings, /errors\[0\]: ordinary shared failure/);
+  assert.match(siblings, /errors\[1\]: ordinary shared failure/);
+  assert.doesNotMatch(siblings, /circular reference/);
+  const circular = details.get("circular aggregate").message;
+  assert.match(circular, /errors\[0\]: ordinary first sibling/);
+  assert.match(circular, /errors\[2\]: ordinary later sibling/);
+  // Process isolation serializes the backlink as a shallow Error. The native
+  // in-process runner below also exercises the actual cyclic object graph.
+  const cycleFile = join(root, "cycle-fixture.mjs");
+  await writeFile(
+    cycleFile,
+    [
+      'import test from "node:test";',
+      'test("circular aggregate", () => {',
+      '  const aggregate = new AggregateError([new Error("ordinary first sibling")], "ordinary circular aggregate");',
+      '  aggregate.errors.push(aggregate, new Error("ordinary later sibling"));',
+      "  throw aggregate;",
+      "});",
+      'test("wide circular aggregate", () => {',
+      '  const aggregate = new AggregateError([], "ordinary wide circular aggregate");',
+      "  aggregate.errors.push(...Array(100).fill(aggregate));",
+      "  throw aggregate;",
+      "});",
+    ].join("\n"),
+  );
+  const cycleReader = join(root, "cycle-reader.mjs");
+  await writeFile(
+    cycleReader,
+    [
+      'import { run } from "node:test";',
+      `import reporter from ${JSON.stringify(join(repositoryRoot, "scripts/ci/reporter.mjs"))};`,
+      `import { failureSecrets, redactFailureDetail } from ${JSON.stringify(join(repositoryRoot, "scripts/ci/failure-redaction.mjs"))};`,
+      `const events = run({ files: [${JSON.stringify(cycleFile)}], isolation: "none" });`,
+      "for await (const line of reporter(events)) {",
+      "  const event = JSON.parse(line);",
+      '  if (event.type === "test:fail") {',
+      `    console.log(JSON.stringify({ name: event.data.name, ...redactFailureDetail(event.data.error, failureSecrets([process.env]), ${JSON.stringify(root)}) }));`,
+      "  }",
+      "}",
+    ].join("\n"),
+  );
+  const cycleRun = spawnSync(process.execPath, [cycleReader], {
+    cwd: root,
+    env: runnerEnv(),
+    encoding: "utf8",
+  });
+  assert.equal(cycleRun.status, 0, cycleRun.stderr);
+  const cycleDetails = cycleRun.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const cycleDetail = cycleDetails.find((entry) => entry.name === "circular aggregate");
+  assert.match(cycleDetail.message, /errors\[1\]: \[error details omitted: circular reference\]/);
+  assert.match(cycleDetail.message, /errors\[2\]: ordinary later sibling/);
+  const wideCycleDetail = cycleDetails.find((entry) => entry.name === "wide circular aggregate");
+  assert.match(wideCycleDetail.message, /circular reference/);
+  assert.match(wideCycleDetail.message, /traversal limit/);
+  assert.match(details.get("deep cause").message, /traversal limit/);
+  assert.doesNotMatch(details.get("deep cause").message, /ordinary deepest failure/);
+  assert.match(details.get("wide aggregate").message, /errors\[0\]: ordinary branch 0/);
+  assert.match(details.get("wide aggregate").message, /traversal limit/);
+  assert.doesNotMatch(details.get("wide aggregate").message, /ordinary branch 99/);
+  const bounded = details.get("bounded aggregate text");
+  assert.ok(bounded.message.length <= 16_384);
+  assert.ok(bounded.stack.length <= 16_384);
+  assert.match(bounded.message, /errors\[0\]: ordinary long branch 0/);
+  assert.doesNotMatch(bounded.message, /ordinary long branch 2/);
+  assert.match(details.get("primitive cause").message, /cause: ordinary primitive cause/);
+  assert.equal(report.failures.length, 1, "passing files still add no diagnostics record");
+  for (const entry of summary.files[0].tests) {
+    assert.equal(entry.error?.stack, undefined);
+  }
 });
 
 test("the reporter sends interrupted tests and the output tail, newest first, on a timeout", async () => {

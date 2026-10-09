@@ -581,7 +581,7 @@ function upstreamDiagnostic(value) {
 // raw here and travel only over the pipe to run-tests, which redacts and
 // truncates them (failure-redaction.mjs) before anything reaches an artifact
 // or the job log.
-function failureText(cause) {
+function errorText(cause) {
   const message =
     typeof cause === "string" ? cause : typeof cause?.message === "string" ? cause.message : "";
   const stack = typeof cause?.stack === "string" ? cause.stack : "";
@@ -599,6 +599,64 @@ function failureText(cause) {
     // The whole stack goes only to the failure details in the diagnostics report.
     stack: frames.length > 0 ? frames.join("\n").slice(0, failureInputLimit) : undefined,
   };
+}
+
+function failureText(error) {
+  const first = errorText(error);
+  let message = first.message ?? "";
+  let stack = first.stack ?? "";
+  let count = 1;
+  const ancestors = new Set();
+  const append = (path, detail) => {
+    if (detail.message) {
+      message = `${message}${message ? "\n" : ""}${path}: ${detail.message}`.slice(
+        0,
+        failureInputLimit,
+      );
+    }
+    if (detail.stack) {
+      stack = `${stack}${stack ? "\n" : ""}${path}:\n${detail.stack}`.slice(0, failureInputLimit);
+    }
+  };
+  const visit = (value, path, depth) => {
+    if (count >= 32) {
+      append(path, { message: "[error details omitted: traversal limit]" });
+      return;
+    }
+    count += 1;
+    if (depth > 8) {
+      append(path, { message: "[error details omitted: traversal limit]" });
+      return;
+    }
+    if (ancestors.has(value)) {
+      append(path, { message: "[error details omitted: circular reference]" });
+      return;
+    }
+    append(path, errorText(value));
+    children(value, path, depth);
+  };
+  const children = (value, path, depth) => {
+    if (value === null || typeof value !== "object") {
+      return;
+    }
+    ancestors.add(value);
+    if (value.cause !== undefined) {
+      visit(value.cause, path ? `${path}.cause` : "cause", depth + 1);
+    }
+    if (Array.isArray(value.errors)) {
+      for (let index = 0; index < value.errors.length; index += 1) {
+        const nextPath = `${path ? `${path}.` : ""}errors[${index}]`;
+        if (count >= 32) {
+          append(nextPath, { message: "[error details omitted: traversal limit]" });
+          break;
+        }
+        visit(value.errors[index], nextPath, depth + 1);
+      }
+    }
+    ancestors.delete(value);
+  };
+  children(error, "", 0);
+  return { ...first, message: message || undefined, stack: stack || undefined };
 }
 
 // A failed file's last output lines (test stdout, stderr and diagnostics), raw
