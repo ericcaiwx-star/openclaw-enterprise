@@ -10,7 +10,10 @@ Harness never receives the real credential. An Agent uses a model source through
 Credential sources require a selected Credential Gateway. The only
 implementation is the [OpenShell Credential Gateway](drivers/openshell-credential-gateway.md).
 Its `openai` type authenticates dedicated Codex models, and its `bearer-token`
-type carries a static token to one API endpoint. OpenShell is not a supported
+type carries a static token to one API endpoint. With a
+[Credential Refresh Driver](drivers/credential-refresh.md) selected, its
+`oauth2-client-credentials` and `oauth2-refresh-token` types carry OAuth2
+access tokens that the gateway mints and refreshes itself. OpenShell is not a supported
 production Agent path; see its
 [qualification requirements](drivers/openshell-sandbox.md#qualification-contract).
 
@@ -61,13 +64,19 @@ OCC deletes any copy and the record. If the call fails without an answer, such a
 on a timeout, a copy may still appear later, so the record stays listed as
 `deleting`; send DELETE to remove it.
 
+A `refresh`-type source becomes `ready` only after the gateway mints its first
+token. If the issuer refuses the material or cannot be reached, registration
+fails with `503` naming the Driver's failure code, and OCC removes the source.
+
 ## Read and list sources
 
 `GET /namespaces/:namespaceId/credential-sources/:credentialSourceId` requires
 exact `read`. It returns the record plus live `status` from the gateway:
 `ready`, `pending`, `failed`, or `absent`, with an optional `reason`. If the
 gateway cannot answer, `status` is `failed` with a fixed reason; the read still
-succeeds.
+succeeds. For a `refresh` type, `status.refresh` adds the token's `state`,
+`expiresAt`, `nextRefreshAt`, `lastRefreshAt`, and, after a failure, a
+`failureCode` and `recoveryAction`. It never contains a token.
 
 `GET /namespaces/:namespaceId/credential-sources` requires Namespace `read`
 and returns only sources on which the caller has exact `read`. Lists
@@ -155,6 +164,31 @@ gateway gives updated values only to new processes. To rotate a key:
 2. Run `occ credential-source update ID`, adding `--file` with replacement
    `secrets` if you created a new Secret.
 3. Redeploy each Agent that uses the source.
+
+A `refresh`-type source keeps no static value: an update replaces its refresh
+material and mints a new token, and OCC commits replacement Secret references
+only after that mint succeeds. If the mint fails, the update returns `503`, but
+the gateway keeps the new material; the source stays `ready` and its
+`status.refresh` reports the failure. OCC does not restore the previous
+material. Send `{}` to re-apply the recorded Secrets, or update with corrected
+ones. Running Agents lose the source's token within about 10 seconds of an
+update, even a failed one, and receive none until you redeploy them.
+
+## Rotate a refresh source
+
+The gateway re-mints a `refresh`-type source's token before it expires, and
+running Agents use the new token with the same placeholder. To replace a token
+immediately, for example after a suspected leak, send
+`POST /namespaces/:namespaceId/credential-sources/:credentialSourceId/rotate`
+or run `occ credential-source rotate ID`. The caller needs exact
+`credential_source:update`; rotation reads no Secret. The request returns `200`
+with the source and its `status.refresh`, `409` for a static source, and `503`
+when the gateway is unavailable or minting fails. Rotation does not revoke the
+previous token at the issuer, and Agents need no redeploy.
+
+When `status.refresh.recoveryAction` is `reauthorize`, the issuer revoked the
+refresh token. Complete a new sign-in, store its refresh token in a Secret, and
+update the source to reference it.
 
 ## Withdraw a source from an Agent
 
@@ -280,15 +314,15 @@ after the caller's grant and the source lookup. `GET` on such a source reports a
 
 ## Errors
 
-| Status                                  | Meaning                                                                                                                                                                                                             |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400 INVALID_REQUEST`                   | The body or a field name is malformed, a Secret reference names another Namespace, or a credential-source `harnessAuth` is not listed.                                                                              |
-| `403 FORBIDDEN`                         | A required `credential_source` or `secret` permission is missing.                                                                                                                                                   |
-| `404 NOT_FOUND`                         | The source or Secret is not in the exact Namespace, or a catalog field is invalid; or the Agent's active revision does not use the source or has no withdrawal for it.                                              |
-| `409 NAMESPACE_NOT_READY`               | The Namespace is not `ready`.                                                                                                                                                                                       |
-| `409 RESOURCE_CONFLICT`                 | The source is still referenced, not `ready` for an update, or changed during the request; the gateway does not offer its type; the Agent has no active revision to withdraw from; or sources need a Sandbox Driver. |
-| `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED` | Registration, update, deletion, Agent binding, or deploying an Agent that binds a source, on an Installation that selects no Credential Gateway.                                                                    |
-| `503 DEPENDENCY_UNAVAILABLE`            | The selected Credential Gateway or the Secret Driver is unavailable, the gateway call failed, or the source was registered through a previously selected gateway.                                                   |
+| Status                                  | Meaning                                                                                                                                                                                                                                                |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `400 INVALID_REQUEST`                   | The body or a field name is malformed, a Secret reference names another Namespace, or a credential-source `harnessAuth` is not listed.                                                                                                                 |
+| `403 FORBIDDEN`                         | A required `credential_source` or `secret` permission is missing.                                                                                                                                                                                      |
+| `404 NOT_FOUND`                         | The source or Secret is not in the exact Namespace, or a catalog field is invalid; or the Agent's active revision does not use the source or has no withdrawal for it.                                                                                 |
+| `409 NAMESPACE_NOT_READY`               | The Namespace is not `ready`.                                                                                                                                                                                                                          |
+| `409 RESOURCE_CONFLICT`                 | The source is still referenced, not `ready` for an update or rotation, static for a rotation, or changed during the request; the gateway does not offer its type; the Agent has no active revision to withdraw from; or sources need a Sandbox Driver. |
+| `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED` | Registration, update, rotation, deletion, Agent binding, or deploying an Agent that binds a source, on an Installation that selects no Credential Gateway.                                                                                             |
+| `503 DEPENDENCY_UNAVAILABLE`            | The selected Credential Gateway, Credential Refresh Driver, or Secret Driver is unavailable, the gateway call failed, a `refresh` type could not mint a token, or the source was registered through a previously selected gateway.                     |
 
 ## Related
 
