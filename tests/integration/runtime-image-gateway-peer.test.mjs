@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { imageSmokeTimeoutMultiplier } from "../helpers/image-smoke-timeout.mjs";
+import { runWritableGatewayRestart } from "../fixtures/runtime-gateway-writable-restart.mjs";
 import {
   GATEWAY_RUNTIME_ENTRYPOINT as KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
   PLUGIN_APP_SERVER_TOKEN_HMAC_DOMAIN,
@@ -155,6 +156,12 @@ for (const writableConfig of [false, true]) {
     },
   );
 }
+
+test(
+  "runtime image Gateway preserves writable peer recovery across container restarts",
+  imageTestOptions,
+  runWritableGatewayRestart,
+);
 
 async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) {
   const directory = await mkdtemp(join(tmpdir(), "oce-runtime-image-config-"));

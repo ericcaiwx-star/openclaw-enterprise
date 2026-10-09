@@ -3873,7 +3873,10 @@ test("Codex gateway supervisor waits for its Harness plugin status without a dea
 // Runs the Kubernetes Codex Gateway wrapper against a real HTTP Harness peer
 // status endpoint and a real readiness endpoint standing in for OpenClaw. Only
 // process spawning and the filesystem are substituted.
-async function startCodexGatewaySupervisor(t, { bindingDeviceId, writableConfig = false } = {}) {
+async function startCodexGatewaySupervisor(
+  t,
+  { bindingDeviceId, writableConfig = false, savedFiles, initialPeerStatus } = {},
+) {
   const peerHttp = await import("node:http");
   const configurationPath = writableConfig
     ? "/home/node/.openclaw/openclaw.json"
@@ -3915,6 +3918,15 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId, writableConfig 
       ],
     ]),
   };
+  if (writableConfig) {
+    fixture.files.set("/etc/openclaw-managed/openclaw.json", fixture.files.get(configurationPath));
+  }
+  if (savedFiles !== undefined) {
+    fixture.files = new Map(savedFiles);
+  }
+  if (initialPeerStatus !== undefined) {
+    fixture.peerStatus = initialPeerStatus;
+  }
   if (bindingDeviceId !== undefined) {
     fixture.files.set(
       "/home/node/workspace-node-binding/workspace-node.json",
@@ -4024,6 +4036,22 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId, writableConfig 
           writeFileSync(path, data) {
             fixture.files.set(path, String(data));
           },
+          renameSync(from, to) {
+            const failure = fixture.failConfigWrite;
+            if (to === configurationPath && failure !== undefined && --failure.remaining === 0) {
+              fixture.failConfigWrite = undefined;
+              if (failure.after) {
+                fixture.files.set(to, fixture.files.get(from));
+                fixture.files.delete(from);
+              }
+              throw new Error("Interrupted configuration replacement");
+            }
+            fixture.files.set(to, fixture.files.get(from));
+            fixture.files.delete(from);
+          },
+          rmSync(path) {
+            fixture.files.delete(path);
+          },
         };
       }
       if (specifier === "node:child_process") {
@@ -4080,6 +4108,78 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId, writableConfig 
   return fixture;
 }
 
+test("Codex gateway supervisor recovers a changed peer after restarting with its writable copy", async (t) => {
+  const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const path = "/home/node/.openclaw/openclaw.json";
+  const edited = JSON.parse(previous.files.get(path));
+  edited.messages = { responsePrefix: "Native admin edit" };
+  previous.files.set(path, JSON.stringify(edited));
+  const gateway = await startCodexGatewaySupervisor(t, {
+    writableConfig: true,
+    savedFiles: previous.files,
+    initialPeerStatus: {
+      ...previous.peerStatus,
+      startupId: "agent-startup-2",
+      podUid: "agent-pod-2",
+      successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+      failures: [],
+    },
+  });
+  assert.equal(gateway.children[0].config.messages.responsePrefix, "Native admin edit");
+  assert.equal(
+    gateway.children[0].config.plugins.entries.codex.config.codexPlugins.plugins.linear.enabled,
+    true,
+  );
+  assert.equal(gateway.children[0].token, gateway.token("agent-startup-2"));
+  assert.equal(gateway.status().phase, "ready");
+  assert.deepEqual(gateway.exits, []);
+});
+
+for (const after of [false, true]) {
+  test(`Codex gateway supervisor replays provenance after an interrupted bridge write (after=${after})`, async (t) => {
+    const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
+    const [first] = previous.children;
+    previous.peerStatus = {
+      ...previous.peerStatus,
+      startupId: "agent-startup-2",
+      podUid: "agent-pod-2",
+      successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+      failures: [],
+    };
+    previous.failConfigWrite = { remaining: 2, after };
+    const respawn = previous.pollPeer();
+    await waitForCondition("the stale Gateway stop", () => first.killed.length === 1);
+    first.exit(null, "SIGTERM");
+    await respawn;
+    assert.deepEqual(previous.exits, [1]);
+    const gateway = await startCodexGatewaySupervisor(t, {
+      writableConfig: true,
+      savedFiles: previous.files,
+      initialPeerStatus: previous.peerStatus,
+    });
+    assert.equal(
+      gateway.children[0].config.plugins.entries.codex.config.codexPlugins.plugins.linear.enabled,
+      true,
+    );
+    assert.equal(gateway.status().phase, "ready");
+    assert.deepEqual(gateway.exits, []);
+  });
+}
+
+test("Codex gateway supervisor refuses provenance for another revision or managed snapshot", async (t) => {
+  const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const path = "/home/node/.openclaw/openclaw.json.oce-peer-bridge.json";
+  for (const patch of [{ revisionId: "another-revision" }, { sourceHash: "0".repeat(64) }]) {
+    const savedFiles = new Map(previous.files);
+    const journal = JSON.parse(savedFiles.get(path));
+    savedFiles.set(path, JSON.stringify({ ...journal, ...patch }));
+    await assert.rejects(
+      startCodexGatewaySupervisor(t, { writableConfig: true, savedFiles }),
+      /Gateway peer configuration state does not match the admitted revision/,
+    );
+  }
+});
+
 test("Codex gateway supervisor preserves native edits when its initial config is writable", async (t) => {
   const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });
   const [first] = gateway.children;
@@ -4100,7 +4200,14 @@ test("Codex gateway supervisor preserves native edits when its initial config is
   await waitForCondition("the stale Gateway stop", () => first.killed.length === 1);
   first.exit(null, "SIGTERM");
   await respawn;
-  assert.equal(gateway.children.length, 2);
+  assert.equal(
+    gateway.children.length,
+    2,
+    JSON.stringify({
+      state: gateway.files.get(path + ".oce-peer-bridge.json"),
+      logs: gateway.logs,
+    }),
+  );
   const replacement = gateway.children[1];
   assert.equal(replacement.config.messages.responsePrefix, "Native admin edit");
   assert.equal(
@@ -4110,6 +4217,44 @@ test("Codex gateway supervisor preserves native edits when its initial config is
   assert.equal(replacement.token, gateway.token("agent-startup-2"));
   assert.equal(gateway.status().phase, "ready");
   assert.deepEqual(gateway.exits, []);
+});
+
+test("Codex gateway supervisor refuses a native edit back to an older generated bridge", async (t) => {
+  const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const [first] = gateway.children;
+  const path = "/home/node/.openclaw/openclaw.json";
+  const oldBridge = first.config.plugins.entries.codex.config.codexPlugins;
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-2",
+    podUid: "agent-pod-2",
+    successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+    failures: [],
+  };
+  const recovery = gateway.pollPeer();
+  await waitForCondition("the first Gateway stop", () => first.killed.length === 1);
+  first.exit(null, "SIGTERM");
+  await recovery;
+  const edited = JSON.parse(gateway.files.get(path));
+  edited.plugins.entries.codex.config.codexPlugins = oldBridge;
+  gateway.files.set(path, JSON.stringify(edited));
+  const replacement = gateway.children[1];
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-3",
+    podUid: "agent-pod-3",
+  };
+  const refused = gateway.pollPeer();
+  await waitForCondition("the replacement Gateway stop", () => replacement.killed.length === 1);
+  replacement.exit(null, "SIGTERM");
+  await refused;
+  assert.equal(gateway.children.length, 2);
+  assert.deepEqual(gateway.exits, [1]);
+  assert.equal(
+    JSON.parse(gateway.files.get(path)).plugins.entries.codex.config.codexPlugins.plugins.linear
+      .enabled,
+    false,
+  );
 });
 
 test("Codex gateway supervisor retains refusal of a native-edited managed bridge", async (t) => {

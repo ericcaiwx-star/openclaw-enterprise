@@ -185,6 +185,7 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
     extraEnvironment = [],
     tmpfs = ["/home/node:size=1024m,uid=1000,gid=1000,mode=700"],
     volumes = [],
+    network = "none",
     waitUntilReady = true,
     withAppServer = true,
   } = options;
@@ -226,7 +227,7 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
     "--tmpfs",
     "/tmp:size=64m,uid=1000,gid=1000,mode=1777",
     "--network",
-    "none",
+    network,
     ...volumes.flatMap((value) => ["--volume", value]),
     ...environment.flatMap((value) => ["-e", value]),
     "--entrypoint",
