@@ -189,7 +189,7 @@ A page never silently skips output; it labels each gap:
 
 Limits per request: 1000 lines, 1 MiB read from the cluster, 32 KiB per input
 line, 512 KiB per response (including JSON escaping, cursor and metadata),
-100 Events per Pod, 10 seconds overall. A cut response retains progress through
+the newest 100 Events per Pod, 10 seconds overall. A cut response retains progress through
 its observed rows, including untimed ones. Changed windows warn of skipped lines
 before a fresh snapshot; value-identical replacement remains unobservable.
 Continue with the returned cursor for

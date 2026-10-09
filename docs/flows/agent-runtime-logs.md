@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/d983fb2c-0a98-43db-8690-ddb7f5b43f87
+last_updated_session: authoring-run/39d848cc-a298-48fd-9f82-c39b85089b94
 ---
 
 # Agent runtime logs flow
@@ -85,7 +85,8 @@ two-cluster profile reads dedicated Gateways in its control target and Harnesses
 in its execution target. It lists Events by
 `involvedObject.uid`, keeps only that Pod's Events, drops the scheduler's
 `FailedScheduling` retry after a lost PVC update race once the Pod has a node,
-caps them at 100 and takes each
+follows Event-list continuation under the same five-second deadline, retains
+the newest 100 eligible Events across all pages, and takes each
 Event's `container` from `involvedObject.fieldPath` (`spec.containers{name}` or
 the init or ephemeral form; `null` for Pod-level Events such as `Scheduled`). A log
 read passes `{ source, events: false }`, so it lists only that source's Pods and
@@ -111,32 +112,25 @@ line and converts numeric offsets to UTC while retaining every fractional digit.
 Unknown or malformed offset prefixes remain untimed raw text. A cursor
 poll derives `sinceSeconds` from the cursor: from its newest delivered line, or,
 when the view has delivered nothing yet, from the previous read (a full or
-byte-cut tail then emits `window_exceeded`). When a resumed read delivers nothing
-new on every poll because the next line does not fit in the 1 MiB limit (typically
-one oversized line), and that line is more than about 3 seconds older than the read,
-the cursor drops its delivered time and
-continues from this read, as a view that has delivered nothing yet does. The page
-emits `window_exceeded` dated at that line: it and the lines logged after
-it until this read are lost. A carried PEM block then keeps no delivered frontier,
-so it stays masked for the rest of the view. OCC
-drops earlier lines. For the cursor time, the signed cursor carries
-`frontierComplete`, `frontierCount` (lines delivered at that time) and the last
-16 of their hashes. When `frontierComplete` is true and the read holds that
-time's first line (it starts earlier, or the Driver page is shorter than the tail
-and not byte-cut) with its timed lines in order through that time, OCC skips the
-first `frontierCount` lines at that time, if the hashes match the end of that run,
-and delivers the rest: a group larger than 16 lines neither replays nor hides
-later lines. Otherwise it consumes one remembered hash per delivered occurrence,
-and lines it then delivers at that time drop the count. Text with no remembered hash is new
-only while the hashes cover the whole count; identical text beyond its count also
-needs `frontierComplete`. A new frontier is complete when its consumed prefix is
-ordered and starts after the earliest fetched timestamp, or the Driver page is
-shorter than the requested tail and not byte-cut. The bit persists while the
-frontier timestamp stays the same. Otherwise matching-time text stays suppressed
-until the timestamp advances: expanding a previously cut tail must not make an
-older occurrence appear new. A legacy cursor without `frontierCount` has a count
-only when it holds fewer than 16 hashes. A page byte cut keeps the count, so
-undelivered lines at a complete frontier resume. It emits `stream_replaced`,
+byte-cut tail then emits `window_exceeded`). If every poll stalls because a line cannot fit the 1 MiB read limit, and that
+cut line is over about 3 seconds old, the cursor resumes from the current read.
+`window_exceeded` dates the lost interval. A carried PEM block loses its time
+boundary and stays conservatively masked. Earlier lines are dropped.
+For the frontier time, the cursor stores `frontierComplete`, `frontierCount`
+and the last 16 hashes. Positional de-duplication requires a complete frontier,
+its group's first line in the read (an earlier timestamp or a short uncut page),
+ordered valid times and matching suffix hashes. It skips `frontierCount`
+occurrences, preserving groups larger than 16. Hash fallback consumes matching
+occurrences and invalidates the count when delivering at that frontier. A new
+hash is accepted only with complete hash history; extra identical occurrences
+also require frontier completeness.
+
+Completeness requires an ordered consumed prefix after the earliest fetched time,
+or a short uncut Driver page, and persists while time stays unchanged. Otherwise
+matching-time text stays suppressed until time advances; enlarging a cut tail
+must not reveal old occurrences as new. Legacy counts are inferred only below
+16 hashes. Byte cuts preserve counts for complete frontiers.
+It emits `stream_replaced`,
 `window_exceeded`, `cursor_expired` or `truncated` gaps, and passes the rest to
 `runtime-logs/sanitize.ts:sanitizeRuntimeLogChunk`, the only producer of
 `SanitizedRuntimeLogRecord`. `page-budget.ts` measures serialized pages,
@@ -249,6 +243,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 
 ## Changelog
 
+- 2026-10-10 04:37: Compose fetched safety evidence with Event pagination. (authoring-run/39d848cc-a298-48fd-9f82-c39b85089b94 - 8e5a06cec7f622185222a8a7dbafe3b0a7228d9f)
+
 - 2026-10-10 04:19: Preserve fetched masking evidence in delivered prefixes. (authoring-run/d983fb2c-0a98-43db-8690-ddb7f5b43f87 - 9222f0073c951203c5f959bc9382dbb13c605ee9)
 
 - 2026-10-10 04:10: Preserve rounded and empty windows. (authoring-run/b4a36577-a96a-44f4-9600-41b94747c1c9 - d791a48aa0baacfef2dede241c6161ad9c82e89a)
@@ -264,6 +260,9 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 - 2026-10-10 02:43: Retain authenticated Sandbox window progress across serialized cuts and report changed snapshots as gaps. (authoring-run/2edda611-948b-44ae-a3d8-0a011073b719 - 5c7c56b49f16b80c4fcb91fedff0959a5fd733b0)
 
 - 2026-10-10 01:14: Enforce the serialized runtime-log response limit for container and Sandbox pages, including cursors and the API frame. (authoring-run/018d11d8-3699-4e97-945b-c2cfd3088412 - 243b38ba6d951240065e5061e1e4abccdb44410c)
+- 2026-10-10 02:50: Preserve Event pagination and current termination when merging main; retain both regression groups and histories. (authoring-run/794085ff-b0bd-422e-8fe7-6b6e9846ca0f - 880b645f5e5fb5c99c6046c1eac6ca81211be584)
+
+- 2026-10-10 00:33: Read Pod Event continuation pages before returning the newest 100 diagnostics. (authoring-run-9eade0ab-4aa4-4b21-9faa-e7478c6a8983 - 3e34cc0f4b469d29fc79d2c10a33f87a0921ee47)
 
 - 2026-10-10 02:35: Preserve current termination projection and both flow histories when merging main timestamp parsing changes. (authoring-run/f9b46af2-6bd4-4636-b675-dd9bea82a566 - db4ccbdea96a752cd99a66cf4cf02c195f5fe3ba)
 

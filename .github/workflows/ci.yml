@@ -366,6 +366,25 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           artifact-prefix: ci-results
 
+  # Real Keycloak OIDC proof in full-mode PR CI and on pushes to main.
+  # Deliberately not a CI Required dependency until it has soaked on main.
+  keycloak-oidc:
+    name: Keycloak OIDC
+    needs: impact
+    if: ${{ needs.impact.outputs.mode == 'full' }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/run-ci-lane
+        with:
+          lane: keycloak-oidc
+          profile: postgres
+          node-version: ${{ env.NODE_VERSION }}
+          artifact-prefix: keycloak-results
+
   # Real Local Setup install on every PR and merge, with a stand-in model
   # provider and no secrets. Deliberately not a CI Required dependency yet.
   first-agent-smoke:
