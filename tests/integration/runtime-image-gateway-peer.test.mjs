@@ -15,6 +15,7 @@ import {
   commandOutput,
   createAdmittedRuntimeImageConfiguration,
   jsonLogEntries,
+  failureTail,
   runGatewaySmoke,
 } from "../helpers/runtime-image-startup.mjs";
 
@@ -206,7 +207,7 @@ async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) 
   if (!(failure.stdout ?? "").includes(`"phase":"${expectedPhase}"`)) {
     const logs = await runDocker(["logs", containerName]).catch((error) => error);
     assert.fail(
-      `Expected ${expectedPhase} was not observed.\n${commandOutput(failure)}\n${commandOutput(logs)}`,
+      `Expected ${expectedPhase} was not observed.\n${failureTail(commandOutput(failure), 4096)}\n${failureTail(commandOutput(logs), 8192)}`,
     );
   }
   // The fixture fails on its own only when the wrapper outlives its deadline;
@@ -221,7 +222,9 @@ async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) 
     timeout: 30_000 * imageSmokeTimeoutMultiplier,
   }).catch(async (error) => {
     const logs = await runDocker(["logs", containerName]).catch((logsError) => logsError);
-    assert.fail(`The Gateway container did not exit.\n${error.message}\n${commandOutput(logs)}`);
+    assert.fail(
+      `The Gateway container did not exit.\n${error.message}\n${failureTail(commandOutput(logs))}`,
+    );
   });
   assert.equal(exited.stdout.trim(), "1");
   const inspect = await runDocker(["inspect", containerName, "--format", "{{json .State}}"]);

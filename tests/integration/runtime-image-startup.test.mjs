@@ -50,6 +50,7 @@ import {
   temporaryGatewayConfiguration,
   createAdmittedRuntimeImageConfiguration,
   jsonLogEntries,
+  failureTail,
   runGatewaySmoke,
   reviewedCodexSeccompSecurityOptions,
 } from "../helpers/runtime-image-startup.mjs";
@@ -982,7 +983,7 @@ NODE
       ],
       { timeout: 30_000 * imageSmokeTimeoutMultiplier },
     ).catch((error) => {
-      throw new Error(sanitizeSyntheticCredential(commandOutput(error)));
+      throw new Error(failureTail(sanitizeSyntheticCredential(commandOutput(error))));
     });
 
     const result = JSON.parse(stdout);
