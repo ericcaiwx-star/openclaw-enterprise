@@ -177,13 +177,13 @@ exposes nothing else. OpenShell stamps supervisor lines when recorded but
 batches them, and filters `since_time` by that stamp, so a resume sends a time
 `SANDBOX_LOG_OVERLAP_MS` (5 s) behind the newest delivered line; the cursor
 keeps one hash per line delivered since then (up to 48), and each re-read line
-consumes one. A first page floors its resume time at the requested window start.
+consumes one. First pages retain the requested window start.
 Both readers checkpoint serialized cuts with an authenticated window digest,
 raw-prefix count, query floor and pre-cut baseline. Known container times retain
 the captured floor before digesting; empty checkpoints persist. Stable windows drain
 before overlap advances, including untimed lines and over-capacity timestamp
 groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
-untimed snapshots retain replay progress. Container UID/restarts reset progress,
+UID/restarts reset container progress,
 and PEM recovery clears inconsistent time boundaries while preserving masking. Timed windows resume overlap. Value-identical replacements remain unobservable; full checkpoints report gaps. Missing remembered lines or over-capacity timestamps also emit
 gaps. gRPC `NOT_FOUND` (absent
 Sandbox, or concealed from a non-member) maps to
