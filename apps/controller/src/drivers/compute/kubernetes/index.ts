@@ -100,6 +100,7 @@ import {
   ConfigurationHarnessError,
   CredentialWithdrawalRefusedError,
   DependencyUnavailableError,
+  requireOpenClawRoster,
   ResourceConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsForbiddenByClusterError,
@@ -936,7 +937,7 @@ const WRITABLE_CONFIGURATION_PATH = "/home/node/.openclaw/openclaw.json";
 const CONFIGURATION_DOCUMENT = "openclaw.json";
 const CONFIGURATION_VOLUME = "openclaw-configuration";
 const PLUGIN_RUNTIME_VOLUME = "openclaw-plugin-runtime";
-const PLUGIN_RUNTIME_STATUS_PORT = 18_791;
+export const PLUGIN_RUNTIME_STATUS_PORT = 18_791;
 const PLUGIN_RUNTIME_STATUS_PATH = "/openclaw/plugin-runtime/status";
 const RUNTIME_STATUS_PATH = "/openclaw/runtime/status";
 const RUNTIME_DIAGNOSTICS_PATH = "/openclaw/runtime/diagnostics";
@@ -2150,89 +2151,6 @@ function nativeRuntimeSnapshot(revision: AgentRevision): NativeRuntimeSnapshot |
   };
 }
 
-// Every topology here (embedded OpenClaw, dedicated OpenClaw or Codex) runs the pinned OpenClaw
-// Gateway on the admitted document. Its config validation rejects these roster shapes and the
-// Gateway then exits at startup (EX_CONFIG) instead of serving, so refuse them here. The
-// Gateway drops only an empty agents.list beside an implicit empty roster, so that one passes.
-// A refusal, not a rewrite: OCC skips this on status reads.
-function requireOpenClawRoster(configuration: OpenClawConfigurationDocument): void {
-  // Each refusal names the setting and the rule it breaks. Keys come from the caller's own
-  // Configuration; agentEntryMessage quotes and bounds them.
-  const agents = asRecord(configuration.agents);
-  if (configuration.agents !== undefined && agents === undefined) {
-    throw new ConfigurationHarnessError("The OpenClaw Gateway requires agents to be an object.");
-  }
-  const roster = asRecord(agents?.entries);
-  if (agents?.entries !== undefined && roster === undefined) {
-    throw new ConfigurationHarnessError(
-      "The OpenClaw Gateway requires agents.entries to be an object keyed by Agent ID.",
-    );
-  }
-  // OpenClaw's schema: entries is a record of objects whose keys stay unique after its
-  // normalizeAgentId (lowercase; a key starting with _ also drops trailing dashes).
-  const entries = Object.entries(roster ?? {});
-  const normalized = new Map<string, string>();
-  for (const [id, entry] of entries) {
-    if (asRecord(entry) === undefined) {
-      throw new ConfigurationHarnessError(
-        agentEntryMessage(id, (path) => `The OpenClaw Gateway requires ${path} to be an object.`),
-      );
-    }
-    if (!/^[a-z0-9_][a-z0-9_-]{0,63}$/i.test(id)) {
-      throw new ConfigurationHarnessError(
-        agentEntryMessage(
-          id,
-          (path) =>
-            `The OpenClaw Gateway rejects the Agent ID in ${path}: use up to 64 letters, digits, _ or -, not starting with -.`,
-        ),
-      );
-    }
-    // A valid ID is plain and at most 64 characters, so both names fit the message cap.
-    const key = id.startsWith("_") ? id.toLowerCase().replace(/-+$/, "") : id.toLowerCase();
-    const first = normalized.get(key);
-    if (first !== undefined) {
-      throw new ConfigurationHarnessError(
-        `The OpenClaw Gateway normalizes agents.entries.${first} and agents.entries.${id} to the same Agent ID: rename one.`,
-      );
-    }
-    normalized.set(key, id);
-  }
-  const rosterSize = entries.length;
-  const explicit = agents?.ownership === "explicit";
-  if (
-    agents?.list !== undefined &&
-    !(Array.isArray(agents.list) && agents.list.length === 0 && rosterSize === 0 && !explicit)
-  ) {
-    throw new ConfigurationHarnessError(
-      "The OpenClaw Gateway rejects agents.list: remove it and configure each Agent under agents.entries, keyed by its Agent ID.",
-    );
-  }
-  const marked = entries.find(([, entry]) => asRecord(entry)?.default !== undefined);
-  if (marked !== undefined) {
-    throw new ConfigurationHarnessError(
-      agentEntryMessage(
-        marked[0],
-        (path) => `The OpenClaw Gateway rejects ${path}.default: remove it.`,
-      ),
-    );
-  }
-  if (agents?.ownership !== undefined && !explicit) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway accepts only "explicit" for agents.ownership: set it to "explicit", or remove it if agents.entries has at most one entry.',
-    );
-  }
-  if (rosterSize > 1 && !explicit) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway needs agents.ownership "explicit" for more than one agents.entries entry: set it, or keep one entry.',
-    );
-  }
-  if (explicit && rosterSize === 0) {
-    throw new ConfigurationHarnessError(
-      'The OpenClaw Gateway needs at least one agents.entries entry when agents.ownership is "explicit": add one, or remove agents.ownership.',
-    );
-  }
-}
-
 // OpenClaw's default Agent (the sole entry, or a named session store or system owner) keeps
 // its own workspace, while the Gateway, file transfer and workspace files address main. A
 // refusal, not a rewrite: OCC skips this on status reads. Each refusal names the setting and
@@ -2634,12 +2552,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
     validatePeer(options.network.dns, "DNS peer");
     validatePort(options.network.gatewayPort, "Gateway port");
-    if (
-      options.runtime !== undefined &&
-      options.network.gatewayPort === PLUGIN_RUNTIME_STATUS_PORT
-    ) {
+    // Plugin status also serves on 18791 without a native runtime (OpenClaw Gateways
+    // with enabled plugins), so the reservation does not depend on options.runtime.
+    if (options.network.gatewayPort === PLUGIN_RUNTIME_STATUS_PORT) {
       throw new ConfigurationFailure(
-        "Gateway port cannot use the reserved runtime status port 18791.",
+        `Gateway port cannot use the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}.`,
       );
     }
     trustedProxyCidrSet(options.network.gatewayTrustedProxyCidrs, "Trusted proxy CIDR");
@@ -2849,7 +2766,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         }
         if (options.network.gatewayPort + 1 === PLUGIN_RUNTIME_STATUS_PORT) {
           throw new ConfigurationFailure(
-            "Gateway sandbox port cannot use the reserved runtime status port 18791.",
+            `Gateway sandbox port cannot use the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}.`,
           );
         }
       }
@@ -3191,6 +3108,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
         `Dedicated OpenClaw required profile ${NATIVE_WORKER_PROFILE} is owned by the selected Compute Driver.`,
       );
     }
+    // Every topology's Gateway rejects these rosters, so Configuration save refuses them too.
+    // Only dedicated OpenClaw serves main, so that rule stays here, at deployment.
     requireOpenClawRoster(configuration);
     if (native) {
       requireNativeMainAgentDefault(configuration);
@@ -3696,7 +3615,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const [kind, detail] = (["waiting", "running", "terminated"] as const)
       .map((name) => [name, asRecord(state[name])] as const)
       .find(([, value]) => value !== undefined) ?? ["unknown" as const, undefined];
-    const last = asRecord(asRecord(entry.lastState)?.terminated);
+    // A currently terminated instance is the latest exit; lastState is the prior one.
+    const last = kind === "terminated" ? detail : asRecord(asRecord(entry.lastState)?.terminated);
     return {
       name: String(entry.name),
       state: kind,
@@ -10298,6 +10218,26 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       throw new GatewaySettingFailure(
         "gateway.auth.identityScopes",
         `must grant only ${TRUSTED_PROXY_IDENTITY} operator.admin when set`,
+      );
+    }
+    // OpenClaw binds its MCP Apps sandbox listener on mcp.apps.sandboxPort, else
+    // gatewayPort + 1: at startup when MCP Apps are enabled, lazily otherwise. The private
+    // status listener binds first, so the Gateway would fail with EADDRINUSE on 18791.
+    const apps = asRecord(asRecord(configuration.mcp)?.apps);
+    if (apps?.sandboxPort === PLUGIN_RUNTIME_STATUS_PORT) {
+      throw new GatewaySettingFailure(
+        "mcp.apps.sandboxPort",
+        `cannot use the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}`,
+      );
+    }
+    if (
+      apps?.sandboxPort === undefined &&
+      apps?.enabled === true &&
+      this.options.network.gatewayPort + 1 === PLUGIN_RUNTIME_STATUS_PORT
+    ) {
+      throw new GatewaySettingFailure(
+        "mcp.apps.sandboxPort",
+        `must be set when MCP Apps are enabled: its default, the Gateway port + 1, is the reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}`,
       );
     }
     return {

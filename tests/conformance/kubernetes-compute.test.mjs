@@ -35,6 +35,7 @@ import {
   KubernetesComputeDriver,
   kubernetesNamespaceName,
   kubernetesGatewayNamespaceName,
+  PLUGIN_RUNTIME_STATUS_PORT,
   resolveKubernetesNamespace,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import {
@@ -3078,12 +3079,14 @@ test("Namespace deletion removes only its owned Gateway target after data-plane 
 
 test("native Gateway listeners cannot overlap the private runtime status port", () => {
   const runtime = { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" };
-  for (const [gatewayPort, sandbox] of [
-    [18791, false],
-    [18790, true],
+  // Plugin status serves on 18791 without a native runtime too, so 18791 is refused either way.
+  for (const [gatewayPort, sandbox, withRuntime] of [
+    [18791, false, true],
+    [18791, false, false],
+    [18790, true, true],
   ]) {
     const configured = routedOptions({
-      runtime,
+      ...(withRuntime ? { runtime } : {}),
       gatewayRouting: {
         ...gatewayRouting,
         ...(sandbox ? { sandbox: { domain: "previews.example.test" } } : {}),
@@ -3111,6 +3114,45 @@ test("native Gateway listeners cannot overlap the private runtime status port", 
     });
     configured.network.gatewayPort = gatewayPort;
     assert.doesNotThrow(() => createKubernetesComputeDriver(configured));
+  }
+});
+
+test("Agent MCP Apps settings cannot move the sandbox listener onto the runtime status port", () => {
+  const runtime = { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" };
+  const driverFor = (gatewayPort, withRuntime = true) => {
+    const configured = routedOptions(withRuntime ? { runtime } : {});
+    configured.network.gatewayPort = gatewayPort;
+    return createKubernetesComputeDriver(configured);
+  };
+  const reserved = new RegExp(
+    `^Configuration setting mcp\\.apps\\.sandboxPort .*reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}\\.$`,
+  );
+  // OpenClaw binds mcp.apps.sandboxPort, else gatewayPort + 1, whether or not Compute routes it.
+  for (const [gatewayPort, apps, withRuntime] of [
+    [8080, { sandboxPort: PLUGIN_RUNTIME_STATUS_PORT }, true],
+    [8080, { enabled: false, sandboxPort: PLUGIN_RUNTIME_STATUS_PORT }, false],
+    [PLUGIN_RUNTIME_STATUS_PORT - 1, { enabled: true }, true],
+    [PLUGIN_RUNTIME_STATUS_PORT - 1, { enabled: true }, false],
+  ]) {
+    const driver = driverFor(gatewayPort, withRuntime);
+    // Admission names the setting, so the refusal reaches the Agent's owner before deploy.
+    assert.throws(
+      () => driver.validateGatewaySettings({ mcp: { apps } }),
+      (error) => reserved.test(error.message),
+      JSON.stringify({ gatewayPort, apps, withRuntime }),
+    );
+  }
+  for (const [gatewayPort, apps] of [
+    [8080, { enabled: true }],
+    [8080, { enabled: true, sandboxPort: PLUGIN_RUNTIME_STATUS_PORT + 1 }],
+    [PLUGIN_RUNTIME_STATUS_PORT - 1, { enabled: true, sandboxPort: 9000 }],
+    [PLUGIN_RUNTIME_STATUS_PORT - 1, { enabled: false }],
+    [PLUGIN_RUNTIME_STATUS_PORT - 1, {}],
+  ]) {
+    assert.doesNotThrow(
+      () => driverFor(gatewayPort).validateGatewaySettings({ mcp: { apps } }),
+      JSON.stringify({ gatewayPort, apps }),
+    );
   }
 });
 
@@ -15623,6 +15665,7 @@ function runtimeLogDriverFixture({ twoCluster = false } = {}) {
     eventError: undefined,
     nodeName: "runtime-logs-node",
     extraEvents: [],
+    containerStatus: undefined,
   };
   const pod = (role) => ({
     apiVersion: "v1",
@@ -15659,6 +15702,7 @@ function runtimeLogDriverFixture({ twoCluster = false } = {}) {
                   },
                 },
               }),
+          ...state.containerStatus,
         },
       ],
     },
@@ -15871,6 +15915,80 @@ test("Kubernetes runtime description reads each plane's Pods and only their own 
     /invalid Pod/,
   );
 });
+
+const previousRuntimeTermination = {
+  reason: "Error",
+  exitCode: 17,
+  finishedAt: new Date("2026-10-09T16:00:00Z"),
+};
+for (const scenario of [
+  {
+    name: "first current exit",
+    state: {
+      terminated: { ...previousRuntimeTermination, startedAt: new Date("2026-10-09T15:59:00Z") },
+    },
+    lastState: {},
+    expected: previousRuntimeTermination,
+  },
+  {
+    name: "newest current exit",
+    state: {
+      terminated: {
+        reason: "Completed",
+        exitCode: 0,
+        finishedAt: new Date("2026-10-09T16:01:00Z"),
+      },
+    },
+    lastState: { terminated: previousRuntimeTermination },
+    expected: { reason: "Completed", exitCode: 0, finishedAt: new Date("2026-10-09T16:01:00Z") },
+  },
+  {
+    name: "running prior exit",
+    state: { running: { startedAt: new Date("2026-10-09T16:01:00Z") } },
+    lastState: { terminated: previousRuntimeTermination },
+    expected: previousRuntimeTermination,
+  },
+  {
+    name: "waiting prior exit",
+    state: { waiting: { reason: "CrashLoopBackOff" } },
+    lastState: { terminated: previousRuntimeTermination },
+    expected: previousRuntimeTermination,
+  },
+  {
+    name: "running without an exit",
+    state: { running: { startedAt: new Date("2026-10-09T16:01:00Z") } },
+    lastState: {},
+    expected: null,
+  },
+  {
+    name: "waiting without an exit",
+    state: { waiting: { reason: "ContainerCreating" } },
+    lastState: {},
+    expected: null,
+  },
+]) {
+  test(`Kubernetes runtime termination status retains ${scenario.name}`, async () => {
+    const fixture = runtimeLogDriverFixture();
+    fixture.state.containerStatus = {
+      state: scenario.state,
+      lastState: scenario.lastState,
+      restartCount: scenario.lastState.terminated === undefined ? 0 : 1,
+      ready: scenario.state.running !== undefined,
+    };
+    const description = await fixture.driver.describeAgentRuntime(
+      fixture.binding,
+      new AbortController().signal,
+    );
+    const expected =
+      scenario.expected === null
+        ? null
+        : { ...scenario.expected, finishedAt: scenario.expected.finishedAt.toISOString() };
+    for (const pod of description.pods) {
+      assert.deepEqual(pod.containers[0].lastTermination, expected, pod.role);
+      assert.equal(pod.containers[0].state, Object.keys(scenario.state)[0]);
+    }
+  });
+}
 
 test("Kubernetes runtime description drops only a settled VolumeBinding conflict", async () => {
   const fixture = runtimeLogDriverFixture();

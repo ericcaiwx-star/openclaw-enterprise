@@ -8,7 +8,12 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  createKubernetesComputeDriver,
+  PLUGIN_RUNTIME_STATUS_PORT,
+} from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
+import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
 
 import {
   renderProductionChart,
@@ -405,6 +410,69 @@ function chartAllowsIngress(objects, destination, source, port, protocol = "TCP"
     )
   );
 }
+
+test(
+  "the chart refuses tenant Gateway ports Compute refuses for the runtime status port",
+  tooling,
+  async () => {
+    const sandboxValues = {
+      ...gatewayRoutingValues,
+      "gatewayRouting.sandbox.enabled": "true",
+      "gatewayRouting.sandbox.domain": "previews.example.test",
+      "gatewayRouting.sandbox.tlsSecretName": "preview-wildcard",
+      "gatewayRouting.sandbox.ingressPeers[0].namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name":
+        "public-ingress",
+    };
+    const compute = (gatewayPort, sandbox) => {
+      const options = conformanceKubernetesOptions({
+        gatewayTrustedProxyCidrs: ["10.0.0.0/8"],
+        runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
+      });
+      // Routed Compute takes no direct gateway clients.
+      const { gatewayClients, ...network } = options.network;
+      return createKubernetesComputeDriver({
+        ...options,
+        network: { ...network, gatewayPort },
+        gatewayRouting: {
+          gatewayName: "oce-agent-gateways",
+          gatewayNamespace: "openclaw-system",
+          envoyNamespace: "envoy-gateway-system",
+          ...(sandbox ? { sandbox: { domain: "previews.example.test" } } : {}),
+        },
+      });
+    };
+    // tenantGatewayPort must equal Compute's network.gatewayPort, so Helm refuses exactly
+    // what controller startup refuses instead of installing a controller that cannot start.
+    for (const [gatewayPort, sandbox, refused] of [
+      [PLUGIN_RUNTIME_STATUS_PORT, false, true],
+      [PLUGIN_RUNTIME_STATUS_PORT, true, true],
+      [PLUGIN_RUNTIME_STATUS_PORT - 1, true, true],
+      [PLUGIN_RUNTIME_STATUS_PORT - 1, false, false],
+      [PLUGIN_RUNTIME_STATUS_PORT + 1, true, false],
+      [8080, true, false],
+    ]) {
+      const row = JSON.stringify({ gatewayPort, sandbox });
+      const chartValues = {
+        ...(sandbox ? sandboxValues : gatewayRoutingValues),
+        "gatewayRouting.tenantGatewayPort": String(gatewayPort),
+      };
+      if (refused) {
+        assert.throws(() => compute(gatewayPort, sandbox), /reserved runtime status port/, row);
+        await assert.rejects(
+          render(chartValues),
+          ({ code, stderr }) =>
+            code !== 0 &&
+            stderr.includes("gatewayRouting.tenantGatewayPort") &&
+            stderr.includes(`reserved runtime status port ${PLUGIN_RUNTIME_STATUS_PORT}`),
+          row,
+        );
+      } else {
+        assert.doesNotThrow(() => compute(gatewayPort, sandbox), row);
+        await render(chartValues);
+      }
+    }
+  },
+);
 
 test(
   "two-cluster packaging separates remote API identities without optional services",
@@ -3294,16 +3362,9 @@ test("the chart refuses administrator emails the bootstrap Job refuses", tooling
 test("the chart refuses bootstrap claim names the volume helper refuses", tooling, async () => {
   const message =
     /bootstrap\.password\.claimName must be a DNS subdomain of at most 253 characters/;
-  const longLabel = "a".repeat(64);
-  const longest = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
-  for (const claimName of [
-    "Bootstrap",
-    "claim_name",
-    "claim-",
-    `.claim`,
-    longLabel,
-    `${"a".repeat(254)}`,
-  ]) {
+  // This is Kubernetes' 253-character object-name limit, not a DNS hostname limit.
+  const longest = "a".repeat(253);
+  for (const claimName of ["Bootstrap", "claim_name", "claim-", `.claim`, `${"a".repeat(254)}`]) {
     await assert.rejects(
       render({}, { strings: { "bootstrap.password.claimName": claimName } }),
       ({ code, stderr }) => code !== 0 && message.test(stderr),
@@ -4080,6 +4141,36 @@ test("Helm renders a values-file worker timeout of 1800000 as digits", tooling, 
   assert.doesNotMatch(rendered.stdout, /OCC_WORKER_CONVERGENCE_TIMEOUT_MS\n\s+value: "1\.8e\+06"/);
 });
 
+test("Collector exporter ports preserve decimal meaning in Kubernetes YAML", tooling, async () => {
+  const field = "logging.collector.exporter.port";
+  for (const value of ["03100", "0443", "010", "00080", "0", "65536", "18446744073709551617"]) {
+    await assert.rejects(
+      render(productionCollectorValues, { strings: { [field]: value } }),
+      /logging\.collector\.exporter\.port must be an integer TCP port from 1 to 65535/,
+      `Must refuse noncanonical or out-of-range exporter port: ${value}`,
+    );
+  }
+  for (const value of ["1", "3100", "65535"]) {
+    const objects = await resources(
+      (await render(productionCollectorValues, { strings: { [field]: value } })).stdout,
+    );
+    const policy = objects.find(
+      ({ kind, metadata }) =>
+        kind === "NetworkPolicy" && metadata.name === "openclaw-enterprise-collector-egress",
+    );
+    assert.deepEqual(policy.spec.egress.at(-1).ports, [{ protocol: "TCP", port: Number(value) }]);
+  }
+  const numeric = await resources(
+    (await render({ ...productionCollectorValues, [field]: 3100 })).stdout,
+  );
+  assert.deepEqual(
+    numeric
+      .find(({ metadata }) => metadata.name === "openclaw-enterprise-collector-egress")
+      .spec.egress.at(-1).ports,
+    [{ protocol: "TCP", port: 3100 }],
+  );
+});
+
 test("Helm rejects obvious malformed quantity syntax", tooling, async () => {
   const collector = {
     "logging.collector.enabled": "true",
@@ -4349,6 +4440,7 @@ test(
           "controlPlane.nodeSelector.topology\\.kubernetes\\.io/zone": "east",
           "controlPlane.nodeSelector.node-role\\.kubernetes\\.io/infra": "",
           "controlPlane.nodeSelector.edge": "a_b.c-d",
+          [`controlPlane.nodeSelector.${"a".repeat(253)}/pool`]: "control",
         },
       },
     );
@@ -4357,6 +4449,13 @@ test(
     // Kubernetes allows empty label values; charts before #1848 rendered them.
     assert.match(stdout, /node-role\.kubernetes\.io\/infra: ""/);
     assert.match(stdout, /edge: a_b\.c-d/);
+    const objects = await resources(stdout);
+    const api = objects.find(
+      (object) =>
+        object.kind === "Deployment" &&
+        object.metadata.labels?.["app.kubernetes.io/component"] === "api",
+    );
+    assert.equal(api.spec.template.spec.nodeSelector[`${"a".repeat(253)}/pool`], "control");
   },
 );
 

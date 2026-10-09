@@ -10,6 +10,72 @@ you run now, then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-09: Configuration save refuses Agent rosters every deployment refuses
+
+**What breaks.** Since #1959, Configuration create and update
+(`POST /namespaces/<id>/configurations`, `PATCH .../configurations/<id>`,
+`occ configuration create` and `update`) answer `400 INVALID_REQUEST` for an
+`agents` roster that Kubernetes Compute deployment already refused on every
+topology, such as an `agents.list`, an entry's `default`, or more than one
+`agents.entries` entry without `agents.ownership: "explicit"`. The
+[Configuration reference](../../reference/configuration.md#create-read-update-and-delete)
+lists every rule. The message is the one deployment gives, naming the setting and
+the rule. Such a write used to save and fail only at deploy.
+
+**Who is affected.** Clients and scripts that save such a roster, including the
+split-layout `import` below, which re-creates each exported Configuration.
+Stored Configurations do not change: they still read, Kubernetes deployment still
+refuses them with the same message, and an update that fixes the roster saves.
+SSH Compute deployment does not check rosters, so there the save is the first
+refusal. Rules that depend on the topology, such as dedicated OpenClaw serving
+the `main` Agent, still apply only at deployment.
+
+**How to tell.** On Kubernetes Compute, deploying an Agent that uses such a
+Configuration already fails with a `400` naming an `agents` setting. A save now
+fails with the same message.
+
+**Steps.** Fix the roster as the message says and save again. For a split-layout
+bundle, fix that Configuration's `values` in the bundle file and run `import`
+again; it resumes from its ID map.
+
+## 2026-10-09: Driver package entries are checked as Node resolves them
+
+**What breaks.** Since #1923 and #1944, the controller picks an external Driver
+package's root export, and decides whether the entry is ESM, the way Node's
+`import()` does. It refuses to start, with a `drivers.<capability>.package`
+message, on shapes the older loader accepted:
+
+- A `.js` entry whose nearest `package.json` lacks `"type": "module"`, even when
+  the package root has it, such as `dist/index.js` beside a `dist/package.json`
+  without `type`. Node can still import that file by detecting ESM syntax; the
+  controller does not. Its refusal now names the `package.json` that decided the
+  format.
+- A nested `package.json` that is not valid JSON or not an object
+  (`has invalid package scope metadata`); the older loader ignored it.
+- An export target that is extensionless (`./dist/index`), a directory, or has
+  an encoded `/` or `\`; a file name with a literal `%`, which is now
+  percent-decoded; and mixed subpath and condition keys, or numeric condition
+  keys.
+
+Some shapes load a different file instead of refusing: a `"."` nested inside an
+array entry or condition no longer selects a file, so a later entry may load, and
+the `module-sync` and `node-addons` conditions now match as in Node.
+
+**Who is affected.** Installations that select a Driver package
+(`drivers.<capability>.package`) built with one of these shapes. Built-in
+Drivers and the [documented manifest](../../reference/drivers/selection.md) are
+not affected.
+
+**How to tell.** The controller exits at startup with a
+`drivers.<capability>.package` message naming the problem. For a package that
+uses nested `"."` keys or those conditions, check which compiled file its root
+export now selects.
+
+**Steps.** Fix the package and publish a new version: add `"type": "module"` to
+the `package.json` the message names, or rename the entry to `.mjs`, and point
+`exports` at the exact compiled file. Pin that version in the controller image's
+dependencies, rebuild the image and upgrade.
+
 ## 2026-10-09: peer namespaces must be Kubernetes namespace names
 
 **What breaks.** Since #1914, the controller refuses to start with
@@ -143,6 +209,10 @@ Configurations, workspace files, transcripts and Secret values.
    ```bash
    node scripts/split-layout-tenants.mjs export --out /secure/occ/tenants.json
    ```
+
+   If a successful API response is malformed or lacks its data envelope, export
+   exits nonzero without writing a bundle. Restore the API response path and
+   rerun export, then check its Namespace inventory before continuing.
 
    It reads `AGENTS.md`, `SOUL.md`, `IDENTITY.md` and `USER.md` only where
    [workspace routing](workspace-routing.md) is configured and the Agent runs.

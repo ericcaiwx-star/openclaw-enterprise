@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/fd5e728e-9e9f-42ea-8ab7-d389f82b973d
+last_updated_session: authoring-run/2cbbcc37-919d-41ec-bdab-51aa836d92b7
 ---
 
 # Agent runtime logs flow
@@ -77,7 +77,8 @@ reads, so a denial is always audited and never spends a token.
 
 ### 2. Describe the runtime
 
-`KubernetesComputeDriver.describeAgentRuntime` resolves the owned Namespace, then
+`KubernetesComputeDriver.describeAgentRuntime` reports the current termination
+when a container is terminated, otherwise its prior termination. It resolves the owned Namespace, then
 lists Pods by the exact Agent, revision and workload-role labels: dedicated
 Gateways and Harnesses in the shared tenant namespace in a single cluster. The
 two-cluster profile reads dedicated Gateways in its control target and Harnesses
@@ -138,15 +139,13 @@ only when it holds fewer than 16 hashes. A page byte cut keeps the count, so
 undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 `window_exceeded`, `cursor_expired` or `truncated` gaps, and passes the rest to
 `runtime-logs/sanitize.ts:sanitizeRuntimeLogChunk`, the only producer of
-`SanitizedRuntimeLogRecord`. `page-budget.ts` measures the complete serialized
-page, signed cursor and the API data/request-ID frame against 512 KiB. A full
-candidate is tried first; an oversized page uses bounded raw-prefix builds.
-They reuse the admitted read and fixed timestamps, without another Driver read
-or audit. Each candidate derives sanitization, masking context and cursor state
-from its delivered prefix. The result fits; maximum filling is not promised.
-Sandbox pages share the helper. Each candidate classifies its delivered prefix, so
-`runtime-logs/redact.ts:maskPemBlockLines` can mask a PEM block whose BEGIN,
-body and END lines arrive as separate plain-text lines.
+`SanitizedRuntimeLogRecord`. `page-budget.ts` measures the serialized page,
+signed cursor and API request-ID envelope against 512 KiB. It tries the full
+page, then bounded prefix builds. Builds reuse the admitted read and fixed
+clocks, deriving sanitization, masking and cursor state from each raw prefix
+without further Driver reads or audits. Fit is guaranteed; maximum filling is
+not. `maskPemBlockLines` masks separate BEGIN/body/END lines in the classified
+prefix. Sandbox pages share the budget helper.
 
 For container follow polls, the signed cursor also carries optional `pemOpen`
 and `pemAfterTime` state. It describes the delivered boundary, not the start of
@@ -231,19 +230,15 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 - `503 RUNTIME_LOGS_CLUSTER_RBAC` means the API ServiceAccount lacks
   `pods/log`, `events` or, on an execution cluster, `pods` reads in that
   namespace. `503 RUNTIME_LOGS_AUDIT_UNAVAILABLE` means no output was read.
-- `tests/conformance/runtime-logs-content.test.mjs` plants credentials, prompts
-  and protocol lines through the real handler; `occ-api-security.test.mjs` covers
-  tiers, cursors and failures; `kubernetes-compute.test.mjs` covers plane
-  selection, Event filtering and the typed `403`. These use in-memory Kubernetes
-  responses; `agent-runtime-logs-k3d-real.test.mjs` reads a real cluster.
-  The same content suite exercises the real reader, cursor and sanitizer with
-  synthetic Driver pages: cross-poll masking, replay/eviction, uncertain times,
-  cuts, paired-field validation and stream/view resets. A separate handler case
-  checks the serialized cursor through the supported controller fixture. These
-  controls do not establish real-cluster behavior.
-  `runtime-logs-sandbox.test.mjs` drives the sandbox source through the real
-  handler and OpenShell Driver with a gateway client that answers only
-  `GetSandboxLogs`; `openshell-gateway-wire.test.mjs` checks the wire shape.
+- `runtime-logs-content.test.mjs` exercises handler credentials, prompts and
+  protocol lines plus synthetic Driver pages for masking, replay/eviction,
+  uncertain times, cuts, paired-field validation, resets and serialized cursors.
+  `occ-api-security.test.mjs` covers tiers, cursors and failures;
+  `kubernetes-compute.test.mjs` covers plane selection, Event filtering and typed
+  `403` using in-memory Kubernetes responses. `agent-runtime-logs-k3d-real.test.mjs`
+  reads a real cluster. `runtime-logs-sandbox.test.mjs` uses the real handler and
+  Driver with a log-only gateway client; `openshell-gateway-wire.test.mjs` checks
+  the wire shape. Synthetic responses do not establish real-cluster behavior.
 
 ## Related docs
 
@@ -257,12 +252,17 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 
 ## Changelog
 
+- 2026-10-10 02:53: Compose the response budget with current termination status. (authoring-run/2cbbcc37-919d-41ec-bdab-51aa836d92b7 - 880b645f5e5fb5c99c6046c1eac6ca81211be584)
+
 - 2026-10-10 02:47: Keep untimed replacement snapshot progress. (authoring-run/fd5e728e-9e9f-42ea-8ab7-d389f82b973d - f4c9a1b36988d659f8f927825fda4cd838ae832a)
 
 - 2026-10-10 02:43: Retain authenticated Sandbox window progress across serialized cuts and report changed snapshots as gaps. (authoring-run/2edda611-948b-44ae-a3d8-0a011073b719 - 5c7c56b49f16b80c4fcb91fedff0959a5fd733b0)
 
 - 2026-10-10 01:14: Enforce the serialized runtime-log response limit for container and Sandbox pages, including cursors and the API frame. (authoring-run/018d11d8-3699-4e97-945b-c2cfd3088412 - 243b38ba6d951240065e5061e1e4abccdb44410c)
 
+- 2026-10-10 02:35: Preserve current termination projection and both flow histories when merging main timestamp parsing changes. (authoring-run/f9b46af2-6bd4-4636-b675-dd9bea82a566 - db4ccbdea96a752cd99a66cf4cf02c195f5fe3ba)
+
+- 2026-10-10 00:51: Report the latest exit details for currently terminated containers while retaining prior exits for running and waiting instances. (authoring-run/3d28a5c1-f0ee-4fbd-97de-52993c05b57d - 4f29773d098d2288a805d0ad80e0c65474e162d9)
 - 2026-10-10 00:04: Normalize supported kubelet timestamp offsets without losing nanoseconds, so classification and cursor overlap use the raw message and UTC time. (authoring-run/e25eab96-1110-45ec-b677-916a98b34613 - ba3686748ddf56052dc2717cc2ce6eaa3710c1f0)
 
 - 2026-10-09 15:42: Count container lines delivered at the cursor time, so a timestamp group larger than the 16-hash history neither replays nor hides later lines; a full history without that evidence stays suppressed. (fix-949-950)

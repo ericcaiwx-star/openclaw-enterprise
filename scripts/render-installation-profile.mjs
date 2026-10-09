@@ -17,14 +17,9 @@ const repoRoot = resolve(scriptDir, "..");
 const profilesDir = resolve(repoRoot, "deploy/profiles");
 const allowedProfiles = new Set(["openclaw", "codex"]);
 const dnsSubdomain = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
-// A Kubernetes object name such as a PVC: a DNS subdomain of at most 253 characters whose
-// labels are at most 63, as the chart and prepare-bootstrap-volume check it.
+// Kubernetes DNS-subdomain object names cap the whole name, not each segment.
 function isDnsSubdomainName(value) {
-  return (
-    value.length <= 253 &&
-    dnsSubdomain.test(value) &&
-    value.split(".").every((label) => label.length <= 63)
-  );
+  return value.length <= 253 && dnsSubdomain.test(value);
 }
 // Kubernetes Service names are DNS-1035 labels. The chart refuses any other
 // repositoryCredentials.serviceName.
@@ -357,6 +352,39 @@ function simpleBasename(value) {
   return value !== "." && value !== ".." && /^[A-Za-z0-9._-]+$/.test(value);
 }
 
+function validateDatabaseCaMount(values, diagnostics) {
+  if (!values.database.caSecretName) {
+    return;
+  }
+  // Profiles use the chart's bootstrap mount and private gateway CA, with no
+  // executionCluster override. Match the active database-client mounts only.
+  const reserved = new Set([
+    "/etc/openclaw/installation",
+    "/run/openclaw-worker",
+    "/var/lib/openclaw/bootstrap",
+    "/etc/openclaw/gateway-api-key",
+    "/etc/openclaw/gateway-ca",
+  ]);
+  if (values.repositoryCredentials.enabled) {
+    for (const path of [
+      "/etc/openclaw/repository-registry",
+      "/etc/openclaw/repository-ca",
+      "/var/run/secrets/kubernetes.io/serviceaccount",
+      "/run/openclaw/repository-control",
+    ]) {
+      reserved.add(path);
+    }
+  }
+  if (values.backend?.chatgpt.enabled) {
+    reserved.add("/etc/openclaw/chatgpt");
+  }
+  if (reserved.has(values.database.caMountPath)) {
+    diagnostics.errors.push(
+      "controlPlane.databaseCa.mountPath must be distinct from other active mounts in the production database clients.",
+    );
+  }
+}
+
 function optionalString(source, path, diagnostics, { pattern, validate, description } = {}) {
   const value = source[path.at(-1)];
   if (value === undefined) {
@@ -451,8 +479,7 @@ function labelSyntax(labels, path, diagnostics, isPrefix) {
 // Kubernetes node selector labels: the chart and prepare-bootstrap-volume apply this rule to
 // controlPlane.nodeSelector, and Kubernetes applies it to every Pod's nodeSelector, so the
 // runtime selectors in Installation configuration follow it too. Kubernetes allows empty
-// label values, as in `node-role.kubernetes.io/infra: ""`. The chart also caps each prefix
-// label at 63 characters.
+// label values, as in `node-role.kubernetes.io/infra: ""`.
 function nodeSelector(source, path, diagnostics) {
   const labels = labelMap(source, path, diagnostics);
   return labelSyntax(labels, path, diagnostics, isDnsSubdomainName);
@@ -1704,6 +1731,7 @@ function buildRendered(profile, parsed, diagnostics) {
   }
 
   signInSecretsDedicated(values, diagnostics);
+  validateDatabaseCaMount(values, diagnostics);
 
   diagnostics.prerequisites.push(
     "Default ReadWriteOnce storage class available for dedicated Codex workspace claims.",
