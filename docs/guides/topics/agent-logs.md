@@ -17,7 +17,8 @@ SSH Compute, and Drivers that own their runtime logging (`runtimeLogging:
    When the latest deployment failed, **Deployment activity** links straight to
    that version's Logs tab.
 2. Select **Logs**. The runtime strip refreshes every 10 seconds. Each Pod card
-   lists its recent warning Events, prefixed with their container.
+   lists its recent warning Events, prefixed with their container. Last termination
+   shows the current exit for a terminated container, otherwise its prior exit.
 3. Choose a **Source**: **Gateway** (the OpenClaw Gateway container),
    **Agent (Harness)** (the dedicated Codex or OpenClaw Harness container, only
    for dedicated execution) or **Sandbox (policy decisions)** (see
@@ -56,6 +57,8 @@ The HTTP API has the same two reads:
 GET /namespaces/{namespaceId}/agents/{agentId}/deployments/{revisionId}/runtime
 GET /namespaces/{namespaceId}/agents/{agentId}/deployments/{revisionId}/runtime/logs?source=gateway&tailLines=200
 ```
+
+Container timestamps are returned in UTC, preserving their available nanosecond precision.
 
 `runtime/logs` accepts only `source` (`gateway`, `agent` or `sandbox`), `pod`, `previous`,
 `tailLines` (1 to 1000, default 200), `sinceSeconds` (1 to 86400), `cursor`,

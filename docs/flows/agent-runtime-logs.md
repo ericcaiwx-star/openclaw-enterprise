@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run-9eade0ab-4aa4-4b21-9faa-e7478c6a8983
+last_updated_session: authoring-run/794085ff-b0bd-422e-8fe7-6b6e9846ca0f
 ---
 
 # Agent runtime logs flow
@@ -77,7 +77,8 @@ reads, so a denial is always audited and never spends a token.
 
 ### 2. Describe the runtime
 
-`KubernetesComputeDriver.describeAgentRuntime` resolves the owned Namespace, then
+`KubernetesComputeDriver.describeAgentRuntime` reports the current termination
+when a container is terminated, otherwise its prior termination. It resolves the owned Namespace, then
 lists Pods by the exact Agent, revision and workload-role labels: dedicated
 Gateways and Harnesses in the shared tenant namespace in a single cluster. The
 two-cluster profile reads dedicated Gateways in its control target and Harnesses
@@ -105,7 +106,10 @@ with one older than an hour, or a cursor whose Pod is gone, starts a view: the c
 `openclaw.agents.runtime_logs.view`, an `access` audit event naming the admitting
 action, before any log read. The Driver re-checks
 Pod ownership, calls `readNamespacedPodLog` with `tailLines`, `sinceSeconds`,
-`previous`, a 1 MiB `limitBytes` and timestamps, and re-reads the Pod. A cursor
+`previous`, a 1 MiB `limitBytes` and timestamps, and re-reads the Pod.
+`kubernetesRuntimeLogLine` separates kubelet's RFC3339 timestamp from each raw
+line and converts numeric offsets to UTC while retaining every fractional digit.
+Unknown or malformed offset prefixes remain untimed raw text. A cursor
 poll derives `sinceSeconds` from the cursor: from its newest delivered line, or,
 when the view has delivered nothing yet, from the previous read (a full or
 byte-cut tail then emits `window_exceeded`). When a resumed read delivers nothing
@@ -244,7 +248,14 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 
 ## Changelog
 
+- 2026-10-10 02:50: Preserve Event pagination and current termination when merging main; retain both regression groups and histories. (authoring-run/794085ff-b0bd-422e-8fe7-6b6e9846ca0f - 880b645f5e5fb5c99c6046c1eac6ca81211be584)
+
 - 2026-10-10 00:33: Read Pod Event continuation pages before returning the newest 100 diagnostics. (authoring-run-9eade0ab-4aa4-4b21-9faa-e7478c6a8983 - 3e34cc0f4b469d29fc79d2c10a33f87a0921ee47)
+
+- 2026-10-10 02:35: Preserve current termination projection and both flow histories when merging main timestamp parsing changes. (authoring-run/f9b46af2-6bd4-4636-b675-dd9bea82a566 - db4ccbdea96a752cd99a66cf4cf02c195f5fe3ba)
+
+- 2026-10-10 00:51: Report the latest exit details for currently terminated containers while retaining prior exits for running and waiting instances. (authoring-run/3d28a5c1-f0ee-4fbd-97de-52993c05b57d - 4f29773d098d2288a805d0ad80e0c65474e162d9)
+- 2026-10-10 00:04: Normalize supported kubelet timestamp offsets without losing nanoseconds, so classification and cursor overlap use the raw message and UTC time. (authoring-run/e25eab96-1110-45ec-b677-916a98b34613 - ba3686748ddf56052dc2717cc2ce6eaa3710c1f0)
 
 - 2026-10-09 15:42: Count container lines delivered at the cursor time, so a timestamp group larger than the 16-hash history neither replays nor hides later lines; a full history without that evidence stays suppressed. (fix-949-950)
 
