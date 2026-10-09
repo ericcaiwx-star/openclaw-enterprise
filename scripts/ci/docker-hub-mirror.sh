@@ -51,7 +51,7 @@ setup() {
 }
 
 report() {
-  local journal hub_pattern hub lookups served suppressed lines
+  local journal hub_pattern dns_pattern hub lookups served suppressed lines
   # An empty list below proves nothing if the storage driver changed.
   docker info --format 'driver {{.Driver}}, registry mirrors {{json .RegistryConfig.Mirrors}}'
   journal="$(sudo journalctl -u docker --no-pager -o cat || true)"
@@ -65,9 +65,11 @@ report() {
   # Containers on Docker networks (k3d nodes) resolve names through the
   # Engine's DNS resolver, which logs each lookup; their own image pulls do not
   # go through the Engine, so those lines are counted apart.
-  hub="$(grep -E "$hub_pattern" <<<"$journal" | grep -cv '\[resolver\]' || true)"
-  lookups="$(grep -E "$hub_pattern" <<<"$journal" | grep -c '\[resolver\]' || true)"
-  grep -E "$hub_pattern" <<<"$journal" | grep -v '\[resolver\]' | head -n 20 || true
+  dns_pattern='\[resolver\]|Name To resolve:'
+  hub="$(grep -E "$hub_pattern" <<<"$journal" | grep -cvE "$dns_pattern" || true)"
+  lookups="$(grep -E "$hub_pattern" <<<"$journal" | grep -cE "$dns_pattern" || true)"
+  # Up to 20 of them; stderr hides the write error once the second grep stops.
+  grep -E "$hub_pattern" <<<"$journal" 2>/dev/null | grep -m 20 -vE "$dns_pattern" || true
   served="$(grep -c 'mirror\.gcr\.io' <<<"$journal" || true)"
   # journald drops lines over its rate limit, which would hide Docker Hub lines.
   suppressed="$(sudo journalctl -u systemd-journald --no-pager -o cat 2>/dev/null |
