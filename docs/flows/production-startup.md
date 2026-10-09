@@ -13,7 +13,7 @@ PostgreSQL/authentication credentials, trusted Installation YAML and network
 policies. Wait for private API/worker readiness, then authenticate `/installation`
 with the retrieved service key. Tenant deployment/model-backed TUI proof remains separate.
 
-Use the [deployment guide](../guides/deploy.md) for commands.
+Commands: [deployment guide](../guides/deploy.md).
 
 ## Entry Points
 
@@ -117,8 +117,7 @@ peer ([Helm DNS contract](../reference/settings/production.md#required-productio
 
 `deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` refuses
 fractional routing ports and custom hostnames Compute rejects. `database.port`
-must be decimal 1–65535 without leading zeros. Empty hostnames retain Service DNS
-derivation for Gateway listeners and Certificate SANs.
+must be decimal 1–65535 without leading zeros. Empty hostnames retain Service DNS for Gateway listeners and Certificate SANs.
 
 The initialization hook retains the full release name and limits its suffix to
 63 characters. Both containers mount `database.caSecretName` read-only when
