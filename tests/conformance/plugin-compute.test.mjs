@@ -619,6 +619,9 @@ test("compute serializes selected Codex plugins for startup-time resolution", ()
   assert.deepEqual(runtime.selections, state.plugins);
 
   const data = pluginRuntimeConfigMapData(runtime);
+  // Startup reviewer checks must see the session policy selected by the
+  // gateway, before the gateway can start a native thread.
+  assert.match(data[PLUGIN_RUNTIME_CODEX_CONFIG], /^approval_policy = "on-request"\n/);
   const manifest = JSON.parse(data[PLUGIN_RUNTIME_MANIFEST]);
   assert.deepEqual(manifest, {
     kind: "codex",
@@ -651,6 +654,28 @@ test("compute serializes selected OpenClaw plugins for startup-time resolution",
     kind: "openclaw",
     selections: state.plugins,
   });
+});
+
+test("Codex startup preserves explicit session approval choices and native defaults", () => {
+  for (const policy of ["never", "untrusted", "on-failure", undefined]) {
+    const candidate = revision({ plugins: codexLinearPluginState() });
+    candidate.configuration.plugins.entries.codex.config.appServer.approvalPolicy = policy;
+    const runtime = pluginRuntimeSpecForRevision(candidate);
+    const config = pluginRuntimeConfigMapData(runtime)[PLUGIN_RUNTIME_CODEX_CONFIG];
+    // A reviewer request must never silently upgrade an incompatible session
+    // policy to on-request. The native readiness check owns that rejection.
+    if (policy === undefined) {
+      assert.doesNotMatch(config, /approval_policy/);
+    } else {
+      assert.ok(config.startsWith(`approval_policy = "${policy}"\n`));
+    }
+  }
+  const malformed = revision();
+  malformed.configuration.plugins.entries.codex.config.appServer.approvalPolicy = "invalid";
+  assert.throws(
+    () => pluginRuntimeSpecForRevision(malformed),
+    /session approval policy is invalid/,
+  );
 });
 
 test("Codex runtime helper installs a plugin with skills and applies write action approval without tool inventory", async () => {

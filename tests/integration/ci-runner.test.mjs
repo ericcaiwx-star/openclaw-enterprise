@@ -457,6 +457,9 @@ test("run clears inherited selectors and keep flags while preserving explicit la
       'test("child env contains only explicit CI selectors", () => {',
       '  assert.equal(process.env.OCC_TEST_REQUIRED_SELECTOR, "required");',
       '  assert.equal(process.env.OCC_TEST_LANE_SELECTOR, "lane");',
+      '  assert.equal(process.env.OCC_TEST_OPTIONAL_SELECTOR, "selected");',
+      '  assert.equal(process.env.OCC_TEST_OPTIONAL_EMPTY, "");',
+      "  assert.equal(process.env.OCC_TEST_OPTIONAL_ABSENT, undefined);",
       "  assert.equal(process.env.OCC_TEST_LEAKED_SELECTOR, undefined);",
       '  assert.equal(process.env.OCC_PROBE_REQUIRED_SELECTOR, "required");',
       "  assert.equal(process.env.OCC_PROBE_LEAKED_SELECTOR, undefined);",
@@ -474,6 +477,12 @@ test("run clears inherited selectors and keep flags while preserving explicit la
           OCC_TEST_LANE_SELECTOR: "lane",
         },
         requiredEnv: ["OCC_TEST_REQUIRED_SELECTOR", "OCC_PROBE_REQUIRED_SELECTOR"],
+        optionalEnv: [
+          "OCC_TEST_OPTIONAL_SELECTOR",
+          "OCC_TEST_OPTIONAL_EMPTY",
+          "OCC_TEST_OPTIONAL_ABSENT",
+          "OCC_TEST_LANE_SELECTOR",
+        ],
         files: [{ path: "tests/integration/env-isolation.test.mjs" }],
       },
     },
@@ -501,12 +510,78 @@ test("run clears inherited selectors and keep flags while preserving explicit la
       OCC_RUNTIME_KEEP: "1",
       OCC_TEST_LEAKED_SELECTOR: "1",
       OCC_TEST_REQUIRED_SELECTOR: "required",
+      OCC_TEST_OPTIONAL_SELECTOR: "selected",
+      OCC_TEST_OPTIONAL_EMPTY: "",
+      OCC_TEST_LANE_SELECTOR: "inherited",
       OCC_PROBE_LEAKED_SELECTOR: "1",
       OCC_PROBE_REQUIRED_SELECTOR: "required",
     },
   );
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("QA lane forwards selected models and observer input and retains outcomes at the requested path", async (t) => {
+  const root = await fixture(t);
+  const lane = JSON.parse(
+    await readFile(join(repositoryRoot, "scripts/ci/test-suites/qa-matrix.json"), "utf8"),
+  );
+  const observer = join(root, "observer.txt");
+  const artifacts = join(root, "evidence");
+  await writeFile(observer, "synthetic-observer", { mode: 0o600 });
+  await mkdir(artifacts);
+  const file = "tests/integration/qa-inputs.test.mjs";
+  // Exercise the shipped lane definition with a small child that consumes its
+  // inputs. This proves transport and artifact placement, not a live model turn.
+  await writeFile(
+    join(root, file),
+    `import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import test from "node:test";
+test("QA inputs", async () => {
+  assert.equal(process.env.OCC_TEST_QA_OPENAI_MODEL, "selected-openai-model");
+  assert.equal(process.env.OCC_TEST_QA_CODEX_MODEL, "selected-codex-model");
+  assert.equal(process.env.OCC_TEST_CODEX_CALENDAR_PROMPT, "selected calendar read");
+  assert.equal(await readFile(process.env.OCC_TEST_QA_GITHUB_OBSERVER_TOKEN_FILE, "utf8"), "synthetic-observer");
+  assert.equal(process.env.OCC_TEST_QA_INSTALLATION, "all");
+  await writeFile(join(process.env.OCC_TEST_QA_ARTIFACTS, "matrix.json"), JSON.stringify({ outcome: "inputs received" }));
+});
+`,
+  );
+  await writeJson(join(root, "manifest.json"), {
+    version: 1,
+    lanes: { "qa-matrix": { ...lane, files: [{ path: file }] } },
+    groups: { qa: ["qa-matrix"] },
+  });
+  const result = run(
+    root,
+    [
+      "run",
+      "qa-matrix",
+      "--manifest",
+      "manifest.json",
+      "--root",
+      root,
+      "--state",
+      "state/qa.json",
+      "--results",
+      "results/qa.json",
+    ],
+    {
+      ...Object.fromEntries(lane.requiredEnv.map((name) => [name, "fixture-input"])),
+      OCC_TEST_QA_OPENAI_MODEL: "selected-openai-model",
+      OCC_TEST_QA_CODEX_MODEL: "selected-codex-model",
+      OCC_TEST_CODEX_CALENDAR_PROMPT: "selected calendar read",
+      OCC_TEST_QA_GITHUB_OBSERVER_TOKEN_FILE: observer,
+      OCC_TEST_QA_ARTIFACTS: artifacts,
+      OCC_TEST_QA_INSTALLATION: "compose",
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(await readFile(join(artifacts, "matrix.json"), "utf8")), {
+    outcome: "inputs received",
+  });
 });
 
 test("run records timeout cancellation without leaking child output", async (t) => {

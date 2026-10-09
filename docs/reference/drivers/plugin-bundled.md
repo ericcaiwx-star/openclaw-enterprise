@@ -186,7 +186,9 @@ a permissive profile unless strict review applies; writing an app-level
 
 For an explicit app reviewer, startup reads `configRequirements/read`, compares
 app/link reviewer values, and checks `allowedApprovalsReviewers`. Automatic review
-requires current approval policy `on-request` or `granular`. Human review fails
+requires current approval policy `on-request` or `granular`. Compute carries the
+gateway's configured `appServer.approvalPolicy` into native startup configuration;
+omission keeps native defaults. Human review fails
 if managed `requiredOnModels` includes the current model, or model selection
 cannot be verified against a nonempty requirement. Omitted reviewers do not
 trigger these explicit-choice checks.
