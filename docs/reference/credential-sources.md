@@ -1,11 +1,10 @@
 # Credential sources
 
-A credential source registers a Namespace Secret with the Installation's
-selected [Credential Gateway](drivers/credential-gateway.md). The gateway keeps
-its own copy of the value and applies it outside the Agent workload, so the
-Harness never receives the real credential. An Agent uses a model source through
-[`harnessAuth`](agents.md#harness-authentication) and other sources through its
-`credentialSources` list.
+A credential source registers a Namespace Secret with the selected
+[Credential Gateway](drivers/credential-gateway.md). The gateway applies its
+copy outside the workload; the Harness never receives the real credential.
+Agents use model sources through [`harnessAuth`](agents.md#harness-authentication)
+and other sources through `credentialSources`.
 
 Credential sources require a selected Credential Gateway. The only
 implementation is the [OpenShell Credential Gateway](drivers/openshell-credential-gateway.md).
@@ -56,13 +55,12 @@ The request fields are:
   `400 INVALID_REQUEST` before any Secret is read, and a reference to a Secret
   the Namespace does not hold fails with `404`.
 
-OCC rejects unknown fields and missing required fields before it reads any
-Secret. It reads each value through the Secret Driver, sends the values to the
-gateway, and stores only the Secret references. OCC records the source as
-`registering` before the gateway call. If the gateway rejects the registration,
-OCC deletes any copy and the record. If the call fails without an answer, such as
-on a timeout, a copy may still appear later, so the record stays listed as
-`deleting`; send DELETE to remove it.
+OCC rejects unknown or missing required fields before reading Secrets. It reads
+values through the Secret Driver, sends them to the gateway, and stores only
+references. Before the gateway call, the source becomes `registering`. Rejected
+registration removes any copy and record. An unanswered call, including a
+timeout, may create a copy later; the source stays `deleting`. Send DELETE to
+remove it.
 
 A `refresh`-type source becomes `ready` only after the gateway mints its first
 token. If the issuer refuses the material or cannot be reached, registration
@@ -101,29 +99,25 @@ the source separately. A request that names an unlisted source, or removes the
 named source from the list, fails with `400` "The Harness credential source must
 be listed in the Agent's credentialSources." after the grant checks below.
 
-The caller needs `credential_source:operate` on each exact
-source, including any the update removes. Every source a request lists, including
-one it keeps, must be `ready` and registered through the selected Credential
-Gateway. Sources the Agent already binds need only `operate`, so after the
-Installation selects another Credential Gateway, an update that leaves
-`credentialSources` out still succeeds, and one that sets `harnessAuth` to
-another method or source and lists only new sources, or `[]`, removes the old
-ones. Listing an old source again fails with `503`, and so does deploying an
-Agent that still lists one; see [After a Credential Gateway change](#after-a-credential-gateway-change). Deployment also requires the Agent's
-service principal to have `operate` on each source; grant it with a
+The caller needs exact `credential_source:operate` on every source, including
+removed ones. Each listed source, even a retained one, must be `ready` and
+registered through the selected Credential Gateway. Previously bound sources
+need only `operate`: after a gateway change, omitting `credentialSources` still
+permits updates. Switching `harnessAuth` and listing only new sources, or `[]`,
+removes old ones. Relisting an old source or deploying one still listed returns
+`503`; see [After a Credential Gateway change](#after-a-credential-gateway-change).
+Deployment also requires the Agent's service principal to have `operate` on
+each source; grant it with a
 [Namespace IAM](authorization.md#manage-namespace-policy) Role and an exact
 `credential_source` AccessBinding. The principal needs no permission on the
-underlying Secret. The worker rechecks both grants before it
-provisions the revision. On an Installation with no Credential Gateway, binding
-any source fails with `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED`, as registration
-does, once the caller holds `operate` on it. The paired Sandbox applies the
-sources, and a Credential Gateway requires a Sandbox Driver, so on an
-Installation without one, deploying an Agent that binds a source normally fails
-with that `409 CREDENTIAL_GATEWAY_NOT_CONFIGURED`. Only an Agent whose
-`harnessAuth` names no source, but whose list kept sources from an earlier
-configuration, fails first with `409 RESOURCE_CONFLICT` "Agent credential
-sources require a selected Sandbox Driver." See [Harness execution](harness-execution.md#harness-authentication)
-for the supported topology.
+underlying Secret. The worker rechecks both grants before provisioning. With no
+Credential Gateway, registration or binding returns
+`409 CREDENTIAL_GATEWAY_NOT_CONFIGURED` after the grant checks. Sources require
+the paired Sandbox, so deployment without a Sandbox Driver normally returns
+the same error. An Agent whose `harnessAuth` names no source but whose list
+retains earlier sources instead fails first with `409 RESOURCE_CONFLICT`:
+"Agent credential sources require a selected Sandbox Driver." See
+[Harness execution](harness-execution.md#harness-authentication).
 
 While a Credential Gateway is selected, deployment rejects `api_key` and
 `codex_pat` bindings (both Secret and ServiceAccount sources) with `409`. Guided Agent
@@ -144,12 +138,11 @@ Secret the update reads:
   catalog fields, and non-secret `config` cannot change; register a new source
   instead.
 
-A successful update returns `200` with the source and its live gateway `status`.
-Only a `ready` source can be updated. A gateway failure returns `503` and leaves
-the Secret references unchanged. The gateway is updated before OCC commits, so
-if the request fails after that, repeating the same request converges. If the
-gateway no longer holds a copy (`absent`), the update also returns `503`;
-delete the source and register it again.
+Only `ready` sources can be updated. Success returns `200` with the source and
+live gateway `status`. Gateway failure returns `503` without changing Secret
+references. Gateway updates precede OCC commits; repeating a request that fails
+afterward converges. An `absent` gateway copy also returns `503`; delete and
+register the source again.
 
 Migration `0048_administrator_credential_source_grants` adds the current
 `credential_source` grants, including `update`, to an unchanged built-in
@@ -165,14 +158,12 @@ gateway gives updated values only to new processes. To rotate a key:
    `secrets` if you created a new Secret.
 3. Redeploy each Agent that uses the source.
 
-A `refresh`-type source keeps no static value: an update replaces its refresh
-material and mints a new token, and OCC commits replacement Secret references
-only after that mint succeeds. If the mint fails, the update returns `503`, but
-the gateway keeps the new material; the source stays `ready` and its
-`status.refresh` reports the failure. OCC does not restore the previous
-material. Send `{}` to re-apply the recorded Secrets, or update with corrected
-ones. Running Agents lose the source's token within about 10 seconds of an
-update, even a failed one, and receive none until you redeploy them.
+A `refresh`-type update replaces refresh material and mints a token before OCC
+commits replacement Secret references. A failed mint returns `503`; the gateway
+keeps the new material, the source stays `ready`, and `status.refresh` reports
+failure. OCC does not restore previous material. Send `{}` to re-apply recorded
+Secrets, or supply corrected ones. Even failed updates stop running Agents'
+token delivery within about 10 seconds until redeployment.
 
 ## Rotate a refresh source
 
@@ -225,24 +216,20 @@ means Compute cannot reach the revision's Sandbox as configured, or found an
 object it does not own; the attempt fails without retries, even with
 maintenance. Correct the cause, then send the request again.
 
-The worker retries an unconfirmed withdrawal a few times with backoff
-(`OCC_WORKER_MAX_ATTEMPTS`; by default about 12 seconds). If those attempts run
-out because the gateway is unreachable or has not confirmed revocation (or the
-last attempt outlived its worker's claim, after a worker restart or a hung
-gateway call), and Compute has no maintenance (the Kubernetes Compute Driver
-has none), the worker queues another series 30 seconds later, then after 1, 2
-and 4 minutes, then every 5 minutes, 15 series in all (about an hour).
-Meanwhile the read shows `pending`, the latest `reason`, and
-`withdrawalInProgress: true`, and the source still resolves in the Sandbox. The first series the gateway confirms
-records `revoked`, with no replay needed. A withdraw request sent while a
-series waits queues nothing more; the series runs at once, on the caller's
-authority.
+The worker retries with backoff (`OCC_WORKER_MAX_ATTEMPTS`; about 12 seconds by
+default). If the gateway remains unreachable or has not confirmed revocation,
+or the last attempt outlives its worker claim after restart or a hung call,
+Compute without maintenance (including Kubernetes) queues another series after
+30 seconds, then 1, 2 and 4 minutes, then every 5 minutes: 15 series, about an hour.
+Reads show `pending`, the latest `reason`, and `withdrawalInProgress: true`;
+the source still resolves in the Sandbox. Gateway confirmation records `revoked`
+without replay. A withdraw request during a queued series adds no work; the
+series runs immediately on that caller's authority.
 
-When the last series fails, or every withdrawal left on the revision is denied
-to its requester, the withdrawal stays `pending` with
-`withdrawalInProgress: false`. Nothing retries it on its own unless the
-revision has maintenance (see below). Send the withdraw request again to queue
-another attempt, with its own series.
+After the last series fails, or every remaining withdrawal is denied to its
+requester, reads show `pending` and `withdrawalInProgress: false`. Only revision
+maintenance retries automatically (below). Send another withdraw request to
+queue an attempt and its retry series.
 
 A withdrawn source never re-attaches to that revision. If its Sandbox is
 recreated, a withdrawn source is left out and the revision keeps running
