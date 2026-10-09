@@ -693,7 +693,7 @@ test("SSH can verify, stop and retire a previously admitted native TLS snapshot"
   await assert.rejects(access(f.revisionDir(rev)), { code: "ENOENT" });
   await f.driver.deleteAgentRuntimeCredentials({
     namespace: tenant,
-    agent: { id: rev.agentId, namespaceId: tenant.id },
+    agent: { id: rev.agentId, namespaceId: tenant.id, servicePrincipalId: rev.servicePrincipalId },
   });
   await assert.rejects(access(f.agentDir(rev)), { code: "ENOENT" });
 });
