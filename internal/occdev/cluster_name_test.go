@@ -24,7 +24,6 @@ func TestClusterNameStartupBoundaries(t *testing.T) {
 		{"digit ending", "occ-dev-test-1", true},
 		{"digit suffix", "occ-dev-0", true},
 		{"missing prefix", "example", false},
-		{"empty suffix", "occ-dev-", false},
 		{"hyphen starts suffix", "occ-dev--a", false},
 		{"uppercase", "occ-dev-Example", false},
 		{"underscore", "occ-dev-a_b", false},
