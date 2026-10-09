@@ -117,11 +117,11 @@ the new Namespace. Disabling defaults leaves persisted copies alone.
 
 ### 2. Admit and store a template
 
-`apps/controller/src/index.ts:createFastifyApp` gives Preset POST/PATCH a
-transport budget derived from the shared 1 MiB JSON limit, allowing string
-escapes and the envelope. Explicit body limits remain authoritative. Transport
-overflow returns 413; template, IAM and Driver checks still govern accepted
-requests.
+`apps/controller/src/index.ts:createFastifyApp` gives Preset POST/PATCH a bounded
+transport budget for 1 MiB templates, JSON escapes and the envelope. Explicit
+overrides remain authoritative. Development/production composition uses route
+defaults; transport overflow returns 413 before normal template, IAM and Driver
+admission.
 
 `packages/occ/src/index.ts:OpenClawController.createPreset`
 
