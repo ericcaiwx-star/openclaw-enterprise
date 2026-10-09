@@ -211,11 +211,16 @@ A row with an empty `NAMESPACE` column is a split-layout tenant.
 tenant's namespace. OCC's database is not changed, so IDs, Namespace names,
 revisions, Secrets, service-account credentials, chat history and Harness
 workspaces all stay. The old namespace's workspace and embedded Gateway claims
-move into it by PersistentVolume rebind, and its Agent Secrets are copied. The
-API is down from `apply` until the upgraded controller starts; Agents are down
-until they are deployed again. _ADOPT-TIMING_ Run the commands from a checkout of
-the target release, with cluster-admin `kubectl` for the cluster
-(`--context`/`--kubeconfig` are passed through).
+move into it by PersistentVolume rebind, and its Agent Secrets are copied.
+
+In a three-tenant test, the moves took about 20 seconds and the old API started
+again in about 20 more; each helper release then stopped the API for about 20
+seconds. `apply` also waits for the old Pods to stop, up to 5.5 minutes for a
+Gateway that is not ready, so stop such Agents first. Dedicated Gateways keep
+serving until they are deployed again; Harnesses and embedded Gateways are down
+from `apply` until then. Run the commands from a checkout of the target
+release, with cluster-admin `kubectl` for the cluster (`--context`/`--kubeconfig`
+are passed through).
 
 1. Plan. This only reads:
 
@@ -240,7 +245,8 @@ the target release, with cluster-admin `kubectl` for the cluster
 2. Back up the volumes the plan lists with your storage's snapshot or backup
    tool. The script does not back them up.
 3. Adopt. This stops OCC's API and worker and the old namespace's workloads,
-   and leaves OCC stopped:
+   moves everything, then starts the old API again for the upgrade helper. The
+   worker stays stopped:
 
    ```bash
    node scripts/split-layout-adopt.mjs apply --archive /secure/occ/adopt --yes
@@ -252,9 +258,13 @@ the target release, with cluster-admin `kubectl` for the cluster
    restarts OCC. Keep the archive directory: it holds the old routes.
 
 4. [Upgrade the control plane](production-upgrade.md#upgrade-the-control-plane)
-   and the runtime as usual. The helper accepts the stopped API and worker.
+   and the runtime as usual.
 5. Deploy each Agent `apply` listed as running (`occ agent deploy <id>`) that is
-   not running yet, and check it.
+   not running yet, and check it. A Gateway from the 2026-09-28 release can
+   stop at startup with `uses schema version 23`. Scale its Deployment to zero,
+   run `openclaw doctor --fix --non-interactive --yes` once in a Pod with the
+   Gateway's template and `sleep` as its command, delete that Pod, and scale
+   the Deployment back.
 6. Delete the old namespaces. After this there is no way back:
 
    ```bash

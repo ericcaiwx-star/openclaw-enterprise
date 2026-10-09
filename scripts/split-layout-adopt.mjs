@@ -700,6 +700,23 @@ export async function applyAdoption(
     writeJournal(kubectl, journal);
     journals.push(journal);
   }
+  await stopWriters(kubectl, writers, { occNamespace, log, sleep, timeoutMs });
+  for (const journal of journals) {
+    await adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs });
+  }
+  // The upgrade helper reads the Installation through the API, and the old API runs on the
+  // adopted layout. The worker, which reconciles Agents, stays stopped until the upgrade.
+  const { replicas } = recorded.api;
+  if (replicas !== 0) {
+    kubectl.patch("deployments.apps", "openclaw-enterprise-api", occNamespace, "merge", {
+      spec: { replicas },
+    });
+    log(`scaled ${occNamespace}/openclaw-enterprise-api back to ${replicas}`);
+  }
+  return journals;
+}
+
+async function stopWriters(kubectl, writers, { occNamespace, log, sleep, timeoutMs }) {
   for (const component of WRITERS) {
     const name = `openclaw-enterprise-${component}`;
     if ((writers[component].spec.replicas ?? 1) !== 0) {
@@ -712,10 +729,6 @@ export async function applyAdoption(
       { sleep, timeoutMs },
     );
   }
-  for (const journal of journals) {
-    await adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs });
-  }
-  return journals;
 }
 
 async function adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs }) {
@@ -891,18 +904,14 @@ export async function revertAdoption(
   const writers = writerDeployments(kubectl, occNamespace);
   for (const component of WRITERS) {
     const recorded = journals[0].writers[component];
-    if (
-      JSON.stringify(images(writers[component])) !== JSON.stringify(recorded.images) ||
-      (writers[component].spec.replicas ?? 1) !== 0
-    ) {
+    if (JSON.stringify(images(writers[component])) !== JSON.stringify(recorded.images)) {
       throw new AdoptError(
-        JSON.stringify(images(writers[component])) === JSON.stringify(recorded.images)
-          ? `scale ${occNamespace}/openclaw-enterprise-${component} to 0 and run revert again`
-          : `openclaw-enterprise-${component} runs another image; revert is only possible ` +
-              "before the upgrade starts the new release",
+        `openclaw-enterprise-${component} runs another image; revert is only possible ` +
+          "before the upgrade starts the new release",
       );
     }
   }
+  await stopWriters(kubectl, writers, { occNamespace, log, sleep, timeoutMs });
   for (const journal of journals) {
     const { tenant, storage, namespaceId: id } = journal;
     kubectl.patch("namespaces", tenant, undefined, "merge", {
@@ -1149,7 +1158,8 @@ export async function main(argv, { run } = {}) {
     // Earlier runs may have adopted some tenants already; list every journal's Agents.
     const running = journalsOf(kubectl).flatMap(({ running }) => running);
     log(
-      "adopted; OCC stays stopped. Upgrade the controller now, then deploy the Agents that " +
+      "adopted; the old API serves and the worker stays stopped. Upgrade the controller now, " +
+        "then deploy the Agents that " +
         `were running: ${running.join(" ") || "none"}`,
     );
   } else if (options.command === "revert") {

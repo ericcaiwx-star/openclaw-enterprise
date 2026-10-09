@@ -586,11 +586,14 @@ test("apply adopts the storage namespace, moves claims by rebind and finalize re
 
   await applyAdoption(kubectl, { archive, ...fast });
 
-  // OCC stays stopped for the upgrade helper, which accepts zero replicas.
-  for (const component of ["api", "worker"]) {
+  // The old API serves again for the upgrade helper; the worker stays stopped.
+  for (const [component, replicas] of [
+    ["api", 1],
+    ["worker", 0],
+  ]) {
     assert.equal(
       get("deployments.apps", "openclaw-system", `openclaw-enterprise-${component}`).spec.replicas,
-      0,
+      replicas,
     );
   }
   assert.equal(get("namespaces", undefined, storage).metadata.labels["openclaw.dev/namespace"], id);
@@ -685,7 +688,18 @@ test("revert before the upgrade restores the released layout exactly", async (t)
     .sort();
 
   await applyAdoption(kubectl, { archive, ...fast });
+  // The old API serves after apply; revert stops it before it changes anything.
+  const apiReplicasAtFirstChange = [];
+  cluster.failures.push((args) => {
+    if (args[0] === "patch" && args[1] === "namespaces") {
+      apiReplicasAtFirstChange.push(
+        get("deployments.apps", "openclaw-system", "openclaw-enterprise-api").spec.replicas,
+      );
+    }
+    return false;
+  });
   await revertAdoption(kubectl, { archive, ...fast });
+  assert.equal(apiReplicasAtFirstChange[0], 0);
 
   assert.equal(
     get("namespaces", undefined, storage).metadata.labels["openclaw.dev/namespace"],
@@ -1052,11 +1066,11 @@ test("a second tenant adopted later keeps the OCC replicas recorded before the f
   const journal = JSON.parse(
     get("namespaces", undefined, otherStorage).metadata.annotations[JOURNAL_ANNOTATION],
   );
-  assert.equal(journal.writers.api.replicas, 1);
+  assert.equal(journal.writers.worker.replicas, 1);
   // Reverting both brings OCC back at its original size, not the zero the second run saw.
   await revertAdoption(kubectl, { archive, ...fast });
   assert.equal(
-    get("deployments.apps", "openclaw-system", "openclaw-enterprise-api").spec.replicas,
+    get("deployments.apps", "openclaw-system", "openclaw-enterprise-worker").spec.replicas,
     1,
   );
 });
@@ -1077,10 +1091,13 @@ test("a crash between copying a Secret and recording it still lets revert remove
   await assert.rejects(applyAdoption(kubectl, { archive, ...fast }), /injected failure/);
   assert.notEqual(get("secrets", storage, `transport-${embedded}`), undefined);
   await applyAdoption(kubectl, { archive, ...fast });
-  for (const component of ["api", "worker"]) {
+  for (const [component, replicas] of [
+    ["api", 1],
+    ["worker", 0],
+  ]) {
     assert.equal(
       get("deployments.apps", "openclaw-system", `openclaw-enterprise-${component}`).spec.replicas,
-      0,
+      replicas,
     );
   }
   await revertAdoption(kubectl, { archive, ...fast });
