@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/19081d63-7696-4bb4-9fcd-1d6e0ffce0a0
+last_updated_session: authoring-run/8b207d82-4eff-4478-872a-80762052a959
 ---
 
 # Agent runtime logs flow
@@ -171,7 +171,9 @@ keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
 Signed cut checkpoints retain the raw-prefix digest/count, query floor and pre-cut
 baseline. Sandbox checkpoints reuse outer time/hashes for the baseline. Fixed-width hashes
-and window tuples retain occurrences within response and query cursor limits. Untimed checkpoints retain consumed prefixes after Driver byte cuts. Known container times retain
+and window tuples retain occurrences within response and query cursor limits. All-untimed byte-cut prefixes retain consumed progress; mixed prefixes advance
+through delivered time with an explicit `window_exceeded` reset, which may replay
+untimed rows. Known container times retain
 the captured floor; empty checkpoints persist. A matching checkpoint retains
 observed positional proof across append-only growth and later cuts. Stable windows
 drain, including untimed lines and over-capacity timestamp groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
@@ -239,6 +241,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 07:45: Advance mixed byte-cut windows explicitly. (authoring-run/8b207d82-4eff-4478-872a-80762052a959 - 42351dce1d1e1a4faf457edd87da96fa8d6169c4)
 
 - 2026-10-10 07:44: Preserve both histories on main integration. (authoring-run/19081d63-7696-4bb4-9fcd-1d6e0ffce0a0 - 3bfadece19cdbea1a23574549265953f9d0e54fc)
 

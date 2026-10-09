@@ -355,6 +355,7 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
   let eligible = completeLines.map((line, index) => ({ line, index }));
   const windowHash = containerPrefixHash(completeLines, completeLines.length);
   const evidence = runtimeLogEvidence(completeLines);
+  const untimedPrefix = completeLines.every(({ time }) => time === null);
   // A line longer than the byte limit fills the page alone; its leading time is intact.
   const earliest =
     (completeLines.length === 0 ? chunk.lines : completeLines).find((line) => line.time !== null)
@@ -522,12 +523,20 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
     const prefixEnd =
       end === 0 ? (checkpointValid ? checkpoint.count : 0) : remaining[end - 1]!.index + 1;
     const consumed = end === lines.length ? completeLines.length : prefixEnd;
-    // A Driver byte cut does not invalidate its complete fetched prefix. Keep
-    // untimed progress after the last wire page drains, so polling cannot replay it.
+    // All-untimed prefixes need signed progress after a Driver byte cut. Mixed
+    // prefixes resume through their delivered time after draining, disclosing the reset.
+    const advanceTimedCut =
+      !skipStalled &&
+      !pageCut &&
+      checkpoint !== undefined &&
+      chunk.truncated &&
+      !untimedPrefix &&
+      (eligible.some(({ line }) => line.time === null) || lines.length === 0);
     const retainCheckpoint =
       !skipStalled &&
       (pageCut ||
         (checkpoint !== undefined &&
+          (!chunk.truncated || untimedPrefix) &&
           (eligible.some(({ line }) => line.time === null) || lines.length === 0)));
     const prefix = completeLines.slice(0, prefixEnd);
     const ordered = prefix.every(
@@ -582,7 +591,7 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
       ...(skipStalled
         ? leading.filter((record) => record.type !== "gap" || record.reason !== "window_exceeded")
         : leading),
-      ...(retainCheckpoint &&
+      ...((retainCheckpoint || advanceTimedCut) &&
       (chunk.lines.length >= query.tailLines || chunk.truncated) &&
       !leading.some((record) => record.type === "gap" && record.reason === "window_exceeded")
         ? [runtimeLogGap("window_exceeded", observedStream, earliest)]

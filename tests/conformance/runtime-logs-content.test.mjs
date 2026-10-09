@@ -2180,63 +2180,87 @@ test("runtime container checkpoint suffixes survive append-only growth to a full
   }
 });
 
-test("container byte-truncated untimed windows preserve drained-prefix replay progress", async () => {
+test("container byte-cut checkpoints retain untimed progress or advance mixed windows", async () => {
   const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
-  const fixture = await createRuntimeLogFixture();
-  const target = await fixture.deployAgent("container-untimed-driver-cut");
-  const count = 330;
-  fixture.computeDriver.state.lines = [
-    ...Array.from({ length: count }, (_, index) => ({
-      time: null,
-      raw: `[info] row=${index}; process arguments: ${'"'.repeat(3000)}`,
-    })),
-    { time: null, raw: "partial trailing row" },
-  ];
-  fixture.computeDriver.state.truncated = true;
-  assert.ok(
-    fixture.computeDriver.state.lines.reduce(
-      (bytes, line) => bytes + Buffer.byteLength(line.raw) + 32,
-      0,
-    ) <
-      1024 * 1024,
-  );
-  const seen = [];
-  let cursor;
-  let pages = 0;
-  while (seen.length < count && pages < 10) {
-    const response = await fixture.request(
-      "GET",
-      target.logsPath(
-        `source=gateway&tailLines=1000${cursor === undefined ? "" : `&cursor=${cursor}`}`,
-      ),
+  for (const mixed of [false, true]) {
+    const fixture = await createRuntimeLogFixture();
+    const target = await fixture.deployAgent("container-untimed-driver-cut");
+    const count = 330;
+    const started = Date.now() - 40_000;
+    fixture.computeDriver.state.lines = [
+      ...Array.from({ length: count }, (_, index) => ({
+        time: mixed && index > 0 ? new Date(started + index * 118).toISOString() : null,
+        raw: `[info] row=${index}; process arguments: ${'"'.repeat(3000)}`,
+      })),
+      { time: null, raw: "partial trailing row" },
+    ];
+    fixture.computeDriver.state.truncated = true;
+    assert.ok(
+      fixture.computeDriver.state.lines.reduce(
+        (bytes, line) => bytes + Buffer.byteLength(line.raw) + 32,
+        0,
+      ) <
+        1024 * 1024,
     );
-    assert.equal(response.status, 200);
-    assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
-    assert.equal(response.data.truncated, true, "the underlying Driver cut remains visible");
-    const rows = messages(response.data).map((message) => Number(/row=(\d+);/.exec(message)[1]));
-    assert.ok(rows.length > 0, "each wire cut advances through the complete fetched prefix");
-    seen.push(...rows);
-    cursor = response.data.cursor;
-    pages += 1;
-  }
-  assert.ok(pages > 1);
-  assert.deepEqual(
-    seen,
-    Array.from({ length: count }, (_, index) => index),
-  );
-  for (let poll = 0; poll < 2; poll += 1) {
-    const replay = await fixture.request(
-      "GET",
-      target.logsPath(`source=gateway&tailLines=1000&cursor=${cursor}`),
+    const seen = [];
+    let cursor;
+    let pages = 0;
+    let drained;
+    while (seen.length < count && pages < 10) {
+      const response = await fixture.request(
+        "GET",
+        target.logsPath(
+          `source=gateway&tailLines=1000${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+        ),
+      );
+      assert.equal(response.status, 200);
+      assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+      assert.equal(response.data.truncated, true, "the underlying Driver cut remains visible");
+      const rows = messages(response.data).map((message) => Number(/row=(\d+);/.exec(message)[1]));
+      assert.ok(rows.length > 0, "each wire cut advances through the complete fetched prefix");
+      seen.push(...rows);
+      cursor = response.data.cursor;
+      drained = response.data;
+      pages += 1;
+    }
+    assert.ok(pages > 1);
+    assert.deepEqual(
+      seen,
+      Array.from({ length: count }, (_, index) => index),
     );
-    assert.equal(replay.status, 200);
-    assert.equal(
-      messages(replay.data).length,
-      0,
-      "a stable byte-truncated window cannot replay its consumed untimed prefix",
-    );
-    assert.equal(replay.data.truncated, true);
-    cursor = replay.data.cursor;
+    if (mixed) {
+      assert.ok(
+        drained.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+        "timed advancement explicitly resets the uncertain window",
+      );
+      const next = await fixture.request(
+        "GET",
+        target.logsPath(`source=gateway&tailLines=1000&cursor=${cursor}`),
+      );
+      assert.equal(next.status, 200);
+      const resumedRead = fixture.computeDriver.calls
+        .filter(({ operation }) => operation === "read")
+        .at(-1);
+      assert.ok(
+        Number.isInteger(resumedRead.sinceSeconds) && resumedRead.sinceSeconds <= 10,
+        "the supported Driver receives a recent floor instead of rereading the entire old byte-cut window",
+      );
+      continue;
+    }
+    for (let poll = 0; poll < 2; poll += 1) {
+      const replay = await fixture.request(
+        "GET",
+        target.logsPath(`source=gateway&tailLines=1000&cursor=${cursor}`),
+      );
+      assert.equal(replay.status, 200);
+      assert.equal(
+        messages(replay.data).length,
+        0,
+        "a stable byte-truncated window cannot replay its consumed untimed prefix",
+      );
+      assert.equal(replay.data.truncated, true);
+      cursor = replay.data.cursor;
+    }
   }
 });
 
