@@ -272,8 +272,14 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
     };
   } catch (error) {
     const logs = await runDocker(["logs", containerName]).catch((logsError) => logsError);
-    // A failed docker command's message carries its whole stderr.
-    throw new Error(`${failureTail(error.message, 3072)}\n${failureTail(commandOutput(logs))}`, {
+    // A failed docker command's message carries its whole stderr after the
+    // line that names the command.
+    const [headline, ...detail] = error.message.split("\n");
+    const failure = [
+      headline.slice(0, 512),
+      ...(detail.length > 0 ? [failureTail(detail.join("\n"), 2560)] : []),
+    ];
+    throw new Error(`${failure.join("\n")}\n${failureTail(commandOutput(logs))}`, {
       cause: error,
     });
   }
