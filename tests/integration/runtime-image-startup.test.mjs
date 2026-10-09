@@ -2130,7 +2130,9 @@ http.createServer((req, res) => {
         keyPath: "/home/node/tls/key.pem",
       };
       const path = join(directory, `configuration-${enabled}.json`);
-      await writeFile(path, JSON.stringify(configuration), { mode: 0o600 });
+      // The parent is private; this synthetic input must be readable by native
+      // UID1000 even when a Linux runner writes it with a different UID.
+      await writeFile(path, JSON.stringify(configuration), { mode: 0o644 });
       // Feed the original native input to the actual pinned Gateway to prove
       // why Compute refuses it; this is not a supported TLS deployment fixture.
       const { containerName } = await runGatewaySmoke(t, "openclaw", {
