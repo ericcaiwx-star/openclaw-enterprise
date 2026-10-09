@@ -51,7 +51,7 @@ setup() {
 }
 
 report() {
-  local journal hub served suppressed
+  local journal hub_pattern hub lookups served suppressed lines
   # An empty list below proves nothing if the storage driver changed.
   docker info --format 'driver {{.Driver}}, registry mirrors {{json .RegistryConfig.Mirrors}}'
   journal="$(sudo journalctl -u docker --no-pager -o cat || true)"
@@ -61,12 +61,20 @@ report() {
   # The Engine's own builder (`docker build --builder default`) logs the
   # registry host it resolves each image on.
   grep -oE '(^| )host="?[A-Za-z0-9.:-]+' <<<"$journal" | sed 's/^ //' | sort | uniq -c || true
-  hub="$(grep -cE 'registry-1\.docker\.io|auth\.docker\.io|index\.docker\.io' <<<"$journal" || true)"
+  hub_pattern='registry-1\.docker\.io|auth\.docker\.io|index\.docker\.io'
+  # Containers on Docker networks (k3d nodes) resolve names through the
+  # Engine's DNS resolver, which logs each lookup; their own image pulls do not
+  # go through the Engine, so those lines are counted apart.
+  hub="$(grep -E "$hub_pattern" <<<"$journal" | grep -cv '\[resolver\]' || true)"
+  lookups="$(grep -E "$hub_pattern" <<<"$journal" | grep -c '\[resolver\]' || true)"
+  grep -E "$hub_pattern" <<<"$journal" | grep -v '\[resolver\]' | head -n 20 || true
   served="$(grep -c 'mirror\.gcr\.io' <<<"$journal" || true)"
   # journald drops lines over its rate limit, which would hide Docker Hub lines.
   suppressed="$(sudo journalctl -u systemd-journald --no-pager -o cat 2>/dev/null |
     grep -c 'Suppressed.*docker\.service' || true)"
-  echo "Engine log lines: $(wc -l <<<"$journal"), naming mirror.gcr.io: ${served:-0}, naming a Docker Hub endpoint: ${hub:-0}"
+  lines="$(printf '%s' "$journal" | grep -c '' || true)"
+  echo "Engine log lines: ${lines:-0}, naming mirror.gcr.io: ${served:-0}, naming a Docker Hub endpoint: ${hub:-0}"
+  echo "Docker Hub lookups through the Engine's DNS resolver (container traffic, not Engine pulls): ${lookups:-0}"
   echo "journald rate-limit notices for docker.service: ${suppressed:-0}"
 }
 

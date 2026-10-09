@@ -48,8 +48,9 @@ jobs:
         with:
           persist-credentials: false
       # Pull the Engine's Docker Hub images (k3s node and source images)
-      # through mirror.gcr.io without the runner's Docker Hub sign-in
-      # (finding 977). This restarts the Engine before the lane starts.
+      # through mirror.gcr.io without the runner's Docker Hub sign-in, as
+      # Runtime Image Fixture does (findings 973 and 977; same exposure). This
+      # restarts the Engine before the lane starts.
       - name: Pull Docker Hub images through a mirror
         run: bash scripts/ci/docker-hub-mirror.sh setup
       - uses: ./.github/actions/run-ci-lane
