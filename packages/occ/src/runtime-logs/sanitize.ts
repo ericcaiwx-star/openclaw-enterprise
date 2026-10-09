@@ -563,6 +563,21 @@ export interface SanitizedRuntimeLogChunk {
   readonly withheld: number;
 }
 
+/** Masking evidence from fetched text; it never advances delivered PEM context. */
+export function runtimeLogPemEvidence(
+  lines: AgentRuntimeLogChunk["lines"],
+): ReadonlyMap<number, string> {
+  const block: JsonBlock = { depth: 0 };
+  return maskPemBlockLines(
+    lines.map((line) => {
+      const classified = classify(line.raw, block);
+      return classified.type === "line" && classified.kind === "text"
+        ? classified.message
+        : undefined;
+    }),
+  );
+}
+
 /**
  * The only producer of `SanitizedRuntimeLogRecord` lines. Classifies each raw line
  * against the operational allowlist, redacts every retained string, bounds sizes and
@@ -573,6 +588,7 @@ export function sanitizeRuntimeLogChunk(
   pemContext?: {
     readonly open: boolean | undefined;
     readonly canClose?: readonly boolean[] | undefined;
+    readonly evidence?: readonly (string | undefined)[];
   },
 ): SanitizedRuntimeLogChunk & { readonly pemOpen?: boolean } {
   const stream = cleanStream(chunk.stream);
@@ -614,7 +630,9 @@ export function sanitizeRuntimeLogChunk(
       records.push(brand(run));
       run = undefined;
     }
-    const message = sanitizeRuntimeLogText(pem.get(index) ?? classified.message);
+    const message = sanitizeRuntimeLogText(
+      pem.get(index) ?? pemContext?.evidence?.[index] ?? classified.message,
+    );
     const subsystem =
       classified.subsystem === undefined
         ? undefined

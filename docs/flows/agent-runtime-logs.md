@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/b4a36577-a96a-44f4-9600-41b94747c1c9
+last_updated_session: authoring-run/d983fb2c-0a98-43db-8690-ddb7f5b43f87
 ---
 
 # Agent runtime logs flow
@@ -142,8 +142,8 @@ undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 `SanitizedRuntimeLogRecord`. `page-budget.ts` measures serialized pages,
 signed cursors and the HTTP envelope against 512 KiB. Full candidates precede
 bounded prefix builds reuse admission and clocks without I/O or audits. Fit is
-checked; maximum filling is not promised. `maskPemBlockLines` masks separate BEGIN/body/END
-lines; both sources share the budget.
+checked; maximum filling is not promised. Fetched masking evidence survives prefix builds; persistent state advances only
+through delivered rows. Both sources share the budget.
 
 For container follow polls, the signed cursor also carries optional `pemOpen`
 and `pemAfterTime` state. It describes the delivered boundary, not the start of
@@ -164,8 +164,7 @@ instance/Pod change or replacement during the read discards the old context.
 The paired fields are validated together under the existing cursor MAC; malformed
 or inconsistent pairs fail as `cursor_invalid` before a Driver read. Legacy
 cursors and initial tails without observed PEM boundaries remain unknown and
-best-effort. This does not recover missing log history or change JSON withholding,
-short-token patterns, bracket-tag classification or sandbox pagination.
+best-effort.
 
 `source=sandbox` skips the Compute description. `OpenClawController.readSandboxLogs`
 lists the source only when the selected Sandbox Driver provisioned the revision
@@ -249,6 +248,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 04:19: Preserve fetched masking evidence in delivered prefixes. (authoring-run/d983fb2c-0a98-43db-8690-ddb7f5b43f87 - 9222f0073c951203c5f959bc9382dbb13c605ee9)
 
 - 2026-10-10 04:10: Preserve rounded and empty windows. (authoring-run/b4a36577-a96a-44f4-9600-41b94747c1c9 - d791a48aa0baacfef2dede241c6161ad9c82e89a)
 

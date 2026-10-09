@@ -2523,3 +2523,27 @@ test("container checkpoint windows remain stable when relative seconds round out
     );
   }
 });
+
+test("container wire-prefix builds retain fetched masking evidence without advancing PEM state", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("container-mask-evidence");
+  const start = Date.now() - 1000;
+  fixture.computeDriver.state.lines = [
+    ...wireContainerRows(null, 50),
+    ...Array.from({ length: 300 }, () => ({ time: null, raw: "QUJD" })),
+    { time: null, raw: pemEnd },
+  ].map((line, index) => ({ ...line, time: new Date(start + index).toISOString() }));
+  const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=1000"));
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  assert.ok(!messages(first.data).includes("QUJD"));
+  const payload = JSON.parse(Buffer.from(first.data.cursor.split(".")[1], "base64url").toString());
+  assert.equal(payload.po, undefined, "an undelivered END must not advance persistent PEM state");
+  const rest = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=1000&cursor=${first.data.cursor}`),
+  );
+  assert.equal(rest.status, 200);
+  assert.ok(!messages(rest.data).includes("QUJD"));
+});

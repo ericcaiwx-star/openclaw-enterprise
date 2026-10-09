@@ -17,6 +17,7 @@ import {
 } from "./cursor.ts";
 import {
   runtimeLogGap,
+  runtimeLogPemEvidence,
   sanitizeRuntimeLogChunk,
   type SanitizedRuntimeLogRecord,
 } from "./sanitize.ts";
@@ -353,6 +354,7 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
     sameStream && !replacedDuringRead && baseline?.lastTime != null ? baseline : undefined;
   let eligible = completeLines.map((line, index) => ({ line, index }));
   const windowHash = containerPrefixHash(completeLines, completeLines.length);
+  const pemEvidence = runtimeLogPemEvidence(completeLines);
   // A line longer than the byte limit fills the page alone; its leading time is intact.
   const earliest =
     (completeLines.length === 0 ? chunk.lines : completeLines).find((line) => line.time !== null)
@@ -548,7 +550,11 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
         lines: delivered,
         truncated: false,
       },
-      { open: pemPrior?.pemOpen, canClose },
+      {
+        open: pemPrior?.pemOpen,
+        canClose,
+        evidence: remaining.slice(0, end).map(({ index }) => pemEvidence.get(index)),
+      },
     );
     let pemAfterTime = pemPrior?.pemAfterTime ?? null;
     if (delivered.length > 0) {
