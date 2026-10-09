@@ -143,7 +143,7 @@ undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 signed cursors and the HTTP envelope against 512 KiB. Full candidates precede
 bounded prefix builds reuse admission and clocks without I/O or audits. Fit is
 checked; maximum filling is not promised. Fetched masking evidence survives prefix builds; persistent state advances only
-through delivered rows. Both sources share the budget.
+through delivered rows. Sources share the budget.
 
 For container follow polls, the signed cursor also carries optional `pemOpen`
 and `pemAfterTime` state. It describes the delivered boundary, not the start of
