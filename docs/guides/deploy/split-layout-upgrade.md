@@ -60,6 +60,11 @@ are passed through).
    `revert --archive /secure/occ/adopt --yes` restores the old layout and
    restarts OCC. Keep the archive directory: it holds the old routes.
 
+   `apply` returns once the old API serves. Use it only for the upgrade
+   helper: requests that touch an adopted tenant's Secrets, Configurations or
+   Gateways fail with an ownership error until the new release starts, and
+   Agent deploys wait for the new worker.
+
 4. [Upgrade the control plane](production-upgrade.md#upgrade-the-control-plane)
    and the runtime as usual.
 5. Deploy each Agent `apply` listed as running (`occ agent deploy <id>`) that is
@@ -67,7 +72,9 @@ are passed through).
    stop at startup with `uses schema version 23`. Scale its Deployment to zero,
    run `openclaw doctor --fix --non-interactive --yes` once in a Pod with the
    Gateway's template and `sleep` as its command, delete that Pod, and scale
-   the Deployment back.
+   the Deployment back. Doctor logs `v23 -> v24`, then ends with a read-only
+   file system error and exit code `1`; that is expected, and the Gateway
+   becomes ready.
 6. Delete the old namespaces. After this there is no way back:
 
    ```bash

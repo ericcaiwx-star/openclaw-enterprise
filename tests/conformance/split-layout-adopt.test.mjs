@@ -254,7 +254,10 @@ function fakeCluster() {
             next = mergePatch(object, patch);
           }
           if (resource === "deployments.apps" && next.spec.replicas !== undefined) {
-            next.status = { replicas: next.spec.replicas };
+            next.status = {
+              replicas: next.spec.replicas,
+              availableReplicas: next.spec.replicas,
+            };
             if (next.spec.replicas === 0) {
               for (const pod of items("pods", next.metadata.namespace)) {
                 if (pod.metadata.labels?.app === name) {
@@ -353,7 +356,7 @@ function releasedInstallation({ reclaimPolicy = "Delete" } = {}) {
         replicas: 1,
         template: { spec: { containers: [{ image: "controller@sha256:released" }] } },
       },
-      status: { replicas: 1 },
+      status: { replicas: 1, availableReplicas: 1 },
     });
   }
   for (const [role, account] of [
@@ -421,7 +424,7 @@ function releasedInstallation({ reclaimPolicy = "Delete" } = {}) {
   put("deployments.apps", {
     metadata: { name: `gateway-${dedicated}`, namespace: storage, ...owned("agent-dedicated") },
     spec: { replicas: 1 },
-    status: { replicas: 1 },
+    status: { replicas: 1, availableReplicas: 1 },
   });
   // The Harness namespace.
   claim(
@@ -445,7 +448,7 @@ function releasedInstallation({ reclaimPolicy = "Delete" } = {}) {
     put("deployments.apps", {
       metadata: { name, namespace: tenantNamespace, ...owned(agent) },
       spec: { replicas: 1 },
-      status: { replicas: 1 },
+      status: { replicas: 1, availableReplicas: 1 },
     });
     put("pods", {
       metadata: {
@@ -639,8 +642,12 @@ test("apply adopts the storage namespace, moves claims by rebind and finalize re
   assert.equal(journal.state, "applied");
   assert.deepEqual(journal.running, ["agent-dedicated", "agent-embedded"]);
 
-  // A second apply has nothing left to do.
+  // A second apply has nothing left to do, but brings back an API a killed run left stopped.
+  const api = () => get("deployments.apps", "openclaw-system", "openclaw-enterprise-api");
+  api().spec.replicas = 0;
+  api().status = { replicas: 0, availableReplicas: 0 };
   assert.deepEqual(await applyAdoption(kubectl, { archive, ...fast }), []);
+  assert.equal(api().spec.replicas, 1);
   await assert.rejects(finalizeAdoption(kubectl, fast), /upgrade it first/);
   // Only the archive apply used can bring the routes back; a wrong one changes nothing.
   const adopted = structuredClone(get("namespaces", undefined, storage));
@@ -817,6 +824,61 @@ test("a Pod that keeps mounting a claim stops apply before the claim is deleted"
     get("deployments.apps", "openclaw-system", "openclaw-enterprise-api").spec.replicas,
     1,
   );
+});
+
+test("apply waits out the grace period of a Pod that is slow to stop", async (t) => {
+  const archive = await withArchive(t);
+  const cluster = releasedInstallation();
+  const { kubectl, put } = cluster;
+  // A Gateway that ignores SIGTERM keeps its claim until its grace period ends.
+  put("pods", {
+    metadata: {
+      name: "gateway-slow",
+      namespace: tenantNamespace,
+      ownerReferences: [{ apiVersion: "batch/v1", kind: "Job", name: "gateway-slow" }],
+    },
+    spec: {
+      terminationGracePeriodSeconds: 1,
+      volumes: [{ name: "w", persistentVolumeClaim: { claimName: `workspace-${dedicated}` } }],
+    },
+  });
+  let sleeps = 0;
+  const sleep = async () => {
+    await new Promise((done) => setTimeout(done, 30));
+    // Gone after about 150 ms: past the 50 ms timeout, inside the 1 s grace period.
+    if (++sleeps === 5) {
+      cluster.store.delete(`pods/${tenantNamespace}/gateway-slow`);
+    }
+  };
+  await applyAdoption(kubectl, { archive, sleep, timeoutMs: 50 });
+  assert.ok(sleeps >= 5);
+});
+
+test("apply returns only once the old API serves again", async (t) => {
+  const archive = await withArchive(t);
+  const cluster = releasedInstallation();
+  let restarted = false;
+  let unavailableReads = 0;
+  const kubectl = {
+    ...cluster.kubectl,
+    patch: (resource, name, namespace, type, body) => {
+      if (name === "openclaw-enterprise-api" && body?.spec?.replicas > 0) {
+        restarted = true;
+      }
+      return cluster.kubectl.patch(resource, name, namespace, type, body);
+    },
+    // The Deployment reports no available replica for its first reads after the restart.
+    get: (resource, name, namespace) => {
+      const object = cluster.kubectl.get(resource, name, namespace);
+      if (restarted && name === "openclaw-enterprise-api" && unavailableReads < 3) {
+        unavailableReads += 1;
+        return { ...object, status: { ...object.status, availableReplicas: 0 } };
+      }
+      return object;
+    },
+  };
+  await applyAdoption(kubectl, { archive, ...fast, timeoutMs: 5_000 });
+  assert.equal(unavailableReads, 3);
 });
 
 test("plan refuses tenants adoption cannot carry, and apply then changes nothing", async (t) => {
@@ -1067,7 +1129,17 @@ test("a second tenant adopted later keeps the OCC replicas recorded before the f
     get("namespaces", undefined, otherStorage).metadata.annotations[JOURNAL_ANNOTATION],
   );
   assert.equal(journal.writers.worker.replicas, 1);
-  // Reverting both brings OCC back at its original size, not the zero the second run saw.
+  // Reverting one tenant keeps the worker stopped while the other stays adopted.
+  await revertAdoption(kubectl, { archive, namespaceIds: [other], ...fast });
+  assert.equal(
+    get("deployments.apps", "openclaw-system", "openclaw-enterprise-worker").spec.replicas,
+    0,
+  );
+  assert.equal(
+    get("deployments.apps", "openclaw-system", "openclaw-enterprise-api").spec.replicas,
+    1,
+  );
+  // Reverting the rest brings OCC back at its original size, not the zero the second run saw.
   await revertAdoption(kubectl, { archive, ...fast });
   assert.equal(
     get("deployments.apps", "openclaw-system", "openclaw-enterprise-worker").spec.replicas,

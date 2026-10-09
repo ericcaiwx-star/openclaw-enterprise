@@ -648,10 +648,6 @@ export async function applyAdoption(
   if (refusals.length > 0) {
     throw new AdoptError(`refusing to start:\n${refusals.join("\n")}`);
   }
-  if (plans.length + resumed.length === 0) {
-    log("no split-layout tenants to adopt");
-    return [];
-  }
   for (const journal of resumed) {
     if (journal.archive !== resolve(archive)) {
       throw new AdoptError(`${journal.storage} was started with --archive ${journal.archive}`);
@@ -670,6 +666,14 @@ export async function applyAdoption(
         { replicas: writers[component].spec.replicas ?? 1, images: images(writers[component]) },
       ]),
     );
+  if (plans.length + resumed.length === 0) {
+    log("no split-layout tenants to adopt");
+    // A run killed after its last tenant but before the API restart finishes here.
+    if (anyJournal !== undefined) {
+      await startOldApi(kubectl, recorded, { occNamespace, log, sleep, timeoutMs });
+    }
+    return [];
+  }
   // Journals are written before any change, so revert can always restore what was there.
   const journals = [...resumed];
   for (const plan of plans) {
@@ -704,16 +708,31 @@ export async function applyAdoption(
   for (const journal of journals) {
     await adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs });
   }
-  // The upgrade helper reads the Installation through the API, and the old API runs on the
-  // adopted layout. The worker, which reconciles Agents, stays stopped until the upgrade.
-  const { replicas } = recorded.api;
-  if (replicas !== 0) {
-    kubectl.patch("deployments.apps", "openclaw-enterprise-api", occNamespace, "merge", {
-      spec: { replicas },
-    });
-    log(`scaled ${occNamespace}/openclaw-enterprise-api back to ${replicas}`);
-  }
+  await startOldApi(kubectl, recorded, { occNamespace, log, sleep, timeoutMs });
   return journals;
+}
+
+// The upgrade helper reads the Installation through the API, and the old API runs on the
+// adopted layout: requests that touch an adopted tenant fail its ownership checks. The worker,
+// which reconciles Agents, stays stopped until the upgrade.
+async function startOldApi(kubectl, recorded, { occNamespace, log, sleep, timeoutMs }) {
+  const { replicas, images: recordedImages } = recorded.api;
+  const name = "openclaw-enterprise-api";
+  const live = kubectl.get("deployments.apps", name, occNamespace);
+  if (replicas === 0 || JSON.stringify(images(live)) !== JSON.stringify(recordedImages)) {
+    return;
+  }
+  if ((live.spec.replicas ?? 1) !== replicas) {
+    kubectl.patch("deployments.apps", name, occNamespace, "merge", { spec: { replicas } });
+    log(`scaled ${occNamespace}/${name} back to ${replicas}`);
+  }
+  await waitFor(
+    () =>
+      (kubectl.get("deployments.apps", name, occNamespace)?.status?.availableReplicas ?? 0) >=
+      replicas,
+    `${name} to serve`,
+    { sleep, timeoutMs },
+  );
 }
 
 async function stopWriters(kubectl, writers, { occNamespace, log, sleep, timeoutMs }) {
@@ -967,6 +986,17 @@ export async function revertAdoption(
       metadata: { annotations: { [JOURNAL_ANNOTATION]: null } },
     });
     log(`${tenant} is the tenant namespace of ${id} again`);
+  }
+  const remaining = journalsOf(kubectl);
+  if (remaining.length > 0) {
+    // --namespace-id reverted only some tenants; the others stay adopted, so the old worker
+    // must not run yet.
+    await startOldApi(kubectl, journals[0].writers, { occNamespace, log, sleep, timeoutMs });
+    log(
+      `${remaining.map(({ storage }) => storage).join(", ")} stay adopted; the worker stays ` +
+        "stopped until they are reverted or the upgrade runs",
+    );
+    return journals;
   }
   for (const component of WRITERS) {
     const { replicas } = journals[0].writers[component];
