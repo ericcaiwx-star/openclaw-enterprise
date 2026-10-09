@@ -246,7 +246,7 @@ export function planTenant(
     routes: [],
     dropped: {},
     running: [],
-    oauthReconnect: [],
+    reconnectAgents: [],
     refusals: [],
   };
   const refuse = (reason) => plan.refusals.push(reason);
@@ -322,13 +322,13 @@ export function planTenant(
     for (const secret of kubectl.list("secrets", namespace)) {
       const annotations = secret.metadata.annotations ?? {};
       if (claimUids.has(annotations[OAUTH_VOLUME_ANNOTATION])) {
-        plan.oauthReconnect.push(annotations[OAUTH_AGENT_ANNOTATION] ?? secret.metadata.name);
+        plan.reconnectAgents.push(annotations[OAUTH_AGENT_ANNOTATION] ?? secret.metadata.name);
       }
     }
   }
-  if (plan.oauthReconnect.length > 0 && !acceptOauthReconnect) {
+  if (plan.reconnectAgents.length > 0 && !acceptOauthReconnect) {
     refuse(
-      `Agents ${plan.oauthReconnect.join(", ")} use Codex OAuth bound to a moved claim and ` +
+      `Agents ${plan.reconnectAgents.join(", ")} use Codex OAuth bound to a moved claim and ` +
         "must sign in again after adoption; add --accept-oauth-reconnect",
     );
   }
@@ -1165,8 +1165,8 @@ export async function main(argv, { run } = {}) {
           `${plan.running.join(", ") || "none"}`,
       );
       log(`  back up these volumes first: ${plan.volumes.join(", ") || "none"}`);
-      if (plan.oauthReconnect.length > 0) {
-        log(`  OAuth sign-in needed again for: ${plan.oauthReconnect.join(", ")}`);
+      if (plan.reconnectAgents.length > 0) {
+        log(`  OAuth sign-in needed again for: ${plan.reconnectAgents.join(", ")}`);
       }
       for (const reason of plan.refusals) {
         log(`  refused: ${reason}`);

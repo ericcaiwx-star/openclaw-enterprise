@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -632,8 +632,13 @@ test("apply adopts the storage namespace, moves claims by rebind and finalize re
   assert.deepEqual(items("httproutes.gateway.networking.k8s.io", tenantNamespace), []);
   assert.deepEqual(items("securitypolicies.gateway.envoyproxy.io", tenantNamespace), []);
   const routesFile = join(archive, id, "routes.json");
-  assert.equal((await stat(routesFile)).mode & 0o777, 0o600);
-  assert.equal(JSON.parse(await readFile(routesFile, "utf8")).length, 2);
+  const routes = await open(routesFile);
+  try {
+    assert.equal((await routes.stat()).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(await routes.readFile("utf8")).length, 2);
+  } finally {
+    await routes.close();
+  }
   // Canonical storage and the dedicated Gateway were not touched.
   assert.equal(get("deployments.apps", storage, `gateway-${dedicated}`).spec.replicas, 1);
   const journal = JSON.parse(
@@ -1030,7 +1035,7 @@ test("an operator can accept OAuth reconnects and drop a confirmed resource kind
     dropResources: ["services"],
   }).plans;
   assert.deepEqual(plan.refusals, []);
-  assert.deepEqual(plan.oauthReconnect, ["agent-dedicated"]);
+  assert.deepEqual(plan.reconnectAgents, ["agent-dedicated"]);
   await applyAdoption(kubectl, {
     archive,
     acceptOauthReconnect: true,
