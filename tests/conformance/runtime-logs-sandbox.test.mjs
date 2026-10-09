@@ -681,3 +681,119 @@ test("sandbox sanitization stays linear on hostile 32 KiB OCSF lines", async () 
     assert.ok(elapsed < budgetMs, `${message.slice(0, 24)} took ${elapsed.toFixed(0)} ms of CPU`);
   }
 });
+
+test("sandbox wire pages include escaped diagnostics and resume without losing records", async () => {
+  const fixture = await sandboxFixture();
+  const started = Date.now() - 1000;
+  fixture.gateway.state.lines = Array.from({ length: 200 }, (_, index) => ({
+    sandboxId: SANDBOX_ID,
+    time: new Date(started + index).toISOString(),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; 网络🙂 process arguments: ${'--option="value" '.repeat(500)}`,
+    fields: {},
+  }));
+  const seen = [];
+  let cursor;
+  let pages = 0;
+  do {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(
+        `source=sandbox&tailLines=200${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200, response.text.slice(0, 200));
+    assert.equal(response.body.meta.requestId.length, 40);
+    assert.equal(
+      Buffer.byteLength(response.text, "utf8"),
+      Buffer.byteLength(JSON.stringify(response.body), "utf8"),
+    );
+    assert.ok(Buffer.byteLength(response.text, "utf8") <= 512 * 1024);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    if (pages === 0) {
+      assert.equal(response.data.truncated, true);
+    }
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    cursor = response.data.cursor;
+    pages += 1;
+    if (!response.data.truncated) {
+      break;
+    }
+    assert.ok(lines.length > 0, "a byte-cut page must advance");
+  } while (pages < 10);
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 200 }, (_, index) => index),
+  );
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&cursor=${cursor}`),
+  );
+  assert.deepEqual(
+    replay.data.records.filter(({ type }) => type === "line"),
+    [],
+  );
+  assert.equal(
+    fixture.gateway.requests.length,
+    pages + 1,
+    "prefix builds make no extra gateway reads",
+  );
+  assert.equal(
+    fixture.auditSink.events.filter(({ action }) => action === "openclaw.agents.runtime_logs.view")
+      .length,
+    1,
+  );
+  const download = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&download=true"),
+  );
+  assert.equal(download.status, 200);
+  assert.ok(Buffer.byteLength(download.text, "utf8") <= 512 * 1024);
+});
+
+test("sandbox wire budgeting handles empty, single and grouped withheld pages", async () => {
+  const fixture = await sandboxFixture();
+  const started = Date.now() - 1000;
+  const row = (message, index = 0) => ({
+    sandboxId: SANDBOX_ID,
+    time: new Date(started + index).toISOString(),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message,
+    fields: {},
+  });
+  for (const lines of [[], [row(`single 网络🙂 ${'--option="value" '.repeat(500)}`)]]) {
+    fixture.gateway.state.lines = lines;
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath("source=sandbox&tailLines=200"),
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.data.truncated, false);
+    assert.equal(response.data.records.filter(({ type }) => type === "line").length, lines.length);
+    assert.ok(Buffer.byteLength(response.text, "utf8") <= 512 * 1024);
+  }
+  fixture.gateway.state.lines = Array.from({ length: 80 }, (_, index) =>
+    row(JSON.stringify({ ordinary_metadata: "diagnostic ".repeat(900) }), index),
+  );
+  const withheld = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=200"),
+  );
+  assert.equal(withheld.status, 200);
+  assert.equal(withheld.data.truncated, false);
+  assert.equal(withheld.data.withheld, 80);
+  assert.equal(withheld.data.records.filter(({ type }) => type === "withheld")[0].count, 80);
+  assert.ok(Buffer.byteLength(withheld.text, "utf8") <= 512 * 1024);
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&cursor=${withheld.data.cursor}`),
+  );
+  assert.deepEqual(
+    replay.data.records.filter(({ type }) => type === "line" || type === "withheld"),
+    [],
+  );
+});

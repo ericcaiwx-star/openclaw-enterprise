@@ -1429,7 +1429,16 @@ test("runtime log cursor context stops at the page byte bound before a future EN
   const reader = pollReader();
   const page = await reader.poll([
     timedLog(pemBegin, 0),
-    ...Array.from({ length: 70 }, (_, i) => timedLog("A".repeat(8192), i + 1)),
+    ...Array.from({ length: 70 }, (_, i) =>
+      timedLog(
+        JSON.stringify({
+          level: "info",
+          subsystem: "gateway",
+          message: "ordinary diagnostic ".repeat(500),
+        }),
+        i + 1,
+      ),
+    ),
     timedLog(pemEnd, 72),
   ]);
   assert.equal(page.truncated, true);
@@ -1582,7 +1591,7 @@ test("runtime log route polling keeps a cut timestamp group conservative when th
 
 test("runtime log route polling counts undelivered copies after its page byte cut", async () => {
   const reader = await runtimeLogRoutePoller();
-  const padding = Array.from({ length: 60 }, (_, index) =>
+  const padding = Array.from({ length: 20 }, (_, index) =>
     timedLog(
       JSON.stringify({
         level: "info",
@@ -1600,15 +1609,17 @@ test("runtime log route polling counts undelivered copies after its page byte cu
     }),
     1,
   );
-  const lines = [...padding, repeated, repeated, repeated];
+  const lines = [...padding, ...Array.from({ length: 80 }, () => repeated)];
   const first = await reader.poll(lines);
   assert.equal(first.truncated, true);
-  assert.equal(messages(first).length, 62);
+  const delivered = messages(first).length;
+  assert.ok(delivered > padding.length && delivered < lines.length);
+  assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= 512 * 1024);
   const next = await reader.poll(lines);
   assert.equal(
     messages(next).length,
-    1,
-    "a page cut leaves one copy to deliver at the complete frontier",
+    lines.length - delivered,
+    "a page cut leaves the remaining copies to deliver at the complete frontier",
   );
   assert.deepEqual(messages(await reader.poll(lines)), []);
 });
@@ -1929,7 +1940,16 @@ test("runtime log cursor keeps the frontier stable on replay and does not inspec
   assert.equal(replay.pemAfterTime, prior.pemAfterTime);
   // A malformed future line beyond the response cut is not consumed evidence.
   const page = await reader.poll([
-    ...Array.from({ length: 70 }, (_, i) => timedLog("A".repeat(8192), i + 1)),
+    ...Array.from({ length: 70 }, (_, i) =>
+      timedLog(
+        JSON.stringify({
+          level: "info",
+          subsystem: "gateway",
+          message: "ordinary diagnostic ".repeat(500),
+        }),
+        i + 1,
+      ),
+    ),
     { raw: pemEnd, time: null },
   ]);
   assert.equal(page.truncated, true);
@@ -1986,4 +2006,119 @@ test("runtime log cursor preserves an observed BEGIN on uncertain initial and le
       );
     }
   }
+});
+
+test("runtime container wire pages include escaped messages, cursor and HTTP metadata in the limit", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("wire-budget");
+  const started = Date.now() - 1000;
+  fixture.computeDriver.state.lines = Array.from({ length: 70 }, (_, index) => ({
+    time: new Date(started + index).toISOString(),
+    raw: JSON.stringify({
+      level: "info",
+      subsystem: "gateway",
+      message: `row=${index}; 网络🙂 process arguments: ${'--option="value" '.repeat(500)}`,
+    }),
+  }));
+  const seen = [];
+  let cursor;
+  let pages = 0;
+  let firstCount;
+  do {
+    const response = await fixture.request(
+      "GET",
+      target.logsPath(
+        `source=gateway&tailLines=200${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200, response.text.slice(0, 200));
+    assert.equal(response.body.meta.requestId.length, 40);
+    assert.equal(
+      Buffer.byteLength(response.text, "utf8"),
+      Buffer.byteLength(JSON.stringify(response.body), "utf8"),
+      "the actual formatter matches measured JSON, including Unicode",
+    );
+    assert.ok(Buffer.byteLength(response.text, "utf8") <= 512 * 1024);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    if (pages === 0) {
+      firstCount = lines.length;
+      assert.equal(response.data.truncated, true);
+    }
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    cursor = response.data.cursor;
+    pages += 1;
+    if (!response.data.truncated) {
+      break;
+    }
+    assert.ok(lines.length > 0, "a byte-cut page must advance");
+  } while (pages < 10);
+  assert.ok(firstCount > 0 && firstCount < 70);
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 70 }, (_, index) => index),
+  );
+  const replay = await fixture.request("GET", target.logsPath(`source=gateway&cursor=${cursor}`));
+  assert.deepEqual(replay.data.records, []);
+  assert.equal(
+    fixture.computeDriver.calls.filter(({ operation }) => operation === "read").length,
+    pages + 1,
+    "prefix builds do not read the Driver again",
+  );
+  assert.equal(
+    fixture.auditSink.events.filter(({ action }) => action === "openclaw.agents.runtime_logs.view")
+      .length,
+    1,
+    "prefix builds and continuation do not open extra views",
+  );
+  const download = await fixture.request("GET", target.logsPath("source=gateway&download=true"));
+  assert.equal(download.status, 200);
+  assert.ok(Buffer.byteLength(download.text, "utf8") <= 512 * 1024);
+});
+
+test("runtime container wire budgeting handles empty, single and grouped withheld pages", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("wire-budget-boundaries");
+  const row = (raw, index = 0) => ({
+    raw,
+    time: new Date(Date.now() - 1000 + index).toISOString(),
+  });
+  for (const lines of [
+    [],
+    [
+      row(
+        JSON.stringify({
+          level: "info",
+          subsystem: "gateway",
+          message: `single 网络🙂 ${'--option="value" '.repeat(500)}`,
+        }),
+      ),
+    ],
+  ]) {
+    fixture.computeDriver.state.lines = lines;
+    const response = await fixture.request("GET", target.logsPath("source=gateway&tailLines=200"));
+    assert.equal(response.status, 200);
+    assert.equal(response.data.truncated, false);
+    assert.equal(response.data.records.filter(({ type }) => type === "line").length, lines.length);
+    assert.ok(Buffer.byteLength(response.text, "utf8") <= 512 * 1024);
+  }
+  fixture.computeDriver.state.lines = Array.from({ length: 80 }, (_, index) =>
+    row(JSON.stringify({ ordinary_metadata: "diagnostic ".repeat(900) }), index),
+  );
+  const withheld = await fixture.request("GET", target.logsPath("source=gateway&tailLines=200"));
+  assert.equal(withheld.status, 200);
+  assert.equal(
+    withheld.data.truncated,
+    false,
+    "a compact withheld run fits even when its input is large",
+  );
+  assert.equal(withheld.data.withheld, 80);
+  assert.equal(withheld.data.records[0].count, 80);
+  assert.ok(Buffer.byteLength(withheld.text, "utf8") <= 512 * 1024);
+  const replay = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&cursor=${withheld.data.cursor}`),
+  );
+  assert.deepEqual(replay.data.records, []);
 });

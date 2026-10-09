@@ -138,7 +138,13 @@ only when it holds fewer than 16 hashes. A page byte cut keeps the count, so
 undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 `window_exceeded`, `cursor_expired` or `truncated` gaps, and passes the rest to
 `runtime-logs/sanitize.ts:sanitizeRuntimeLogChunk`, the only producer of
-`SanitizedRuntimeLogRecord`. It classifies the whole page first, so
+`SanitizedRuntimeLogRecord`. `page-budget.ts` measures the complete serialized
+page, signed cursor and the API data/request-ID frame against 512 KiB. A full
+candidate is tried first; an oversized page uses bounded raw-prefix builds.
+They reuse the admitted read and fixed timestamps, without another Driver read
+or audit. Each candidate derives sanitization, masking context and cursor state
+from its delivered prefix. The result fits; maximum filling is not promised.
+Sandbox pages use the same budget helper. It classifies the whole page first, so
 `runtime-logs/redact.ts:maskPemBlockLines` can mask a PEM block whose BEGIN,
 body and END lines arrive as separate plain-text lines.
 
@@ -245,6 +251,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 01:14: Enforce the serialized runtime-log response limit for container and Sandbox pages, including cursors and the API frame. (authoring-run/018d11d8-3699-4e97-945b-c2cfd3088412 - 243b38ba6d951240065e5061e1e4abccdb44410c)
 
 - 2026-10-10 00:04: Normalize supported kubelet timestamp offsets without losing nanoseconds, so classification and cursor overlap use the raw message and UTC time. (authoring-run/e25eab96-1110-45ec-b677-916a98b34613 - ba3686748ddf56052dc2717cc2ce6eaa3710c1f0)
 

@@ -26,12 +26,12 @@ import {
   type SanitizedRuntimeLogRecord,
 } from "./sanitize.ts";
 
+import { boundedRuntimeLogPage } from "./page-budget.ts";
+
 const SANDBOX_NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
 const SANDBOX_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const MAX_FIELDS_PER_LINE = 64;
-const MAX_PAGE_BYTES = 512 * 1024;
-const MAX_LINE_BYTES_COUNTED = 8 * 1024;
 
 /** Fixed notice for loss the API cannot observe (AL2). */
 export const SANDBOX_LOG_RETENTION =
@@ -100,14 +100,6 @@ export function sandboxLogLineHash(line: Readonly<SandboxLogLine>): string {
   return runtimeLogLineHash(
     JSON.stringify([line.time, line.level, line.target, line.message, line.source, fields]),
   );
-}
-
-function lineBytes(line: Readonly<SandboxLogLine>): number {
-  let size = Buffer.byteLength(line.message, "utf8") + Buffer.byteLength(line.target, "utf8");
-  for (const [key, value] of Object.entries(line.fields)) {
-    size += key.length + Buffer.byteLength(value, "utf8");
-  }
-  return Math.min(size, MAX_LINE_BYTES_COUNTED) + 256;
 }
 
 export interface ReadSandboxLogPageInput {
@@ -309,58 +301,53 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
       );
     }
   }
-  let pageBytes = 0;
-  let pageCut = false;
-  const delivered: SandboxLogLine[] = [];
-  for (const line of lines) {
-    pageBytes += lineBytes(line);
-    if (pageBytes > MAX_PAGE_BYTES) {
-      pageCut = true;
-      break;
-    }
-    delivered.push(line);
-  }
-  const sanitized = sanitizeSandboxLogLines(stream, delivered);
-  const window = overlapWindow(
-    [
-      ...carried,
-      ...matched,
-      ...delivered
-        .filter((line) => line.time !== null)
-        .map((line) => ({ time: line.time!, hash: sandboxLogLineHash(line) })),
-    ],
-    // A view's first page floors the resume time at its requested window start, so a
-    // cursor poll without `sinceSeconds` (after an empty page) reads nothing older.
-    gapFloor ?? (continuing ? resume.lastTime : (sinceTime ?? null)),
-  );
-  const records = [
-    ...leading,
-    ...sanitized.records,
-    ...(window.overflow === null
-      ? []
-      : [runtimeLogGap("window_exceeded", stream, window.overflow)]),
-    ...(pageCut ? [runtimeLogGap("truncated", stream, delivered.at(-1)?.time ?? null)] : []),
-  ];
-  // The cursor reuses the container position shape: `pod` holds the Sandbox name and
-  // `podUid` the Sandbox object ID the source reported.
-  const position: RuntimeLogCursorPosition = {
-    viewId,
-    pod: chunk.sandbox,
-    podUid: sandboxId,
-    restartCount: 0,
-    previous: false,
-    lastTime: window.since,
-    lastHashes: window.hashes,
-    issuedAt: now(),
-  };
-  return Object.freeze({
-    revisionId: description.revisionId,
-    source: "sandbox",
-    stream: Object.freeze(stream),
-    observedAt: new Date(now()).toISOString(),
-    records: Object.freeze(records),
-    withheld: sanitized.withheld,
-    truncated: pageCut,
-    cursor: codec.encode(binding, position),
+  const issuedAt = now();
+  const observedAt = new Date(issuedAt).toISOString();
+  return boundedRuntimeLogPage(lines.length, (end) => {
+    const delivered = lines.slice(0, end);
+    const pageCut = end < lines.length;
+    const sanitized = sanitizeSandboxLogLines(stream, delivered);
+    const window = overlapWindow(
+      [
+        ...carried,
+        ...matched,
+        ...delivered
+          .filter((line) => line.time !== null)
+          .map((line) => ({ time: line.time!, hash: sandboxLogLineHash(line) })),
+      ],
+      // A view's first page floors the resume time at its requested window start, so a
+      // cursor poll without `sinceSeconds` (after an empty page) reads nothing older.
+      gapFloor ?? (continuing ? resume.lastTime : (sinceTime ?? null)),
+    );
+    const records = [
+      ...leading,
+      ...sanitized.records,
+      ...(window.overflow === null
+        ? []
+        : [runtimeLogGap("window_exceeded", stream, window.overflow)]),
+      ...(pageCut ? [runtimeLogGap("truncated", stream, delivered.at(-1)?.time ?? null)] : []),
+    ];
+    // The cursor reuses the container position shape: `pod` holds the Sandbox name and
+    // `podUid` the Sandbox object ID the source reported.
+    const position: RuntimeLogCursorPosition = {
+      viewId,
+      pod: chunk.sandbox,
+      podUid: sandboxId,
+      restartCount: 0,
+      previous: false,
+      lastTime: window.since,
+      lastHashes: window.hashes,
+      issuedAt,
+    };
+    return Object.freeze({
+      revisionId: description.revisionId,
+      source: "sandbox",
+      stream: Object.freeze(stream),
+      observedAt,
+      records: Object.freeze(records),
+      withheld: sanitized.withheld,
+      truncated: pageCut,
+      cursor: codec.encode(binding, position),
+    });
   });
 }
