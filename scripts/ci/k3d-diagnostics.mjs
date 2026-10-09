@@ -302,6 +302,7 @@ export async function captureK3dDiagnostics({ execFile, cluster, lane, statePath
 
 const AGENT_POD_SELECTOR = "app.kubernetes.io/managed-by=openclaw-enterprise";
 const WATCH_SECONDS = 3 * 60 * 60;
+const WATCH_START_TIMEOUT_MS = 10_000;
 const MAX_WATCH_BYTES = 32 * 1024 * 1024;
 const MAX_ACTIVITY_RECORDS = 200;
 const MAX_ACTIVITY_FILES = 40;
@@ -583,6 +584,25 @@ async function stopWatch(child) {
   clearTimeout(timer);
 }
 
+async function waitForInitialWatch(child, path) {
+  const deadline = Date.now() + WATCH_START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+      throw new Error("Agent namespace watch could not start.");
+    }
+    for (const { type, object } of watchLines(await readWatchTail(path))) {
+      if (
+        type === "BOOKMARK" &&
+        object.metadata.annotations?.["k8s.io/initial-events-end"] === "true"
+      ) {
+        return;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Agent namespace watch startup timed out.");
+}
+
 /**
  * Watches Agent Pods and Kubernetes events in each prepared k3d cluster while
  * one test file runs. Tests delete their namespaces, and their events with
@@ -619,6 +639,15 @@ export async function startAgentNamespaceCapture({ statePath, lane, file }) {
     return undefined;
   }
   const watches = [];
+  const discard = async (watch) => {
+    const started = [...watches, watch];
+    await Promise.all(started.flatMap((entry) => entry.children).map(stopWatch));
+    await Promise.all(
+      started
+        .flatMap((entry) => Object.values(entry.paths))
+        .map((path) => rm(path, { force: true })),
+    );
+  };
   for (const cluster of clusters) {
     const kubectl = cluster.kubectl ?? process.env.OCC_KUBECTL_BIN ?? "kubectl";
     const scope = ["--kubeconfig", cluster.kubeconfig, "--context", cluster.context];
@@ -633,6 +662,7 @@ export async function startAgentNamespaceCapture({ statePath, lane, file }) {
         kind === "pods"
           ? `/api/v1/pods?watch=true&timeoutSeconds=${WATCH_SECONDS}&labelSelector=${encodeURIComponent(AGENT_POD_SELECTOR)}`
           : `/api/v1/events?watch=true&timeoutSeconds=${WATCH_SECONDS}`;
+      const initialQuery = `${query}&sendInitialEvents=true&allowWatchBookmarks=true&resourceVersionMatch=NotOlderThan`;
       // The raw watch streams one JSON object per line straight to the cluster's
       // private directory, which cleanup removes; only the projection is kept.
       let output;
@@ -642,23 +672,26 @@ export async function startAgentNamespaceCapture({ statePath, lane, file }) {
         // The caller gets no finish to call: stop the watches already started, whose
         // running child processes would otherwise keep the runner alive, and drop
         // their streams.
-        const started = [...watches, { paths, children }];
-        await Promise.all(started.flatMap((watch) => watch.children).map(stopWatch));
-        await Promise.all(
-          started
-            .flatMap((watch) => Object.values(watch.paths))
-            .map((stream) => rm(stream, { force: true })),
-        );
+        await discard({ paths, children });
         throw error;
       }
+      let child;
       try {
-        const child = spawn(kubectl, [...scope, "get", "--raw", query], {
+        child = spawn(kubectl, [...scope, "get", "--raw", initialQuery], {
           stdio: ["ignore", output.fd, "ignore"],
         });
         child.on("error", () => {});
         children.push(child);
       } finally {
         await output.close();
+      }
+      try {
+        // Do not start the test until both streams have delivered their initial state.
+        // A spawned kubectl can still be connecting while a short-lived Pod disappears.
+        await waitForInitialWatch(child, path);
+      } catch (error) {
+        await discard({ paths, children });
+        throw error;
       }
     }
     watches.push({ cluster, paths, children });
