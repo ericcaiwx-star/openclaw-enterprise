@@ -10,6 +10,27 @@ you run now, then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-09: Dedicated Codex deployment requires the main Agent
+
+**What breaks.** Since #PRNUM, Kubernetes Compute refuses to deploy a dedicated
+Codex Agent whose Configuration names no `main` Agent: an `agents.entries`
+roster without a `main` entry, or `agents.defaults.sessionStore.agentId` or
+`agents.defaults.systemAgent.agentId` set to another Agent. These are the rules
+dedicated OpenClaw already had. The `400` names the setting, for example
+`Dedicated Codex serves the main Agent: add agents.entries.main, or rename an entry to main.`
+Such an Agent used to deploy, but its Gateway serves the Harness workspace only
+to `main`, so workspace file reads and writes answered `503`.
+
+**Who is affected.** Dedicated Codex Agents whose Configuration has such a
+roster. No bundled Preset produces one. Running revisions keep running; the
+next deployment is refused. Embedded OpenClaw and SSH Compute are unchanged.
+
+**How to tell.** On the Agent's workspace files page, reads and saves fail with
+`503`, and its Configuration has `agents.entries` without `main`.
+
+**Steps.** Rename the entry to `main` (or add `agents.entries.main`), save the
+Configuration, and deploy the Agent again. _untested_
+
 ## 2026-10-09: Configuration save refuses Agent rosters every deployment refuses
 
 **What breaks.** Since #1959, Configuration create and update

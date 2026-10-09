@@ -5992,54 +5992,76 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
       defaults: { ...revision.configuration.agents.defaults, ...defaults },
     },
   });
-  // Each refusal names the setting and the rule it breaks (finding 885).
-  const ownerRefusal = (owner) =>
-    `Dedicated OpenClaw serves the main Agent: set agents.defaults.${owner}.agentId to main, or remove it.`;
-  for (const [agents, message] of [
-    [
-      { entries: { helper: { workspace: "/home/node/helper" } } },
-      "Dedicated OpenClaw serves the main Agent: add agents.entries.main, or rename an entry to main.",
-    ],
-    // OpenClaw's schema admits a leading underscore, but it is not a canonical id.
-    [
-      { ownership: "explicit", entries: { main: {}, _main: {} } },
-      "Dedicated OpenClaw rejects the Agent ID in agents.entries._main: use up to 64 letters, digits, _ or -, starting with a letter or digit.",
-    ],
-    [
-      {
-        ownership: "explicit",
-        entries: { main: {}, helper: {} },
-        defaults: { sessionStore: { agentId: "helper" } },
-      },
-      ownerRefusal("sessionStore"),
-    ],
-    [
-      {
-        ownership: "explicit",
-        entries: { main: {}, helper: {} },
-        defaults: { systemAgent: { agentId: "helper" } },
-      },
-      ownerRefusal("systemAgent"),
-    ],
+  const codexConfiguration = admitLoggingConfiguration(
+    createHarnessConfiguration("codex", "gpt-5"),
+    "info",
+  );
+  const codexHarness = { id: "codex", version: "1.0.0", mode: "dedicated" };
+  const withCodexAgents = ({ defaults, ...agents }) => ({
+    ...codexConfiguration,
+    agents: {
+      ...codexConfiguration.agents,
+      ...agents,
+      defaults: { ...codexConfiguration.agents.defaults, ...defaults },
+    },
+  });
+  // A dedicated Codex Gateway binds only main to its Harness workspace node, so a sole
+  // non-main Agent would read and write the Gateway's own empty directory (finding 969).
+  for (const [harness, configure, topology] of [
+    [revision.harness, withAgents, "Dedicated OpenClaw"],
+    [codexHarness, withCodexAgents, "Dedicated Codex"],
   ]) {
-    assert.throws(
-      () => driver.validateHarnessAuth(revision.harness, revision.harnessAuth, withAgents(agents)),
-      (error) => error instanceof ConfigurationHarnessError && error.message === message,
-      JSON.stringify(agents),
+    // Each refusal names the setting and the rule it breaks (finding 885).
+    const ownerRefusal = (owner) =>
+      `${topology} serves the main Agent: set agents.defaults.${owner}.agentId to main, or remove it.`;
+    for (const [agents, message] of [
+      [
+        { entries: { helper: { workspace: "/home/node/helper" } } },
+        `${topology} serves the main Agent: add agents.entries.main, or rename an entry to main.`,
+      ],
+      // OpenClaw's schema admits a leading underscore, but it is not a canonical id.
+      [
+        { ownership: "explicit", entries: { main: {}, _main: {} } },
+        `${topology} rejects the Agent ID in agents.entries._main: use up to 64 letters, digits, _ or -, starting with a letter or digit.`,
+      ],
+      [
+        {
+          ownership: "explicit",
+          entries: { main: {}, helper: {} },
+          defaults: { sessionStore: { agentId: "helper" } },
+        },
+        ownerRefusal("sessionStore"),
+      ],
+      [
+        {
+          ownership: "explicit",
+          entries: { main: {}, helper: {} },
+          defaults: { systemAgent: { agentId: "helper" } },
+        },
+        ownerRefusal("systemAgent"),
+      ],
+    ]) {
+      assert.throws(
+        () => driver.validateHarnessAuth(harness, revision.harnessAuth, configure(agents)),
+        (error) => error instanceof ConfigurationHarnessError && error.message === message,
+        `${topology} ${JSON.stringify(agents)}`,
+      );
+    }
+    // main in any case, as OpenClaw matches it, satisfies every rule.
+    assert.doesNotThrow(
+      () =>
+        driver.validateHarnessAuth(
+          harness,
+          revision.harnessAuth,
+          configure({
+            ownership: "explicit",
+            entries: { Main: {}, helper: {} },
+            defaults: { sessionStore: { agentId: "MAIN" }, systemAgent: { agentId: "main" } },
+          }),
+        ),
+      topology,
     );
   }
-  // main in any case, as OpenClaw matches it, satisfies every rule.
-  assert.doesNotThrow(() =>
-    driver.validateHarnessAuth(
-      revision.harness,
-      revision.harnessAuth,
-      withAgents({
-        ownership: "explicit",
-        entries: { Main: {}, helper: {} },
-        defaults: { sessionStore: { agentId: "MAIN" }, systemAgent: { agentId: "main" } },
-      }),
-    ),
-  );
   // A stored revision re-prepared after this check reports the refusal, not a generic failure.
   let refusal;
   try {
@@ -6060,20 +6082,11 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
   // OpenClaw's config validation rejects retired roster shapes, and its Gateway then exits at
   // startup (EX_CONFIG 78) instead of serving, so admission refuses them up front. Embedded
   // OpenClaw and dedicated Codex run the same Gateway on the admitted document.
-  const codexConfiguration = admitLoggingConfiguration(
-    createHarnessConfiguration("codex", "gpt-5"),
-    "info",
-  );
+  const embeddedHarness = { ...revision.harness, mode: "embedded" };
   const topologies = [
     [revision.harness, withAgents],
-    [{ ...revision.harness, mode: "embedded" }, withAgents],
-    [
-      { id: "codex", version: "1.0.0", mode: "dedicated" },
-      (agents) => ({
-        ...codexConfiguration,
-        agents: { ...codexConfiguration.agents, ...agents },
-      }),
-    ],
+    [embeddedHarness, withAgents],
+    [codexHarness, withCodexAgents],
   ];
   // Each refusal names the setting and the rule that matched.
   const listRefusal =
@@ -6198,23 +6211,22 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
       `${harness.mode} ${harness.id} long key`,
     );
   }
-  // Only dedicated OpenClaw serves main; the other topologies keep any valid roster.
-  for (const [harness, configure] of topologies.slice(1)) {
-    for (const agents of [
-      { entries: { helper: {} } },
-      { list: [] },
-      { ownership: "explicit", entries: { helper: {}, reviewer: {} } },
-      { entries: { _helper: {} } },
-      { entries: { "9lives": {} } },
-      { entries: { ["a".repeat(64)]: {} } },
-      { ownership: "explicit", entries: { Main: {}, helper_2: {}, "re-viewer": {} } },
-      { ownership: "explicit", entries: { x: {}, "x-": {}, _x: {}, "_-x": {} } },
-    ]) {
-      assert.doesNotThrow(
-        () => driver.validateHarnessAuth(harness, apiKeyAuth, configure(agents)),
-        `${harness.mode} ${harness.id} ${JSON.stringify(agents)}`,
-      );
-    }
+  // Only dedicated execution serves main; embedded OpenClaw keeps any valid roster and follows
+  // its Gateway's sole default Agent for workspace files.
+  for (const agents of [
+    { entries: { helper: {} } },
+    { list: [] },
+    { ownership: "explicit", entries: { helper: {}, reviewer: {} } },
+    { entries: { _helper: {} } },
+    { entries: { "9lives": {} } },
+    { entries: { ["a".repeat(64)]: {} } },
+    { ownership: "explicit", entries: { Main: {}, helper_2: {}, "re-viewer": {} } },
+    { ownership: "explicit", entries: { x: {}, "x-": {}, _x: {}, "_-x": {} } },
+  ]) {
+    assert.doesNotThrow(
+      () => driver.validateHarnessAuth(embeddedHarness, apiKeyAuth, withAgents(agents)),
+      JSON.stringify(agents),
+    );
   }
   const ownership = { namespaceId: tenant.id, agentId };
   const nativeInference = {

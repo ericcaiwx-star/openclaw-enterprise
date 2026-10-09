@@ -1,7 +1,7 @@
 ---
 created: 2026-08-31
 updated: 2026-10-10
-last_updated_session: authoring-run/20e38f57-7665-4641-bd09-f3a162733d69
+last_updated_session: fix-969
 ---
 
 # Agent Workspace Files Flow
@@ -296,7 +296,12 @@ hello grants `operator.admin`; reads also accept `operator.read`.
 `gateway/workspace-files-client.ts:requestNativeWorkspaceFile` uses Hello's
 `sessionDefaults.defaultAgentId` when embedded OpenClaw composition opts in and native ownership
 is `sole` with `selectionRequired: false`. Other rosters retain the explicit
-`main` target; other callers retain their explicit targets. No roster RPC or
+`main` target; other callers retain their explicit targets. A dedicated Codex
+Gateway binds only `main` to its Harness workspace node
+(`kubernetes/runtime-entrypoints.ts:configureWorkspaceNodePlugins`), so another
+default Agent would read the Gateway's own empty directory. Kubernetes deployment
+therefore applies dedicated OpenClaw's `main` Agent rules to dedicated Codex too
+(`kubernetes/index.ts:requireDedicatedMainAgentDefault`). No roster RPC or
 additional scope is required. The same client invokes `agents.files.get` or
 `agents.files.set`. Reads enforce the response content limit and return
 `{ name, content }`; writes return `{ name, size }`. There is no list, delete,
@@ -349,6 +354,8 @@ replays it. The native client closes in the operation's cleanup path.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-09 19:20: Dedicated Codex deployment refuses a roster without `main`, which its workspace node serves. (fix-969, finding 969)
 
 - 2026-10-10 01:26: Follow embedded sole-roster Hello metadata while retaining explicit and dedicated targets. (authoring-run/20e38f57-7665-4641-bd09-f3a162733d69 - 5d3c6ac0ca3dc5ab3a6ffc46de8f054da3f7df2d)
 
