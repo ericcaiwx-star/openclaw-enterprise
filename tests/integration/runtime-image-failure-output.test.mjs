@@ -35,12 +35,17 @@ await chmod(fakeDocker, 0o700);
 // The helper reads both at import.
 process.env.OCC_DOCKER_BIN = fakeDocker;
 process.env.OCC_TEST_RUNTIME_IMAGE = "localhost/oce/runtime:failure-output-test";
-const { outputTail, runGatewaySmoke } = await import("../helpers/runtime-image-startup.mjs");
+const { failureTail, runGatewaySmoke } = await import("../helpers/runtime-image-startup.mjs");
 
-test("outputTail keeps short output and the end of long output", () => {
-  assert.equal(outputTail("short output", 64), "short output");
+test("failureTail keeps short output and the end of long output from a line start", () => {
+  assert.equal(failureTail("short output", 64), "short output");
   const output = `${"a".repeat(100)}${"b".repeat(20)}`;
-  assert.equal(outputTail(output, 20), `[... 100 earlier chars omitted ...]\n${"b".repeat(20)}`);
+  assert.equal(failureTail(output, 20), `[... 100 earlier chars omitted ...]\n${"b".repeat(20)}`);
+  // A line cut by the limit is dropped, so a cut value never reaches the message.
+  assert.equal(
+    failureTail("first line\npartial secret value\nlast line\n", 25),
+    "[... 32 earlier chars omitted ...]\nlast line\n",
+  );
 });
 
 test("a Gateway smoke failure with over 16 KiB of logs keeps their final lines within the CI cut", async (t) => {
@@ -56,7 +61,7 @@ test("a Gateway smoke failure with over 16 KiB of logs keeps their final lines w
   assert.match(reported, /\[\.\.\. \d+ earlier chars omitted \.\.\.\]/);
   assert.doesNotMatch(reported, /first doctor line/);
   assert.ok(
-    error.message.length <= reporterMessageLimit,
+    error.message.length < reporterMessageLimit,
     `message is ${error.message.length} chars`,
   );
 });
