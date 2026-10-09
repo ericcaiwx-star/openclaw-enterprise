@@ -30,6 +30,7 @@ import {
   waitForDockerLog,
   createAdmittedRuntimeImageConfiguration,
   jsonLogEntries,
+  outputTail,
   runGatewaySmoke,
   temporaryGatewayConfiguration,
 } from "../helpers/runtime-image-startup.mjs";
@@ -287,7 +288,7 @@ async function startupProbeEvidence(scenario, snapshot, loop) {
 function startupProbeFailure(headline, reason, evidence, snapshot) {
   const error = new assert.AssertionError({
     message:
-      `${headline}\nevidence: ${JSON.stringify(evidence)}\n${snapshot.output}\n` +
+      `${headline}\nevidence: ${JSON.stringify(evidence)}\n${outputTail(snapshot.output)}\n` +
       JSON.stringify(snapshot.events),
   });
   // Locate the failure at the caller's throw, not inside this helper.
@@ -487,7 +488,7 @@ const heldFailure =
 // stand-in provider should not cause fails on its own line.
 function assertStartupReady(run) {
   const failure = run.snapshot.events.find(isRuntimeFailure)?.value;
-  const detail = `${run.snapshot.output}\n${JSON.stringify(run.snapshot.events)}`;
+  const detail = `${outputTail(run.snapshot.output)}\n${JSON.stringify(run.snapshot.events)}`;
   if (failure === "MODEL_PROBE_TIMEOUT") {
     assert.fail(`the model probe timed out\n${detail}`);
   }
@@ -533,7 +534,7 @@ async function withStartupProbeEvidence(run, check) {
     // Keep the original error, and so its location, which is all CI records.
     const evidence =
       `\nendpoint events:\n${run.snapshot.events.map((event) => JSON.stringify(event)).join("\n")}` +
-      `\nwrapper output:\n${run.snapshot.output}`;
+      `\nwrapper output:\n${outputTail(run.snapshot.output)}`;
     error.message += evidence;
     if (typeof error.stack === "string") {
       error.stack += evidence;
@@ -678,7 +679,7 @@ async function assertPromptTermination(t, { containerName, collect }, descriptio
   );
   if (state.running) {
     assert.fail(
-      `${description}: SIGTERM did not stop the wrapper in ${elapsedMs} ms.\n${state.output}`,
+      `${description}: SIGTERM did not stop the wrapper in ${elapsedMs} ms.\n${outputTail(state.output)}`,
     );
   }
   // A terminated wrapper exits cleanly in every phase, as it does once running.

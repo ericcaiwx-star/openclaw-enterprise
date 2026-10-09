@@ -55,11 +55,24 @@ export async function waitForDockerLog(containerName, pattern) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`Timed out waiting for ${pattern} in ${containerName} logs.
-${output}`);
+${outputTail(output)}`);
 }
 
 export function commandOutput(error) {
   return `${error.stdout ?? ""}\n${error.stderr ?? ""}`;
+}
+
+// CI keeps only the first 16 KiB of a failure message (scripts/ci/reporter.mjs),
+// so a whole container log in an error loses its end: the wrapper's stderr and
+// the actual failure (finding 976 misread a cut log as a Doctor stall). Errors
+// carry the last `limit` characters of process output instead.
+export const failureOutputLimit = 12 * 1024;
+
+export function outputTail(output, limit = failureOutputLimit) {
+  if (output.length <= limit) {
+    return output;
+  }
+  return `[... ${output.length - limit} earlier chars omitted ...]\n${output.slice(-limit)}`;
 }
 
 export async function temporaryGatewayConfiguration(t, harnessId) {
@@ -129,7 +142,7 @@ export async function waitForGatewayReady(containerName, readinessAttempts = 60)
       "-e",
       'fetch("http://127.0.0.1:8080/readyz").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1));',
     ]).catch((error) => {
-      lastReadinessOutput = commandOutput(error);
+      lastReadinessOutput = outputTail(commandOutput(error), 2048);
       return undefined;
     });
     if (ready !== undefined) {
@@ -154,9 +167,10 @@ export async function listGatewayPlugins(containerName) {
   try {
     return JSON.parse(stdout);
   } catch (error) {
-    throw new Error(`OpenClaw plugin list output was not valid JSON.\n${stdout}`, {
-      cause: error,
-    });
+    throw new Error(
+      `OpenClaw plugin list output was not valid JSON.\n${outputTail(stdout, 2048)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -251,7 +265,7 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
     };
   } catch (error) {
     const logs = await runDocker(["logs", containerName]).catch((logsError) => logsError);
-    throw new Error(`${error.message}\n${commandOutput(logs)}`, { cause: error });
+    throw new Error(`${error.message}\n${outputTail(commandOutput(logs))}`, { cause: error });
   }
 }
 
