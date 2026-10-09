@@ -92,6 +92,12 @@ volume root is never their runtime temp root.
 
 OCE disables OpenClaw automatic package updates in the Gateway and workspace
 node; runtime upgrades use the operator-selected image and ordinary redeployment.
+State on this claim outlives those upgrades. Before OpenClaw starts, the Gateway
+wrapper runs `openclaw doctor --fix --non-interactive` once, with the
+configuration read-only, when an agent database uses an older schema than the
+pinned OpenClaw; Doctor keeps a `.pre-startup-migration-<id>.bak` copy beside
+it. A database still older afterwards holds the Gateway unready with check
+`state-migration` (`RUNTIME_STARTUP_FAILED`).
 
 ## Harness storage
 

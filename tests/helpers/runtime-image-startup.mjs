@@ -108,9 +108,9 @@ export function createAdmittedRuntimeImageConfiguration(harnessId, options = {})
   );
 }
 
-export async function waitForGatewayReady(containerName) {
+export async function waitForGatewayReady(containerName, readinessAttempts = 60) {
   let lastReadinessOutput = "";
-  for (let attempt = 0; attempt < 60 * imageSmokeTimeoutMultiplier; attempt += 1) {
+  for (let attempt = 0; attempt < readinessAttempts * imageSmokeTimeoutMultiplier; attempt += 1) {
     const inspect = await runDocker([
       "inspect",
       containerName,
@@ -183,6 +183,7 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
     configurationPath,
     entrypoint = DOCKER_GATEWAY_RUNTIME_ENTRYPOINT,
     extraEnvironment = [],
+    readinessAttempts,
     tmpfs = ["/home/node:size=1024m,uid=1000,gid=1000,mode=700"],
     volumes = [],
     waitUntilReady = true,
@@ -240,7 +241,7 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
   }
 
   try {
-    await waitForGatewayReady(containerName);
+    await waitForGatewayReady(containerName, readinessAttempts);
     const pluginList = collectPlugins ? await listGatewayPlugins(containerName) : undefined;
     const logs = await runDocker(["logs", containerName]);
     return {
