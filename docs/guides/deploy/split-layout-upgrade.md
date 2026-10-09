@@ -58,7 +58,11 @@ are passed through).
    It records each step on the `oce-gateways-*` namespace, so running it again
    after any failure continues. Until step 4 starts the new release,
    `revert --archive /secure/occ/adopt --yes` restores the old layout and
-   restarts OCC. Keep the archive directory: it holds the old routes.
+   restarts OCC. With `--namespace-id`, revert restores only those tenants and
+   restarts the old API; the worker stays stopped until the rest are reverted
+   or the new release starts. Keep the archive directory: it holds the old
+   routes. Adopt every tenant before the upgrade: once the controller runs
+   other images, `apply` refuses.
 
    `apply` returns once the old API serves. Use it only for the upgrade
    helper: requests that touch an adopted tenant's Secrets, Configurations or
