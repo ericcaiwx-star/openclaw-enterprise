@@ -12,7 +12,7 @@ real Installation.
 
 ## 2026-10-09: refresh-token source updates need a new Secret
 
-**What breaks.** Since #PRNUM, `PATCH` on an `oauth2-refresh-token` credential
+**What breaks.** Since #2016, `PATCH` on an `oauth2-refresh-token` credential
 source answers `409` when it keeps the recorded `refresh_token` Secret. That
 includes `{}` and `occ credential-source update ID` without `--file`, which the
 docs used to suggest after a failed update. The issuer may have replaced the
