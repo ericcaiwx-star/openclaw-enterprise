@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/2cbbcc37-919d-41ec-bdab-51aa836d92b7
+last_updated_session: authoring-run/b68ecd62-c0d7-4fbf-82ee-0f440d8ae84c
 ---
 
 # Agent runtime logs flow
@@ -11,8 +11,8 @@ last_updated_session: authoring-run/2cbbcc37-919d-41ec-bdab-51aa836d92b7
 An authorized reader requests Pod status or one page of container output for an
 admitted Agent revision. OpenClaw Control Plane (OCC) authorizes the exact target,
 asks the selected Compute Driver for raw Kubernetes data, and returns only
-classified, redacted, bounded records. Nothing is stored on the server; a
-download is a local file on the reader's device.
+classified, redacted, bounded records. OCC does not persist logs; downloads
+stay on the reader's device.
 
 ## Entry Points
 
@@ -141,8 +141,7 @@ undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 `runtime-logs/sanitize.ts:sanitizeRuntimeLogChunk`, the only producer of
 `SanitizedRuntimeLogRecord`. `page-budget.ts` measures the serialized page,
 signed cursor and API request-ID envelope against 512 KiB. It tries the full
-page, then bounded prefix builds. Builds reuse the admitted read and fixed
-clocks, deriving sanitization, masking and cursor state from each raw prefix
+page, then bounded prefix builds. Builds reuse admission, read and clocks, deriving sanitization, masking and cursor state from each raw prefix
 without further Driver reads or audits. Fit is guaranteed; maximum filling is
 not. `maskPemBlockLines` masks separate BEGIN/body/END lines in the classified
 prefix. Sandbox pages share the budget helper.
@@ -180,14 +179,15 @@ batches them, and filters `since_time` by that stamp, so a resume sends a time
 `SANDBOX_LOG_OVERLAP_MS` (5 s) behind the newest delivered line; the cursor
 keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. A first page floors its resume time at the requested window start.
-A serialized cut stores an authenticated window digest, raw-prefix count and
-pre-cut overlap baseline. The same observed prefix drains before advancing,
-including untimed lines and timestamp groups larger than 48. Untimed snapshots
-retain progress after draining. Changed values, query tails or clipped-tail sizes
-emit an existing gap before a fresh snapshot; unchanged saturated replacement
-cannot be detected. A complete timed window returns to the existing overlap.
-Missing remembered lines emit `buffer_lost` or `window_exceeded`; over-capacity
-timestamp groups also emit `window_exceeded`. gRPC `NOT_FOUND` (absent
+Both readers checkpoint serialized cuts with an authenticated window digest,
+raw-prefix count, original query and pre-cut baseline. Stable windows drain
+before overlap advances, including untimed lines and over-capacity timestamp
+groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
+untimed snapshots retain replay progress. Container UID/restarts reset progress,
+and carried PEM state stays conservative. Complete timed windows resume normal
+overlap. Identical saturated replacements remain unobservable; full checkpoints
+report window gaps. Missing remembered lines or over-capacity timestamps also emit
+gaps. gRPC `NOT_FOUND` (absent
 Sandbox, or concealed from a non-member) maps to
 `RUNTIME_LOGS_SANDBOX_NOT_FOUND`, never to an empty page. Lines naming two
 Sandbox IDs are refused; a new Sandbox ID emits `stream_replaced`.
@@ -251,6 +251,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 03:05: Drain container windows across serialized cuts. (authoring-run/b68ecd62-c0d7-4fbf-82ee-0f440d8ae84c - 4e23a961fff52cb453a4114afc922278205d3fec)
 
 - 2026-10-10 02:53: Compose the response budget with current termination status. (authoring-run/2cbbcc37-919d-41ec-bdab-51aa836d92b7 - 880b645f5e5fb5c99c6046c1eac6ca81211be584)
 

@@ -189,7 +189,10 @@ A page never silently skips output; it labels each gap:
 
 Limits per request: 1000 lines, 1 MiB read from the cluster, 32 KiB per input
 line, 512 KiB per response (including JSON escaping, cursor and metadata),
-100 Events per Pod, 10 seconds overall. Continue with the returned cursor for
+100 Events per Pod, 10 seconds overall. A cut response retains progress through
+its observed rows, including untimed ones. Changed windows warn of skipped lines
+before a fresh snapshot; identical saturated replacement remains unobservable.
+Continue with the returned cursor for
 lines beyond a page limit. Each API
 replica allows each principal 2 requests per second per Agent with a burst of
 10 (`429` with `Retry-After`) and 16 concurrent reads (`503`). Both limits apply
@@ -231,10 +234,7 @@ RUNTIME_LOGS_POD_INVALID`).
   load are not reported.
 - Follow polls re-read a 5-second overlap and count up to 48 delivered lines.
   Later arrivals outside that history can be missed; over-capacity timestamp
-  groups show **Lines skipped**. A byte-cut page retains snapshot progress until
-  its suffix drains, including untimed lines. Changed windows or clipped-tail
-  sizes show **Sandbox buffer lost** or **Lines skipped** before a fresh snapshot.
-  Identical saturated-window replacement cannot be distinguished.
+  groups show **Lines skipped**.
 - OCC reads through the read-only `GetSandboxLogs` call. Its OpenShell identity
   needs the `sandbox:read` scope (otherwise `503 RUNTIME_LOGS_CLUSTER_RBAC`)
   and Workspace role `user`. OpenShell hides sandboxes outside the identity's

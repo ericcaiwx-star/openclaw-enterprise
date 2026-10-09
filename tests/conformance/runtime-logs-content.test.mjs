@@ -2122,3 +2122,253 @@ test("runtime container wire budgeting handles empty, single and grouped withhel
   );
   assert.deepEqual(replay.data.records, []);
 });
+
+function wireContainerRows(time, count = 60) {
+  return Array.from({ length: count }, (_, index) => ({
+    time,
+    raw: JSON.stringify({
+      level: "info",
+      subsystem: "gateway",
+      message: `row=${index}; diagnostic ${'--option="value" '.repeat(500)}`,
+    }),
+  }));
+}
+
+test("container byte-window checkpoints drain full same-time and untimed tails", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  for (const time of [new Date(Date.now() - 1000).toISOString(), null]) {
+    const fixture = await createRuntimeLogFixture();
+    const target = await fixture.deployAgent("container-window");
+    fixture.computeDriver.state.lines = wireContainerRows(time);
+    const seen = [];
+    let cursor;
+    let first;
+    for (let page = 0; page < 10; page += 1) {
+      const response = await fixture.request(
+        "GET",
+        target.logsPath(
+          `source=gateway&tailLines=60${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+        ),
+      );
+      assert.equal(response.status, 200);
+      assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+      const lines = response.data.records.filter(({ type }) => type === "line");
+      if (page === 0) {
+        first = lines.length;
+        assert.equal(response.data.truncated, true);
+      }
+      seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+      cursor = response.data.cursor;
+      if (!response.data.truncated) {
+        break;
+      }
+      assert.ok(lines.length > 0);
+    }
+    assert.ok(first > 16 && first < 60);
+    assert.deepEqual(
+      seen,
+      Array.from({ length: 60 }, (_, index) => index),
+    );
+    const replay = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=60&cursor=${cursor}`),
+    );
+    assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+  }
+});
+
+test("container byte-window changes expose a fresh snapshot and fitting untimed progress", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  for (const changed of ["value", "tail", "buffer"]) {
+    const fixture = await createRuntimeLogFixture();
+    const target = await fixture.deployAgent("container-window-change");
+    fixture.computeDriver.state.lines = wireContainerRows(null);
+    const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=60"));
+    assert.equal(first.data.truncated, true);
+    if (changed === "value") {
+      fixture.computeDriver.state.lines[59] = {
+        time: null,
+        raw: JSON.stringify({ level: "info", message: "changed suffix" }),
+      };
+    }
+    if (changed === "buffer") {
+      fixture.computeDriver.state.lines.splice(25);
+    }
+    const tail = changed === "tail" ? 25 : 60;
+    const next = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=${tail}&cursor=${first.data.cursor}`),
+    );
+    assert.equal(next.status, 200);
+    assert.ok(Buffer.byteLength(next.text) <= 512 * 1024);
+    assert.ok(
+      next.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+      changed,
+    );
+    assert.ok(
+      next.data.records.some(({ type }) => type === "line"),
+      changed,
+    );
+    if (changed !== "value") {
+      assert.equal(next.data.truncated, false);
+      const replay = await fixture.request(
+        "GET",
+        target.logsPath(`source=gateway&tailLines=${tail}&cursor=${next.data.cursor}`),
+      );
+      assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0, changed);
+    }
+  }
+});
+
+test("container byte-window checkpoints retain the pre-cut deduplication baseline", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("container-window-baseline");
+  const time = new Date(Date.now() - 1000).toISOString();
+  const anchor = { time, raw: JSON.stringify({ level: "info", message: "previous diagnostic" }) };
+  fixture.computeDriver.state.lines = [anchor];
+  const initial = await fixture.request("GET", target.logsPath("source=gateway&tailLines=100"));
+  fixture.computeDriver.state.lines = [
+    anchor,
+    ...wireContainerRows(new Date(Date.parse(time) + 1).toISOString()),
+  ];
+  let cursor = initial.data.cursor;
+  const seen = [];
+  for (let page = 0; page < 10; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=100&cursor=${cursor}`),
+    );
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    assert.ok(lines.every(({ message }) => message !== "previous diagnostic"));
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 60 }, (_, index) => index),
+  );
+});
+
+test("container byte-window progress does not cross UID or restart changes", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  for (const changed of ["uid", "restart"]) {
+    const fixture = await createRuntimeLogFixture();
+    const target = await fixture.deployAgent("container-window-instance");
+    fixture.computeDriver.state.lines = wireContainerRows(
+      new Date(Date.now() - 1000).toISOString(),
+    );
+    const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=60"));
+    assert.equal(first.data.truncated, true);
+    if (changed === "uid") {
+      fixture.computeDriver.state.podUid = randomUUID();
+    } else {
+      fixture.computeDriver.state.restartCount += 1;
+    }
+    const next = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=60&cursor=${first.data.cursor}`),
+    );
+    assert.equal(next.status, 200);
+    assert.ok(
+      next.data.records.some(({ type, reason }) => type === "gap" && reason === "stream_replaced"),
+    );
+    assert.ok(
+      next.data.records.some(
+        ({ type, message }) => type === "line" && message.startsWith("row=0;"),
+      ),
+    );
+  }
+});
+
+test("container changed byte-windows keep PEM masking conservative", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("container-window-pem");
+  const time = new Date(Date.now() - 1000).toISOString();
+  fixture.computeDriver.state.lines = wireContainerRows(time);
+  const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=60"));
+  assert.equal(first.data.truncated, true);
+  fixture.computeDriver.state.lines[30] = {
+    time,
+    raw: pemBegin,
+  };
+  fixture.computeDriver.state.lines[31] = {
+    time,
+    raw: syntheticPemTail,
+  };
+  const replacement = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=60&cursor=${first.data.cursor}`),
+  );
+  assert.equal(replacement.status, 200);
+  assert.ok(
+    replacement.data.records.some(
+      ({ type, reason }) => type === "gap" && reason === "window_exceeded",
+    ),
+  );
+  assertTailMasked(replacement.data);
+  fixture.computeDriver.state.lines = [
+    {
+      time: new Date(Date.parse(time) + 1).toISOString(),
+      raw: syntheticPemTail,
+    },
+  ];
+  const carried = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=60&cursor=${replacement.data.cursor}`),
+  );
+  assertTailMasked(carried.data);
+});
+
+test("container byte-window baselines reset when the Driver observes an instance change during read", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  for (const changed of ["uid", "restart"]) {
+    const fixture = await createRuntimeLogFixture();
+    const target = await fixture.deployAgent("container-window-reread");
+    const time = new Date(Date.now() - 1000).toISOString();
+    fixture.computeDriver.state.lines = [
+      {
+        time: new Date(Date.parse(time) + 100).toISOString(),
+        raw: JSON.stringify({ level: "info", message: "prior instance" }),
+      },
+    ];
+    const initial = await fixture.request("GET", target.logsPath("source=gateway&tailLines=60"));
+    fixture.computeDriver.state.lines = wireContainerRows(time);
+    if (changed === "uid") {
+      fixture.computeDriver.state.readPodUid = randomUUID();
+    } else {
+      fixture.computeDriver.state.readRestartCount = 1;
+    }
+    const replaced = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=60&cursor=${initial.data.cursor}`),
+    );
+    assert.equal(replaced.data.truncated, true);
+    assert.ok(
+      replaced.data.records.some(
+        ({ type, reason }) => type === "gap" && reason === "stream_replaced",
+      ),
+    );
+    if (changed === "uid") {
+      fixture.computeDriver.state.podUid = fixture.computeDriver.state.readPodUid;
+    } else {
+      fixture.computeDriver.state.restartCount = fixture.computeDriver.state.readRestartCount;
+    }
+    const rest = await fixture.request(
+      "GET",
+      target.logsPath(`source=gateway&tailLines=60&cursor=${replaced.data.cursor}`),
+    );
+    assert.equal(rest.status, 200);
+    const seen = [...replaced.data.records, ...rest.data.records]
+      .filter(({ type }) => type === "line")
+      .map(({ message }) => Number(/^row=(\d+);/.exec(message)[1]));
+    assert.deepEqual(
+      seen,
+      Array.from({ length: 60 }, (_, index) => index),
+    );
+  }
+});

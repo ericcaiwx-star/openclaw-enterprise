@@ -24,6 +24,19 @@ export interface SandboxLogWindowCheckpoint {
   readonly baseHashes: readonly string[];
 }
 
+export interface ContainerLogWindowCheckpoint {
+  readonly sinceTime: string | null;
+  readonly tailLines: number;
+  readonly count: number;
+  readonly seen: number;
+  readonly hash: string;
+  readonly truncated: boolean;
+  readonly baseTime: string | null;
+  readonly baseHashes: readonly string[];
+  readonly baseComplete: boolean;
+  readonly baseCount?: number;
+}
+
 export interface RuntimeLogCursorPosition {
   readonly viewId: string;
   readonly pod: string;
@@ -53,6 +66,8 @@ export interface RuntimeLogCursorPosition {
   readonly pemAfterTime?: string | null;
   /** Authenticated value-prefix progress while a Sandbox response is byte-cut. */
   readonly sandboxWindow?: SandboxLogWindowCheckpoint;
+  /** Authenticated raw-window progress while a container response is byte-cut. */
+  readonly containerWindow?: ContainerLogWindowCheckpoint;
   readonly issuedAt: number;
 }
 
@@ -145,6 +160,52 @@ function sandboxWindow(value: unknown): SandboxLogWindowCheckpoint | undefined {
   };
 }
 
+function containerWindow(value: unknown): ContainerLogWindowCheckpoint | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const window = value as Record<string, unknown>;
+  if (
+    (window.sinceTime !== null && !validRuntimeLogFrontierTime(window.sinceTime)) ||
+    (window.baseTime !== null && !validRuntimeLogFrontierTime(window.baseTime)) ||
+    !Number.isSafeInteger(window.tailLines) ||
+    (window.tailLines as number) < 1 ||
+    (window.tailLines as number) > 1000 ||
+    !Number.isSafeInteger(window.count) ||
+    (window.count as number) < 0 ||
+    !Number.isSafeInteger(window.seen) ||
+    (window.seen as number) < (window.count as number) ||
+    (window.seen as number) > 1001 ||
+    typeof window.hash !== "string" ||
+    !/^[A-Za-z0-9_-]{16}$/.test(window.hash) ||
+    typeof window.truncated !== "boolean" ||
+    typeof window.baseComplete !== "boolean" ||
+    !Array.isArray(window.baseHashes) ||
+    window.baseHashes.length > 16 ||
+    !window.baseHashes.every(
+      (hash) => typeof hash === "string" && /^[A-Za-z0-9_-]{16}$/.test(hash),
+    ) ||
+    (window.baseCount !== undefined &&
+      (!Number.isSafeInteger(window.baseCount) ||
+        (window.baseCount as number) < window.baseHashes.length ||
+        (window.baseTime === null && window.baseCount !== 0)))
+  ) {
+    return undefined;
+  }
+  return {
+    sinceTime: window.sinceTime as string | null,
+    tailLines: window.tailLines as number,
+    count: window.count as number,
+    seen: window.seen as number,
+    hash: window.hash,
+    truncated: window.truncated,
+    baseTime: window.baseTime as string | null,
+    baseHashes: window.baseHashes as string[],
+    baseComplete: window.baseComplete,
+    ...(window.baseCount === undefined ? {} : { baseCount: window.baseCount as number }),
+  };
+}
+
 function position(value: unknown): RuntimeLogCursorPosition | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -152,9 +213,11 @@ function position(value: unknown): RuntimeLogCursorPosition | undefined {
   const record = value as Record<string, unknown>;
   const hashes = record.h;
   const window = record.w === undefined ? undefined : sandboxWindow(record.w);
+  const container = record.cw === undefined ? undefined : containerWindow(record.cw);
   const hasPem = Object.hasOwn(record, "po") || Object.hasOwn(record, "pt");
   if (
     (record.w !== undefined && window === undefined) ||
+    (record.cw !== undefined && container === undefined) ||
     typeof record.v !== "string" ||
     typeof record.p !== "string" ||
     typeof record.u !== "string" ||
@@ -190,6 +253,7 @@ function position(value: unknown): RuntimeLogCursorPosition | undefined {
     lastHashes: hashes as string[],
     issuedAt: record.i as number,
     ...(window === undefined ? {} : { sandboxWindow: window }),
+    ...(container === undefined ? {} : { containerWindow: container }),
     ...(record.fc === undefined ? {} : { frontierComplete: record.fc as boolean }),
     ...(record.fn === undefined ? {} : { frontierCount: record.fn as number }),
     ...(hasPem ? { pemOpen: record.po as boolean, pemAfterTime: record.pt as string | null } : {}),
@@ -219,6 +283,7 @@ export function createRuntimeLogCursorCodec(secret: string): RuntimeLogCursorCod
           po: value.pemOpen,
           pt: value.pemAfterTime,
           w: value.sandboxWindow,
+          cw: value.containerWindow,
         }),
       ).toString("base64url");
       return `v1.${payload}.${mac(secret, payload)}`;
