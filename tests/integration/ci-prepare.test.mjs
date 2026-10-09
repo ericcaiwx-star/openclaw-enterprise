@@ -2149,6 +2149,21 @@ test("prepareLane rejects mutable Kubernetes image inputs before creating state"
         OCC_TEST_OPENSHELL_RUNTIME_CLASS: "runc",
       },
     },
+    {
+      lane: "openshell",
+      envName: "OCC_TEST_KEYCLOAK_IMAGE",
+      env: {
+        ...baseModelEnv,
+        ...k3dImages,
+        OCC_TEST_OPENSHELL_GATEWAY_IMAGE: immutableImage,
+        OCC_TEST_OPENSHELL_SANDBOX_IMAGE: immutableImage,
+        OCC_TEST_OPENSHELL_SUPERVISOR_IMAGE: immutableImage,
+        OCC_TEST_OPENSHELL_HELM: "helm",
+        OCC_TEST_OPENSHELL_HELM_CHART: "openshell-chart",
+        OCC_TEST_OPENSHELL_RUNTIME_CLASS: "runc",
+        OCC_TEST_KEYCLOAK_IMAGE: mutableImage,
+      },
+    },
   ];
 
   for (const [index, testCase] of cases.entries()) {
