@@ -46,6 +46,7 @@ export type PluginRuntimeSpec =
   | {
       readonly kind: "codex";
       readonly selections: PluginDesiredState;
+      readonly approvalPolicy?: string | undefined;
       readonly pluginApprovers?: AgentRevision["pluginApprovers"];
       readonly repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy;
     };
@@ -90,6 +91,7 @@ function pluginFreeRuntimeForRevision(
     return {
       kind: "codex",
       selections: {},
+      approvalPolicy: codexSessionApprovalPolicy(revision),
       ...(revision.pluginApprovers === undefined
         ? {}
         : { pluginApprovers: revision.pluginApprovers }),
@@ -131,6 +133,7 @@ export function pluginRuntimeSpecForRevision(
       ? {
           kind: "codex",
           selections: state.plugins,
+          approvalPolicy: codexSessionApprovalPolicy(revision),
           pluginApprovers: revision.pluginApprovers,
           ...(repositoryBrokerNetworkPolicy === undefined ? {} : { repositoryBrokerNetworkPolicy }),
         }
@@ -139,13 +142,42 @@ export function pluginRuntimeSpecForRevision(
   return runtime;
 }
 
+function codexSessionApprovalPolicy(revision: Readonly<AgentRevision>): string | undefined {
+  let value: unknown = revision.configuration;
+  for (const key of ["plugins", "entries", "codex", "config", "appServer", "approvalPolicy"]) {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Codex session approval configuration is invalid.");
+    }
+    value = (value as Record<string, unknown>)[key];
+  }
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    typeof value !== "string" ||
+    !["never", "on-request", "on-failure", "untrusted"].includes(value)
+  ) {
+    throw new Error("Codex session approval policy is invalid.");
+  }
+  return value;
+}
+
 function codexConfigurationToml(runtime: PluginRuntimeSpec): string | undefined {
   if (runtime.kind !== "codex") {
     return undefined;
   }
-  return Object.keys(runtime.selections).length === 0
-    ? CODEX_NO_PLUGIN_CONFIG_TOML
-    : CODEX_SELECTED_PLUGIN_CONFIG_TOML;
+  const plugins =
+    Object.keys(runtime.selections).length === 0
+      ? CODEX_NO_PLUGIN_CONFIG_TOML
+      : CODEX_SELECTED_PLUGIN_CONFIG_TOML;
+  // Native startup reads this before the gateway can create a session. Preserve
+  // the selected policy, including incompatible choices that readiness rejects.
+  return runtime.approvalPolicy === undefined
+    ? plugins
+    : `approval_policy = ${JSON.stringify(runtime.approvalPolicy)}\n\n${plugins}`;
 }
 
 export function pluginRuntimeConfigMapData(
