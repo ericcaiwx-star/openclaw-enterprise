@@ -185,6 +185,11 @@ export function createAgentDeletion(context, path, agent, onDeleting) {
       if (!context.isCurrent()) {
         return;
       }
+      // The pending guard serializes status reads and writes. Cancel any poll rearmed
+      // while this repeat was pending, so only a manual read can clear its failure.
+      if (state.deleting) {
+        clearTimeout(pollTimer);
+      }
       if (error.status === 401) {
         context.onExpired();
         return;
@@ -192,10 +197,6 @@ export function createAgentDeletion(context, path, agent, onDeleting) {
       dialog.close();
       let text;
       if (error.status === 403) {
-        // A background read must not erase the retry refusal before the reader can act.
-        if (state.deleting) {
-          clearTimeout(pollTimer);
-        }
         text =
           state.deleting &&
           error.serverMessage !== undefined &&
