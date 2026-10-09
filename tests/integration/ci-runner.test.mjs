@@ -2044,6 +2044,166 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
   }
 });
 
+test("the reporter keeps native failures when nested error accessors throw", async (t) => {
+  const root = await fixture(t);
+  const testFile = join(root, "accessor-fixture.mjs");
+  await writeFile(
+    testFile,
+    [
+      'import test from "node:test";',
+      'const refuse = () => { throw new Error("private accessor diagnostic"); };',
+      'test("unreadable aggregate", () => {',
+      '  const error = new Error("ordinary original failure");',
+      '  Object.defineProperty(error, "errors", { get: refuse });',
+      "  throw error;",
+      "});",
+      'test("unreadable nested message", () => {',
+      '  const nested = { get message() { return refuse(); }, stack: "    at ordinary-frame" };',
+      '  throw new AggregateError([nested, new Error("ordinary later sibling")], "ordinary outer aggregate");',
+      "});",
+    ].join("\n"),
+  );
+  const reader = join(root, "accessor-reader.mjs");
+  await writeFile(
+    reader,
+    [
+      'import { run } from "node:test";',
+      `import reporter from ${JSON.stringify(join(repositoryRoot, "scripts/ci/reporter.mjs"))};`,
+      `const events = run({ files: [${JSON.stringify(testFile)}], isolation: "none" });`,
+      "for await (const line of reporter(events)) {",
+      "  const event = JSON.parse(line);",
+      '  if (event.type === "test:fail") console.log(JSON.stringify(event.data));',
+      "}",
+    ].join("\n"),
+  );
+  const result = spawnSync(process.execPath, [reader], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /private accessor diagnostic/);
+  const failures = new Map(
+    result.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .map((entry) => [entry.name, entry.error]),
+  );
+  assert.match(failures.get("unreadable aggregate").message, /ordinary original failure/);
+  assert.match(failures.get("unreadable aggregate").message, /unreadable property/);
+  assert.match(failures.get("unreadable nested message").message, /ordinary outer aggregate/);
+  assert.match(
+    failures.get("unreadable nested message").message,
+    /errors\[0\]: .*unreadable property/,
+  );
+  assert.match(
+    failures.get("unreadable nested message").message,
+    /errors\[1\]: ordinary later sibling/,
+  );
+});
+
+test("the reporter reads nested properties once and bounds unreadable siblings", async () => {
+  const { default: reporter } = await import("../../scripts/ci/reporter.mjs");
+  const reads = new Map();
+  const once = (label, result) => () => {
+    const count = (reads.get(label) ?? 0) + 1;
+    reads.set(label, count);
+    assert.equal(count, 1, `${label} was read again`);
+    return result;
+  };
+  const refuse = () => {
+    throw new Error("private accessor diagnostic");
+  };
+  const shared = { message: "ordinary shared child" };
+  const nested = {
+    get message() {
+      return refuse();
+    },
+    get stack() {
+      return once("stack", "    at ordinary-frame")();
+    },
+    get cause() {
+      return once("cause", shared)();
+    },
+    get errors() {
+      return once("nested errors", [shared])();
+    },
+  };
+  const errors = [nested, undefined, { message: "ordinary final sibling" }];
+  Object.defineProperty(errors, 1, { get: refuse });
+  const outer = {
+    message: "ordinary outer",
+    get cause() {
+      return refuse();
+    },
+    get errors() {
+      return once("outer errors", errors)();
+    },
+  };
+  const render = async (error) => {
+    const lines = [];
+    for await (const line of reporter([
+      { type: "test:fail", data: { name: "accessor case", details: { error: { cause: error } } } },
+    ])) {
+      lines.push(JSON.parse(line));
+    }
+    return lines.find((line) => line.type === "test:fail").data.error;
+  };
+  const detail = await render(outer);
+  assert.match(detail.message, /^ordinary outer\ncause: .*unreadable property/);
+  assert.match(detail.message, /errors\[0\]: .*unreadable property/);
+  assert.match(detail.message, /errors\[0\]\.cause: ordinary shared child/);
+  assert.match(detail.message, /errors\[0\]\.errors\[0\]: ordinary shared child/);
+  assert.match(detail.message, /errors\[1\]: .*unreadable property/);
+  assert.match(detail.message, /errors\[2\]: ordinary final sibling/);
+  assert.match(detail.stack, /errors\[0\]:\nat ordinary-frame/);
+  assert.doesNotMatch(JSON.stringify(detail), /private accessor diagnostic/);
+  assert.deepEqual([...reads.values()], [1, 1, 1, 1]);
+
+  const unreadableStack = await render({
+    message: "ordinary stack wrapper",
+    cause: {
+      message: "ordinary readable message",
+      get stack() {
+        return refuse();
+      },
+    },
+    errors: [{ message: "ordinary stack sibling" }],
+  });
+  assert.match(unreadableStack.message, /cause: ordinary readable message/);
+  assert.match(unreadableStack.message, /unreadable property/);
+  assert.match(unreadableStack.message, /errors\[0\]: ordinary stack sibling/);
+  const unreadableLength = new Proxy([], {
+    get(target, key) {
+      return key === "length" ? refuse() : Reflect.get(target, key);
+    },
+  });
+  const revoked = Proxy.revocable([], {});
+  revoked.revoke();
+  for (const errors of [unreadableLength, revoked.proxy]) {
+    const inaccessible = await render({ message: "ordinary array wrapper", errors });
+    assert.match(inaccessible.message, /^ordinary array wrapper\nerrors: .*unreadable property/);
+    assert.doesNotMatch(JSON.stringify(inaccessible), /private accessor diagnostic/);
+  }
+
+  let unreadableChildren = 0;
+  const wide = Array.from({ length: 100 }, () => undefined);
+  for (let index = 0; index < wide.length; index += 1) {
+    Object.defineProperty(wide, index, {
+      get() {
+        unreadableChildren += 1;
+        return refuse();
+      },
+    });
+  }
+  const bounded = await render({ message: "ordinary wide", errors: wide });
+  assert.equal(unreadableChildren, 31);
+  assert.match(bounded.message, /errors\[31\]: .*traversal limit/);
+  assert.ok(bounded.message.length <= 16_384);
+  assert.doesNotMatch(JSON.stringify(bounded), /private accessor diagnostic/);
+});
+
 test("the reporter sends interrupted tests and the output tail, newest first, on a timeout", async () => {
   const { default: reporter } = await import("../../scripts/ci/reporter.mjs");
   const render = async (events) => {

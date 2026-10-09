@@ -581,10 +581,26 @@ function upstreamDiagnostic(value) {
 // raw here and travel only over the pipe to run-tests, which redacts and
 // truncates them (failure-redaction.mjs) before anything reaches an artifact
 // or the job log.
+const unreadableErrorProperty = Symbol("unreadable error property");
+const unreadableErrorText = "[error details omitted: unreadable property]";
+
+function readErrorProperty(value, key) {
+  try {
+    return value?.[key];
+  } catch {
+    return unreadableErrorProperty;
+  }
+}
+
 function errorText(cause) {
-  const message =
-    typeof cause === "string" ? cause : typeof cause?.message === "string" ? cause.message : "";
-  const stack = typeof cause?.stack === "string" ? cause.stack : "";
+  const rawMessage = typeof cause === "string" ? cause : readErrorProperty(cause, "message");
+  const rawStack = readErrorProperty(cause, "stack");
+  const message = typeof rawMessage === "string" ? rawMessage : "";
+  const stack = typeof rawStack === "string" ? rawStack : "";
+  const unreadable = rawMessage === unreadableErrorProperty || rawStack === unreadableErrorProperty;
+  const detailMessage = unreadable
+    ? `${message}${message ? "\n" : ""}${unreadableErrorText}`
+    : message;
   // The stack starts with the message, which can quote another process's stack.
   const messageEnd =
     message && stack.includes(message) ? stack.indexOf(message) + message.length : 0;
@@ -594,7 +610,7 @@ function errorText(cause) {
     .filter((line) => /^\s+at\s/u.test(line))
     .map((line) => line.trim());
   return {
-    message: message ? message.slice(0, failureInputLimit) : undefined,
+    message: detailMessage ? detailMessage.slice(0, failureInputLimit) : undefined,
     frame: frames[0]?.slice(0, failureInputLimit),
     // The whole stack goes only to the failure details in the diagnostics report.
     stack: frames.length > 0 ? frames.join("\n").slice(0, failureInputLimit) : undefined,
@@ -628,6 +644,10 @@ function failureText(error) {
       append(path, { message: "[error details omitted: traversal limit]" });
       return;
     }
+    if (value === unreadableErrorProperty) {
+      append(path, { message: unreadableErrorText });
+      return;
+    }
     if (ancestors.has(value)) {
       append(path, { message: "[error details omitted: circular reference]" });
       return;
@@ -636,24 +656,55 @@ function failureText(error) {
     children(value, path, depth);
   };
   const children = (value, path, depth) => {
-    if (value === null || typeof value !== "object") {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      (message.length >= failureInputLimit && stack.length >= failureInputLimit)
+    ) {
       return;
     }
     ancestors.add(value);
-    if (value.cause !== undefined) {
-      visit(value.cause, path ? `${path}.cause` : "cause", depth + 1);
-    }
-    if (Array.isArray(value.errors)) {
-      for (let index = 0; index < value.errors.length; index += 1) {
-        const nextPath = `${path ? `${path}.` : ""}errors[${index}]`;
-        if (count >= 32) {
-          append(nextPath, { message: "[error details omitted: traversal limit]" });
-          break;
-        }
-        visit(value.errors[index], nextPath, depth + 1);
+    try {
+      const causePath = path ? `${path}.cause` : "cause";
+      const cause = readErrorProperty(value, "cause");
+      if (cause !== undefined) {
+        visit(cause, causePath, depth + 1);
       }
+      if (message.length >= failureInputLimit && stack.length >= failureInputLimit) {
+        return;
+      }
+      const errorsPath = path ? `${path}.errors` : "errors";
+      const errors = readErrorProperty(value, "errors");
+      let isArray = false;
+      try {
+        isArray = Array.isArray(errors);
+      } catch {
+        visit(unreadableErrorProperty, errorsPath, depth + 1);
+        return;
+      }
+      if (errors === unreadableErrorProperty) {
+        visit(errors, errorsPath, depth + 1);
+      } else if (isArray) {
+        const length = readErrorProperty(errors, "length");
+        if (!Number.isSafeInteger(length) || length < 0) {
+          visit(unreadableErrorProperty, errorsPath, depth + 1);
+          return;
+        }
+        for (let index = 0; index < length; index += 1) {
+          const nextPath = `${errorsPath}[${index}]`;
+          if (count >= 32) {
+            append(nextPath, { message: "[error details omitted: traversal limit]" });
+            break;
+          }
+          if (message.length >= failureInputLimit && stack.length >= failureInputLimit) {
+            break;
+          }
+          visit(readErrorProperty(errors, index), nextPath, depth + 1);
+        }
+      }
+    } finally {
+      ancestors.delete(value);
     }
-    ancestors.delete(value);
   };
   children(error, "", 0);
   return { ...first, message: message || undefined, stack: stack || undefined };
