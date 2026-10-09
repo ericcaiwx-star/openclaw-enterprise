@@ -1074,7 +1074,8 @@ test(
 // (ghcr.io/openclaw/openclaw-enterprise-runtime@sha256:f17a66a18de9d4231c9579faf90573d80bef1278aaaf63135b6c6ce0b71a23b3,
 // OpenClaw 000d03942c87): its Gateway ran one turn against a stub provider that
 // answers 401 and stopped cleanly. The archive holds the shared state database
-// and the main agent database (schema 23) as that Gateway left them.
+// (its device identity and config revision keys deleted, then vacuumed) and the
+// main agent database (schema 23) as that Gateway left it.
 const releasedGatewayState = fileURLToPath(
   new URL("../fixtures/runtime-state/released-gateway-state.tar.gz", import.meta.url),
 );

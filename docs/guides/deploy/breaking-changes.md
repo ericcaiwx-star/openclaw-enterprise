@@ -29,10 +29,12 @@ state are not affected.
 
 **Steps.** Upgrade the controller to #1986 or later, then deploy the Agent
 again (`occ agent deploy <id>`). With an older controller, scale the Gateway
-Deployment to zero, run `openclaw doctor --fix --non-interactive --yes` once in
-a Pod with the Gateway's template and `sleep` as its command, delete that Pod,
-and scale the Deployment back. Doctor logs `v23 -> v24`, then may end with a
-read-only file system error and exit code `1`; the Gateway still becomes ready.
+Deployment to zero, run
+`OPENCLAW_CONFIG_READONLY=1 openclaw doctor --fix --non-interactive` once in a
+Pod with the Gateway's template and `sleep` as its command, delete that Pod,
+and scale the Deployment back. Doctor logs `v23 -> v24`. Without
+`OPENCLAW_CONFIG_READONLY=1` it may end with a read-only file system error and
+exit code `1`; the migration still applies.
 
 ## 2026-10-09: Dedicated Codex deployment requires the main Agent
 

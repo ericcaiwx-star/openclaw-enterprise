@@ -2208,13 +2208,14 @@ function outdatedAgentDatabases() {
     // Fresh state has no agents directory.
     return [];
   }
+  // Outside the per-database try: without the module, startup fails instead of skipping.
+  const { DatabaseSync } = require("node:sqlite");
   const outdated = [];
   for (const agentId of agentIds) {
     const path = join(agentsDirectory, agentId, "agent", "openclaw-agent.sqlite");
     let version;
     try {
       // A read-only open of a missing database fails here.
-      const { DatabaseSync } = require("node:sqlite");
       const database = new DatabaseSync(path, { readOnly: true });
       try {
         version = database.prepare("PRAGMA user_version").get().user_version;
