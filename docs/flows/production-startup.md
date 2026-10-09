@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
-updated: "2026-10-09"
-last_updated_session: "authoring-run/0d8da3d8-474a-4801-9887-230406a6b7bd"
+updated: "2026-10-10"
+last_updated_session: "authoring-run/pr1905-maintenance"
 ---
 
 # Production Startup Flow
@@ -76,13 +76,11 @@ process keeps running and the next query opens a new connection.
 
 `deploy/helm/openclaw-enterprise/values.yaml:1`
 
-The operator copies and edits the production example values, Installation YAML,
-and bootstrap PVC manifest outside the checkout. Helm values select the
-controller image, API endpoint, Secret names, bootstrap claim, API-client
-selectors, control-plane node selector, and egress destinations. The
-Installation YAML selects IAM, Configuration, Compute, optional Backend,
-gateway/Agent images, projected workload identity, and runtime
-networking/storage.
+Outside the checkout, the operator prepares production values, Installation YAML,
+and bootstrap PVC. Helm values select images, API endpoint, Secrets, claim,
+selectors, and egress. `openclaw.validate` requires a DNS-1123 release Namespace
+label of at most 63 characters. Installation YAML selects Drivers, Backends,
+identity, and runtime images/networking/storage.
 
 The operator creates file-backed Kubernetes Secrets for Installation startup,
 database URLs, optional database CA bundles, Better Auth signing material, and
@@ -324,6 +322,8 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 ## Changelog
 
 - 2026-10-09 23:51: Refuse custom Gateway hostnames Compute rejects during production configuration loading. (authoring-run/0d8da3d8-474a-4801-9887-230406a6b7bd - 5b9dd76c497c1b552a2651ee4b984978cdef0a93)
+
+- 2026-10-09 22:22: Validate release Namespace labels before Helm rendering. (authoring-run/25ae11d6-4539-4513-9b2a-24d10996f971 - 7f358117e68076912a6062411d363e920a0e6adb)
 
 - 2026-10-09 22:25: Refuse database CA paths that duplicate active database-client mounts before Kubernetes admission. (codex/01a12074-7896-7f63-99fe-9f42e9041d02 - 7f358117e)
 
