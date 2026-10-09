@@ -451,6 +451,10 @@
                     "label": "Breaking Changes"
                   },
                   {
+                    "page": "guides/deploy/split-layout-upgrade",
+                    "label": "Split-Layout Upgrade"
+                  },
+                  {
                     "page": "guides/deploy/upgrade-checklist",
                     "label": "Upgrade Checklist"
                   },
@@ -743,6 +747,10 @@
                         "label": "Credential Gateway"
                       },
                       {
+                        "page": "reference/drivers/credential-refresh",
+                        "label": "Credential Refresh"
+                      },
+                      {
                         "page": "reference/drivers/iam",
                         "label": "IAM"
                       },
@@ -921,6 +929,7 @@
               "flows/compute-driver-lifecycle-hooks",
               "flows/openshell-sandbox-provisioning",
               "flows/credential-source-lifecycle",
+              "flows/credential-source-refresh",
               "flows/driver-plugin-loading",
               "flows/agent-plugins",
               "flows/agent-channel-directory",
