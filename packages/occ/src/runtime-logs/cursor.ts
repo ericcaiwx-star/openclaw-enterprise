@@ -20,8 +20,6 @@ export interface SandboxLogWindowCheckpoint {
   readonly seen: number;
   readonly hash: string;
   readonly total: number;
-  readonly baseTime: string | null;
-  readonly baseHashes: readonly string[];
 }
 
 export interface ContainerLogWindowCheckpoint {
@@ -128,35 +126,29 @@ function sandboxWindow(value: unknown): SandboxLogWindowCheckpoint | undefined {
   }
   const window = value as Record<string, unknown>;
   if (
-    (window.since !== null && !validRuntimeLogFrontierTime(window.since)) ||
-    (window.baseTime !== null && !validRuntimeLogFrontierTime(window.baseTime)) ||
-    !Number.isSafeInteger(window.tailLines) ||
-    (window.tailLines as number) < 1 ||
-    (window.tailLines as number) > 1000 ||
-    !Number.isSafeInteger(window.count) ||
-    (window.count as number) < 0 ||
-    !Number.isSafeInteger(window.seen) ||
-    (window.seen as number) < (window.count as number) ||
-    (window.seen as number) > (window.tailLines as number) ||
-    typeof window.hash !== "string" ||
-    !/^[A-Za-z0-9_-]{16}$/.test(window.hash) ||
-    !Number.isSafeInteger(window.total) ||
-    (window.total as number) < (window.seen as number) ||
-    !Array.isArray(window.baseHashes) ||
-    window.baseHashes.length > MAX_HASHES ||
-    !window.baseHashes.every((hash) => typeof hash === "string" && /^[A-Za-z0-9_-]{16}$/.test(hash))
+    (window.s !== null && !validRuntimeLogFrontierTime(window.s)) ||
+    !Number.isSafeInteger(window.l) ||
+    (window.l as number) < 1 ||
+    (window.l as number) > 1000 ||
+    !Number.isSafeInteger(window.n) ||
+    (window.n as number) < 0 ||
+    !Number.isSafeInteger(window.z) ||
+    (window.z as number) < (window.n as number) ||
+    (window.z as number) > (window.l as number) ||
+    typeof window.h !== "string" ||
+    !/^[A-Za-z0-9_-]{16}$/.test(window.h) ||
+    !Number.isSafeInteger(window.b) ||
+    (window.b as number) < (window.z as number)
   ) {
     return undefined;
   }
   return {
-    since: window.since as string | null,
-    tailLines: window.tailLines as number,
-    count: window.count as number,
-    seen: window.seen as number,
-    hash: window.hash,
-    total: window.total as number,
-    baseTime: window.baseTime as string | null,
-    baseHashes: window.baseHashes as string[],
+    since: window.s as string | null,
+    tailLines: window.l as number,
+    count: window.n as number,
+    seen: window.z as number,
+    hash: window.h,
+    total: window.b as number,
   };
 }
 
@@ -282,7 +274,19 @@ export function createRuntimeLogCursorCodec(secret: string): RuntimeLogCursorCod
           fn: value.frontierCount,
           po: value.pemOpen,
           pt: value.pemAfterTime,
-          w: value.sandboxWindow,
+          // The outer t/h retain the pre-cut overlap baseline while w is present.
+          // Compact only the additional window observation, keeping full hashes.
+          w:
+            value.sandboxWindow === undefined
+              ? undefined
+              : {
+                  s: value.sandboxWindow.since,
+                  l: value.sandboxWindow.tailLines,
+                  n: value.sandboxWindow.count,
+                  z: value.sandboxWindow.seen,
+                  h: value.sandboxWindow.hash,
+                  b: value.sandboxWindow.total,
+                },
           cw: value.containerWindow,
         }),
       ).toString("base64url");

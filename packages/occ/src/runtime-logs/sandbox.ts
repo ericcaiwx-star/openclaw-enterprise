@@ -266,12 +266,8 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
   const checkpointLost = checkpoint !== undefined && !replaced && !checkpointValid;
   // A byte-cut window retains the pre-cut overlap baseline. Value-prefix
   // checkpoints are authenticated observations, not backend sequence numbers.
-  const baseTime = replaced
-    ? null
-    : checkpoint !== undefined
-      ? checkpoint.baseTime
-      : (resume?.lastTime ?? null);
-  const baseHashes = replaced ? [] : (checkpoint?.baseHashes ?? resume?.lastHashes ?? []);
+  const baseTime = replaced ? null : (resume?.lastTime ?? null);
+  const baseHashes = replaced ? [] : (prior?.lastHashes ?? []);
   const continuing = baseTime !== null && !replaced;
   if (checkpointLost) {
     leading.push(
@@ -404,8 +400,6 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
               seen: chunk.lines.length,
               hash: sandboxPrefixHash(chunk.lines, chunk.lines.length),
               total: chunk.bufferTotal,
-              baseTime,
-              baseHashes,
             },
           }
         : {}),

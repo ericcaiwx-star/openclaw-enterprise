@@ -1157,3 +1157,61 @@ test("sandbox empty checkpoint recovery suppresses the next single untimed snaps
   );
   assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
 });
+
+test("sandbox cuts from a full overlap baseline keep cursors within route admission limits", async () => {
+  const fixture = await sandboxFixture();
+  const start = Date.now() - 1000;
+  const row = (i, message) => ({
+    sandboxId: SANDBOX_ID,
+    time: new Date(start + i).toISOString().replace("Z", "000000Z"),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message,
+    fields: {},
+  });
+  const anchors = Array.from({ length: 48 }, (_, i) => row(i, `anchor=${i}`));
+  fixture.gateway.state.lines = anchors;
+  const prime = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=200"),
+  );
+  assert.equal(prime.status, 200);
+  fixture.gateway.state.lines = [
+    ...anchors,
+    ...Array.from({ length: 150 }, (_, i) =>
+      row(i + 100, `row=${i}; diagnostic ${'--option="value" '.repeat(500)}`),
+    ),
+  ];
+  let cursor = prime.data.cursor;
+  const seen = [];
+  for (let page = 0; page < 10; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
+    );
+    assert.equal(response.status, 200);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    assert.ok(
+      lines.every(({ message }) => message.startsWith("row=")),
+      "partial checkpoints retain the anchor baseline",
+    );
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    cursor = response.data.cursor;
+    assert.ok(cursor.length <= 2048);
+    assert.match(cursor, /^v1\.[A-Za-z0-9_-]{1,1900}\.[A-Za-z0-9_-]{43}$/);
+    if (!response.data.truncated) {
+      break;
+    }
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 150 }, (_, i) => i),
+  );
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=200&cursor=${cursor}`),
+  );
+  assert.equal(replay.status, 200);
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+});

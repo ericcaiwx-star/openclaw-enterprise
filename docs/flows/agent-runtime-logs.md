@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/39d848cc-a298-48fd-9f82-c39b85089b94
+last_updated_session: authoring-run/c8de19eb-fe81-4a26-b639-a0cb02360f23
 ---
 
 # Agent runtime logs flow
@@ -172,7 +172,9 @@ batches them, and filters `since_time` by that stamp, so a resume sends a time
 keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
 Both readers checkpoint serialized cuts with an authenticated window digest,
-raw-prefix count, query floor and pre-cut baseline. Known container times retain
+raw-prefix count, query floor and pre-cut baseline. Sandbox checkpoints reuse the
+outer time and hashes for that baseline and compact only extra window fields,
+keeping emitted cursors within response and query admission limits. Known container times retain
 the captured floor before digesting; empty checkpoints persist. Stable windows drain
 before overlap advances, including untimed lines and over-capacity timestamp
 groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
@@ -242,6 +244,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 05:02: Keep full Sandbox overlap baselines in one cursor location while compacting byte-window observations. (authoring-run/c8de19eb-fe81-4a26-b639-a0cb02360f23 - a0fd14ec40c2e5b8c66537e457ddd2d8202adc6e)
 
 - 2026-10-10 04:37: Compose fetched safety evidence with Event pagination. (authoring-run/39d848cc-a298-48fd-9f82-c39b85089b94 - 8e5a06cec7f622185222a8a7dbafe3b0a7228d9f)
 
