@@ -106,12 +106,11 @@ with one older than an hour, or a cursor whose Pod is gone, starts a view: the c
 `openclaw.agents.runtime_logs.view`, an `access` audit event naming the admitting
 action, before any log read. The Driver re-checks
 Pod ownership, calls `readNamespacedPodLog` with `tailLines`, `sinceSeconds`,
-`previous`, a 1 MiB `limitBytes` and timestamps, and re-reads the Pod. Before an
-owned container's first start, `PodInitializing` or `ContainerCreating` with zero
-restarts and no current or previous instance can return kubelet's exact `400`
-waiting-to-start Status. The Driver treats only that matching Pod/container/reason
-answer as an empty page. It still requests logs, so a stale waiting status cannot
-hide output already available from kubelet. Other current-instance failures keep
+`previous`, a 1 MiB `limitBytes` and timestamps, and re-reads the Pod. Before first start,
+zero restarts, no current or previous instance, and kubelet's exact `400`
+waiting-to-start Status matching the Pod, container and `PodInitializing` or
+`ContainerCreating` reason yield an empty page. Logs are requested first,
+so stale waiting status cannot hide available output. Unrelated failures retain
 their error mapping.
 `kubernetesRuntimeLogLine` separates kubelet's RFC3339 timestamp from each raw
 line and converts numeric offsets to UTC while retaining every fractional digit.
@@ -254,7 +253,7 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 
 ## Changelog
 
-- 2026-10-10 07:06: Preserve initial-container log continuation and main timestamp, Event and termination behavior when resolving the requested main merge. (authoring-run/b0c35eb4-2b87-4f3e-aec3-8c416cdef3bb - b744ee6f217d17942cdaacea80cbbd08126aa87f)
+- 2026-10-10 07:06: Merge main; preserve initial continuation, timestamps, Events, termination and histories. (authoring-run/b0c35eb4-2b87-4f3e-aec3-8c416cdef3bb - b744ee6f217d17942cdaacea80cbbd08126aa87f)
 
 - 2026-10-09 23:09: Continue current-container log reads through initial Pod preparation without concealing unrelated failures. (authoring-run/9f37d8ec-6a5b-4676-a134-8a6fb5c54f3a - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)
 - 2026-10-10 02:50: Preserve Event pagination and current termination when merging main; retain both regression groups and histories. (authoring-run/794085ff-b0bd-422e-8fe7-6b6e9846ca0f - 880b645f5e5fb5c99c6046c1eac6ca81211be584)
