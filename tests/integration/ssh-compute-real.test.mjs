@@ -352,7 +352,9 @@ test(
       throw error;
     } finally {
       const deleted = await driver.deleteNamespace(namespace);
-      if (!failed) assert.equal(deleted.namespaceDeleted, true);
+      if (!failed) {
+        assert.equal(deleted.namespaceDeleted, true);
+      }
     }
   },
 );
