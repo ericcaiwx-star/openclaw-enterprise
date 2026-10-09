@@ -99,6 +99,9 @@
   },
   "files": [
     {
+      "path": "tests/integration/tls-peer-certificate.test.mjs"
+    },
+    {
       "path": "tests/integration/qa-fixture-inputs.test.mjs"
     },
     {

@@ -10,6 +10,7 @@
     "NODE_EXTRA_CA_CERTS"
   ],
   "prepare": {
+    "postgres": true,
     "keycloak": true,
     "requiresPreparedStateForFile": true
   },
@@ -17,7 +18,10 @@
     {
       "path": "tests/integration/keycloak-oidc-sign-in.test.mjs",
       "expectedTests": [
-        "Keycloak discovery matches the configured endpoints and its JWKS offers an RS256 key of 2,048 bits or more"
+        "Keycloak discovery matches the configured endpoints and its JWKS offers an RS256 key of 2,048 bits or more",
+        "attached alice signs in through Keycloak with client_secret_post",
+        "attached alice signs in through Keycloak with client_secret_basic",
+        "unattached carol is refused after Keycloak sign-in, audited and given no account"
       ]
     }
   ]
