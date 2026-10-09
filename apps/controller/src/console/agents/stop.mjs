@@ -10,6 +10,7 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
   const actions = element("div", { className: "form-actions" });
   const stop = button("Stop Agent", openConfirmation, { className: "danger" });
   const refresh = button("Refresh stop status", () => void refreshStatus());
+  const repeat = button("Request Stop again", openConfirmation, { className: "danger" });
   const state = {
     agent,
     pending: false,
@@ -75,10 +76,15 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
         : []),
     );
     stop.disabled = requested || state.pending || state.needsRefresh;
+    repeat.disabled = state.pending || state.needsRefresh;
     refresh.disabled = state.pending;
     refresh.textContent = state.pending ? "Checking…" : "Refresh stop status";
     if (requested || state.needsRefresh) {
-      actions.replaceChildren(stop, refresh);
+      actions.replaceChildren(
+        stop,
+        ...(requested && state.agent.activeRevisionId ? [repeat] : []),
+        refresh,
+      );
     } else {
       actions.replaceChildren(stop);
     }
@@ -145,7 +151,11 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
   }
 
   async function stopAgent(dialog, cancel, confirm) {
-    if (state.pending || state.needsRefresh || state.agent.desiredRuntimeState === "stopped") {
+    if (
+      state.pending ||
+      state.needsRefresh ||
+      (state.agent.desiredRuntimeState === "stopped" && !state.agent.activeRevisionId)
+    ) {
       return;
     }
     state.pending = true;
@@ -212,7 +222,11 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
   }
 
   function openConfirmation() {
-    if (state.pending || state.needsRefresh || state.agent.desiredRuntimeState === "stopped") {
+    if (
+      state.pending ||
+      state.needsRefresh ||
+      (state.agent.desiredRuntimeState === "stopped" && !state.agent.activeRevisionId)
+    ) {
       return;
     }
     const dialog = element("dialog", {

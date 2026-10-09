@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
-updated: 2026-09-29
-last_updated_session: 01a0eb0e-dbc1-78d1-91b0-ea91ee87c00f
+updated: 2026-10-10
+last_updated_session: authoring-run/52a975bb-0283-40ba-9126-2c2f6eb8992c
 ---
 
 # Console Agent editing and runtime requests
@@ -276,7 +276,10 @@ composed by `apps/controller/src/console/agents/detail.mjs:renderAgentDetail`. C
 bodyless `POST` to the exact Agent's `/stop` route. OCC's
 `packages/occ/src/index.ts:stopAgent` checks exact-Agent `operate`, persists the
 requested stopped state, and queues reconciliation. The response proves
-admission, not completed Compute shutdown.
+admission, not completed Compute shutdown. When stopped with a selected revision,
+**Request Stop again** confirms a new stop intent through the same authorized route.
+It is absent without a selected revision and blocked by an uncertain write until
+readback succeeds; it does not infer shutdown failure.
 
 **Refresh stop status** reads the exact Agent again. It displays desired runtime
 state and selected revision without inferring live health or completion from a
@@ -337,6 +340,8 @@ worker cleanup and the Namespace-owned resources it preserves.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 00:08: Trace explicit repeated Stop recovery in the accompanying change. (authoring-run/52a975bb-0283-40ba-9126-2c2f6eb8992c - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)
 
 - 2026-09-29 20:00: Trace draft repository editing and save guards. (public-pr/374)
 
