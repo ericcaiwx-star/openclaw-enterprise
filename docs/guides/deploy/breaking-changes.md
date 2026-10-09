@@ -40,17 +40,18 @@ state in an OpenClaw agent database at schema 23. Runtimes since #587
 Gateway exits and restarts into the same refusal. Since #1986 the Gateway runs
 that migration itself before OpenClaw starts; see
 [Gateway storage](../../reference/drivers/kubernetes-compute/storage-and-credentials.md#gateway-storage).
+The Docker development gateway does the same since #2009.
 
 **Who is affected.** Installations upgraded from the 2026-09-28 release whose
-Agents are deployed again by a controller before #1986. Gateways without chat
-state are not affected.
+Agents are deployed again by a controller before #1986 (#2009 for the Docker
+development Driver). Gateways without chat state are not affected.
 
 **How to tell.** The Gateway log shows
 `uses schema version 23; stop active agents and run openclaw doctor --fix`.
 
-**Steps.** Upgrade the controller to #1986 or later, then deploy the Agent
-again (`occ agent deploy <id>`). With an older controller, scale the Gateway
-Deployment to zero, run
+**Steps.** Upgrade the controller to #1986 or later (#2009 for Docker
+development), then deploy the Agent again (`occ agent deploy <id>`). With an
+older controller, scale the Gateway Deployment to zero, run
 `OPENCLAW_CONFIG_READONLY=1 openclaw doctor --fix --non-interactive` once in a
 Pod with the Gateway's template and `sleep` as its command, delete that Pod,
 and scale the Deployment back. Doctor logs `v23 -> v24`. Without

@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
 updated: "2026-10-10"
-last_updated_session: "authoring-run/714d166d-82e8-4e99-a0ae-a49c8ee235c7"
+last_updated_session: "authoring-run/cf8f1d6f-c7a3-4864-8ece-9fc5834ac8b5"
 ---
 
 # Production Startup Flow
@@ -75,13 +75,11 @@ process keeps running and the next query opens a new connection.
 
 `deploy/helm/openclaw-enterprise/values.yaml:1`
 
-The operator copies and edits the production example values, Installation YAML,
-and bootstrap PVC manifest outside the checkout. Helm values select the
-controller image, API endpoint, Secret names, bootstrap claim, API-client
-selectors, control-plane node selector, and egress destinations. The
-Installation YAML selects IAM, Configuration, Compute, optional Backend,
-gateway/Agent images, projected workload identity, and runtime
-networking/storage.
+Outside the checkout, the operator prepares production values, Installation YAML,
+and bootstrap PVC. Helm values select images, API endpoint, Secrets, claim,
+selectors, and egress. `openclaw.validate` requires a DNS-1123 release Namespace
+label of at most 63 characters. Installation YAML selects Drivers, Backends,
+identity, and runtime images/networking/storage.
 
 The operator creates file-backed Kubernetes Secrets for Installation startup,
 database URLs, optional database CA bundles, Better Auth signing material, and
@@ -155,13 +153,12 @@ Job; Helm failure does not imply the database hook was rolled back.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:KubernetesComputeDriver.preflight`
 
-After successful initialization, Kubernetes starts separate API and worker
-Deployments. The API validates production listener settings, Better Auth,
-database access, trusted Installation YAML, selected Drivers, Backend
-membership, and Kubernetes Compute preflight before readiness. It serves private
-controller routes, `/healthz`, and database-backed `/readyz` behind the
-operator-managed endpoint. A `/healthz` startup probe (1-second period, 120
-failures) gives the API 2 minutes to listen and lets readiness start within a
+After initialization, separate API/worker Deployments start. Before readiness,
+the API validates production listener settings, Better Auth, database access,
+trusted Installation YAML, selected Drivers, Backend membership and Kubernetes
+Compute preflight. Private controller routes, `/healthz` and database-backed
+`/readyz` use the operator-managed endpoint. The `/healthz` startup probe runs
+every second for 120 failures: 2 minutes to listen, with readiness within a
 second of listening.
 
 `apps/controller/src/index.ts:createFastifyApp`
@@ -219,10 +216,10 @@ minimum versions in its message and continues. An invalid version response,
 unreachable API, or failed Namespace access still fails preflight.
 
 The worker independently validates production settings, opens the same
-application-role database, loads the selected Drivers, validates IAM, runs
-Compute preflight (with the same advisory warning), emits `worker.started`, and
-polls durable Namespace and AgentRevision work. Worker readiness depends on fresh queue-health observations. Neither
-process mounts the bootstrap PVC.
+application-role database, loads selected Drivers, validates IAM, runs Compute
+preflight with the same advisory warning, emits `worker.started`, and polls
+durable Namespace/AgentRevision work. Readiness requires fresh queue-health
+observations; neither process mounts the bootstrap PVC.
 
 `apps/controller/src/composition/repository-credentials/platform.ts:composeRepoDriver`
 
@@ -319,10 +316,14 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 
 ## Changelog
 
+- 2026-10-10 07:58: Preserve landed Namespace admission alongside database ports. (authoring-run/cf8f1d6f-c7a3-4864-8ece-9fc5834ac8b5 - c425fbb8a24df83efdfb1615cfb26a609f0749ca)
+
 - 2026-10-10 07:41: Merge hostname/database-CA guidance and bounded database ports. (authoring-run/714d166d-82e8-4e99-a0ae-a49c8ee235c7 - 3bfadece19cdbea1a23574549265953f9d0e54fc)
 - 2026-10-09 22:28: Refuse invalid database ports before rendering NetworkPolicies. (authoring-run/4363ed9a-5724-4d4f-a14d-f1bc0485443e - dc95c2261d4b46cff8aca703e13e43cdd71d153e)
 
 - 2026-10-09 23:51: Refuse custom Gateway hostnames Compute rejects during production configuration loading. (authoring-run/0d8da3d8-474a-4801-9887-230406a6b7bd - 5b9dd76c497c1b552a2651ee4b984978cdef0a93)
+
+- 2026-10-09 22:22: Validate release Namespace labels before Helm rendering. (authoring-run/25ae11d6-4539-4513-9b2a-24d10996f971 - 7f358117e68076912a6062411d363e920a0e6adb)
 
 - 2026-10-09 22:25: Refuse database CA paths that duplicate active database-client mounts before Kubernetes admission. (codex/01a12074-7896-7f63-99fe-9f42e9041d02 - 7f358117e)
 
