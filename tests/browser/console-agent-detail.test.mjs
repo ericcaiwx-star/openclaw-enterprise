@@ -2496,6 +2496,7 @@ test("Repeat deletion preserves bounded retry ownership feedback and ordinary de
   const path = `/namespaces/${namespace.id}/agents/${agent.id}`;
   assert.equal((await fixture.request("DELETE", path)).status, 202);
   const { page } = await newPage(t, fixture);
+  await page.clock.install();
   await login(page, fixture, detailUrl(fixture, namespace.id, agent.id));
   const ownership =
     "Only the actor that started this deletion can retry it while that actor still holds delete. Retry as that actor, or remove its delete permission first.";
@@ -2525,12 +2526,23 @@ test("Repeat deletion preserves bounded retry ownership feedback and ordinary de
   await page.getByRole("alert").getByText(ownership, { exact: true }).waitFor();
   await expectNoText(page, "Ask an administrator for Agent delete access");
   assert.equal(writes, 1);
+  await page.clock.fastForward(DELETION_POLL_MS * 2);
+  await page.getByRole("alert").getByText(ownership, { exact: true }).waitFor();
+  assert.equal(writes, 1);
   serverMessage = "The exact platform operation was not authorized.";
   await confirm();
   await page
     .getByRole("alert")
     .getByText("You do not have permission to delete this Agent", { exact: false })
     .waitFor();
+  assert.equal(writes, 2);
+  await page.clock.fastForward(DELETION_POLL_MS * 2);
+  await page
+    .getByRole("alert")
+    .getByText("You do not have permission to delete this Agent", { exact: false })
+    .waitFor();
+  await page.getByRole("button", { name: "Refresh deletion status", exact: true }).click();
+  await page.getByRole("alert").waitFor({ state: "hidden" });
   assert.equal(writes, 2);
   assert.equal((await fixture.request("GET", path)).data.status, "deleting");
 });

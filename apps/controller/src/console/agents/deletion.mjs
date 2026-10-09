@@ -192,6 +192,10 @@ export function createAgentDeletion(context, path, agent, onDeleting) {
       dialog.close();
       let text;
       if (error.status === 403) {
+        // A background read must not erase the retry refusal before the reader can act.
+        if (state.deleting) {
+          clearTimeout(pollTimer);
+        }
         text =
           state.deleting &&
           error.serverMessage !== undefined &&
