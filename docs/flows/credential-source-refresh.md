@@ -117,7 +117,8 @@ need a redeploy.
 `POST …/rotate` requires `credential_source:update`, a `ready` source, and a
 `refresh` type; a static type returns `409`. It calls `rotate` under the source
 lock and returns the new status. The HTTP handler commits the audit event in
-the same transaction; a failed mint commits a `failure` event instead.
+the same transaction; a failed mint commits a `failure` event instead. A commit
+whose outcome is unknown records neither event.
 
 ### 5. Deletion
 

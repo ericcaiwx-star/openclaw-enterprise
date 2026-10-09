@@ -662,6 +662,13 @@ function recordRowLocks(state) {
             return unit.credentialSources.lockCredentialSource(...input);
           },
         },
+        secrets: {
+          ...unit.secrets,
+          lockSecret: async (namespaceId, secretId) => {
+            locks.push(secretId);
+            return unit.secrets.lockSecret(namespaceId, secretId);
+          },
+        },
       }),
     );
   return locks;
@@ -688,7 +695,32 @@ test("a refresh update or rotation waits on the issuer under the source lock, no
   });
   // Other Namespace writes (Agents, Secrets, other sources) never queue behind the issuer; the
   // source lock still orders this source's update, rotation, deletion, and Agent admission.
-  assert.deepEqual(heldDuringMint, [["credential_source"], ["credential_source"]]);
+  assert.deepEqual(heldDuringMint, [["credential_source"], ["credential_source", replacement.id]]);
+
+  // An update locks its Secrets in ID order, whatever their field order, so two updates whose
+  // sources share Secrets cannot deadlock.
+  const token = await createSecret(context, "refresh-token", "synthetic-refresh-token");
+  const client = await createSecret(context, "client-secret", "synthetic-client-secret");
+  const user = await context.controller.createCredentialSource(administrator, {
+    namespaceId: context.namespace.id,
+    name: "oauth-user",
+    type: "oauth-user",
+    config: { client_id: "occ-tools" },
+    secrets: { refresh_token: token.ref, client_secret: client.ref },
+  });
+  // The request names client_secret first, so only ID ordering locks the fresh token first.
+  let fresh;
+  do {
+    fresh = await createSecret(context, "refresh-token", "fresh-refresh-token");
+  } while (fresh.id > client.id);
+  locks.length = 0;
+  heldDuringMint.length = 0;
+  await context.controller.updateCredentialSource(administrator, {
+    namespaceId: context.namespace.id,
+    credentialSourceId: user.id,
+    secrets: { client_secret: client.ref, refresh_token: fresh.ref },
+  });
+  assert.deepEqual(heldDuringMint, [["credential_source", fresh.id, client.id]]);
 });
 
 test("a refresh update or rotation that fails after reaching the gateway records a failure event", async () => {
@@ -738,7 +770,7 @@ test("a refresh update or rotation that fails after reaching the gateway records
   );
   assert.deepEqual(await outcomes(), [
     ["openclaw.credential_sources.rotate", "failure", "CREDENTIAL_REFRESH_ROTATION_FAILED"],
-    ["openclaw.credential_sources.update", "failure", "CREDENTIAL_REFRESH_RECONFIGURED"],
+    ["openclaw.credential_sources.update", "failure", "CREDENTIAL_REFRESH_UPDATE_FAILED"],
   ]);
 
   // A refusal before any gateway call changed nothing outside OCC, so it records no failure.

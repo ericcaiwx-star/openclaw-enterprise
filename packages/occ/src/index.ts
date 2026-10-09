@@ -935,7 +935,7 @@ function refuseIssuerRotatedResend(
       next[name]?.id === recorded[name].id
     ) {
       throw new ResourceStateConflictError(
-        `The gateway may already hold a newer ${name} than the source's Secret. Complete a new sign-in, store its ${name} in a new Secret, and update the source to reference that Secret.`,
+        `The gateway may already hold a newer ${name} than the source's Secret, so the update must reference a new Secret, even if you replaced this Secret's value. Complete a new sign-in, store its ${name} in a new Secret, and update the source to reference that Secret.`,
       );
     }
   }
@@ -4152,9 +4152,15 @@ export class OpenClawController {
     if (Object.values(references).some((reference) => reference.namespaceId !== namespace.id)) {
       throw new SecretBindingValidationError("Credential source Secrets cannot cross Namespaces.");
     }
-    const values: Record<string, string> = {};
-    for (const [field, reference] of Object.entries(references)) {
+    for (const reference of Object.values(references)) {
       await this.authorize(principalId, "operate", reference);
+    }
+    // Locked in Secret ID order, so two updates whose sources share Secrets cannot deadlock.
+    const ordered = Object.entries(references).sort(([, left], [, right]) =>
+      left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+    );
+    const values: Record<string, string> = {};
+    for (const [field, reference] of ordered) {
       const secret = await state.secrets.lockSecret(namespace.id, reference.id);
       if (secret === undefined) {
         throw new ScopeViolationError("The credential source Secret is unavailable.");
@@ -4197,7 +4203,9 @@ export class OpenClawController {
       if (namespace.status !== "ready") {
         throw new NamespaceNotReadyError();
       }
-      // Lock order matches Agent admission: the source, then the Secrets it reads.
+      // Lock order matches Agent admission: the source, then the Secrets it reads. Admission
+      // with a Secret-method harnessAuth locks that Secret first; if the same Secret also backs
+      // this source, PostgreSQL ends the cycle by failing one request.
       const source = await state.credentialSources.lockCredentialSource(
         namespace.id,
         input.credentialSourceId,
@@ -4237,7 +4245,7 @@ export class OpenClawController {
         const refresh = this.credentialRefreshDriver();
         status = await this.credentialGatewayOperation(() => gateway.sourceStatus(context()));
         assertCredentialGatewayHoldsSource(status);
-        this.auditUncommittedCredentialEffect(failureAudit, "CREDENTIAL_REFRESH_RECONFIGURED");
+        this.auditUncommittedCredentialEffect(failureAudit, "CREDENTIAL_REFRESH_UPDATE_FAILED");
         await this.credentialGatewayOperation(() =>
           refresh.configureRefresh(context(), {
             config: source.config,
@@ -4251,7 +4259,7 @@ export class OpenClawController {
         assertRefreshMinted(minted);
         status = { ...status, refresh: minted };
       } else {
-        this.auditUncommittedCredentialEffect(failureAudit, "CREDENTIAL_GATEWAY_UPDATED");
+        this.auditUncommittedCredentialEffect(failureAudit, "CREDENTIAL_GATEWAY_UPDATE_FAILED");
         status = await this.credentialGatewayOperation(() =>
           gateway.updateSource(context(), {
             type: source.type,
@@ -4339,6 +4347,7 @@ export class OpenClawController {
   /**
    * A gateway write cannot roll back with OCC's transaction, so a request that fails after one
    * began still records a failure event, in its own transaction once the request's has ended.
+   * A commit whose outcome is unknown runs no rollback, so it records neither event.
    */
   private auditUncommittedCredentialEffect(
     failureAudit: ((reasonCode: string) => AuditEvent) | undefined,

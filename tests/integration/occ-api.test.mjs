@@ -1507,7 +1507,7 @@ test("refresh source PATCH and rotate refuse a stale refresh token and audit a f
     [
       ["openclaw.credential_sources.create", "success", undefined],
       ["openclaw.credential_sources.rotate", "failure", "CREDENTIAL_REFRESH_ROTATION_FAILED"],
-      ["openclaw.credential_sources.update", "failure", "CREDENTIAL_REFRESH_RECONFIGURED"],
+      ["openclaw.credential_sources.update", "failure", "CREDENTIAL_REFRESH_UPDATE_FAILED"],
     ],
   );
   for (const event of events.slice(1)) {
