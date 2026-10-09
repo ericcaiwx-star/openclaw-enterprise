@@ -301,7 +301,8 @@ history, and the repository.
 
 ## Prepare workspace access
 
-Create the controller namespace:
+Create the controller Namespace with a DNS-1123 label (maximum 63 characters;
+no dots). Helm validates `--namespace` before rendering:
 
 ```bash
 kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" create namespace openclaw-system

@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
 updated: "2026-10-09"
-last_updated_session: "authoring-run/b1433176-2fef-435b-bc30-c52bc7fa09e4"
+last_updated_session: "authoring-run/25ae11d6-4539-4513-9b2a-24d10996f971"
 ---
 
 # Production Startup Flow
@@ -78,13 +78,11 @@ process keeps running and the next query opens a new connection.
 
 `deploy/helm/openclaw-enterprise/values.yaml:1`
 
-The operator copies and edits the production example values, Installation YAML,
-and bootstrap PVC manifest outside the checkout. Helm values select the
-controller image, API endpoint, Secret names, bootstrap claim, API-client
-selectors, control-plane node selector, and egress destinations. The
-Installation YAML selects IAM, Configuration, Compute, optional Backend,
-gateway/Agent images, projected workload identity, and runtime
-networking/storage.
+Outside the checkout, the operator prepares production values, Installation YAML,
+and bootstrap PVC. Helm values select images, API endpoint, Secrets, claim,
+selectors, and egress. `openclaw.validate` requires a DNS-1123 release Namespace
+label of at most 63 characters. Installation YAML selects Drivers, Backends,
+identity, and runtime images/networking/storage.
 
 The operator creates file-backed Kubernetes Secrets for Installation startup,
 database URLs, optional database CA bundles, Better Auth signing material, and
@@ -323,6 +321,8 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-09 22:22: Validate release Namespace labels before Helm rendering. (authoring-run/25ae11d6-4539-4513-9b2a-24d10996f971 - 7f358117e68076912a6062411d363e920a0e6adb)
 
 - 2026-10-09 21:04: Refuse fractional routing ports before Helm emits Kubernetes resources. (authoring-run/b1433176-2fef-435b-bc30-c52bc7fa09e4 - 78677c21f)
 

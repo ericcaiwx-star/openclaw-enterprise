@@ -3121,6 +3121,21 @@ test(
   "the real Helm renderer rejects mutable images, broad dependencies, and shared credentials",
   tooling,
   async () => {
+    // Helm accepts dotted and overlong --namespace values, but Kubernetes
+    // Namespace admission requires a single DNS-1123 label of at most 63.
+    for (const namespace of ["openclaw.system", "a".repeat(64), "a".repeat(253)]) {
+      await assert.rejects(
+        render({}, { namespace }),
+        /Helm release namespace must be a DNS-1123 label of at most 63 characters/,
+      );
+    }
+    for (const namespace of ["1system", "0", "a".repeat(63)]) {
+      const objects = await resources(
+        (await render(externalGatewayRoutingValues, { namespace })).stdout,
+      );
+      const gateway = objects.find((object) => object.kind === "Gateway");
+      assert.equal(gateway.metadata.namespace, namespace);
+    }
     for (const [description, override] of [
       ["mutable controller", { "images.controller": "registry.example/controller:latest" }],
       ["missing Better Auth secret", { "auth.secretName": "" }],
