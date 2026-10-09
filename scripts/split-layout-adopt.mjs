@@ -1,0 +1,965 @@
+#!/usr/bin/env node
+// Upgrades the split-layout tenants of a released single-cluster Installation in place: each
+// `oce-gateways-<hash>` storage namespace becomes its tenant's namespace. Canonical Secrets,
+// Configurations, service-account credentials and dedicated Gateway state stay where they are;
+// the old Harness namespace's claims move by PersistentVolume rebind and its Agent Secrets are
+// copied byte for byte. OCC's database is not written. See docs/guides/deploy/breaking-changes.md.
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const MANAGER = "openclaw-enterprise";
+const MANAGED_BY = "app.kubernetes.io/managed-by";
+const TENANT_LABEL = "openclaw.dev/namespace";
+const STORAGE_LABEL = "openclaw.dev/gateway-namespace";
+const ID_ANNOTATION = "openclaw.dev/namespace-id";
+const LIFECYCLE_ANNOTATION = "openclaw.dev/namespace-lifecycle";
+export const JOURNAL_ANNOTATION = "openclaw.dev/split-layout-adopt";
+const JOURNAL_FORMAT = "oce-split-layout-adopt/v1";
+const WRITERS = Object.freeze(["api", "worker"]);
+// Claims that hold Harness workspaces and embedded Gateway state.
+const MOVED_CLAIM = /^(?:workspace|gateway-state)-[0-9a-f]{12}$/u;
+// Per-revision projections of canonical Secrets; the next deploy renders them again.
+const PROJECTED_SECRET = /^(?:gateway|harness)-secrets-[0-9a-f]{12}-[0-9a-f]{12}$/u;
+// Objects Kubernetes derives from others or creates in every namespace.
+const DERIVED_RESOURCES = new Set([
+  "events",
+  "events.events.k8s.io",
+  "pods",
+  "replicasets.apps",
+  "controllerrevisions.apps",
+  "endpoints",
+  "endpointslices.discovery.k8s.io",
+]);
+const ROUTE_RESOURCES = new Set(["httproutes", "securitypolicies"]);
+const listedResource = (resource) =>
+  !DERIVED_RESOURCES.has(resource) && !resource.endsWith(".metrics.k8s.io");
+const REQUIRED_GRANTS = Object.freeze([
+  { role: "openclaw-tenant-worker", serviceAccount: "openclaw-enterprise-worker" },
+  { role: "openclaw-tenant-api", serviceAccount: "openclaw-enterprise-api" },
+  { role: "openclaw-tenant-configuration", serviceAccount: "openclaw-enterprise-api" },
+]);
+
+const usage = `Usage:
+  node scripts/split-layout-adopt.mjs plan [--out FILE]
+  node scripts/split-layout-adopt.mjs apply --archive DIR --yes
+  node scripts/split-layout-adopt.mjs revert --archive DIR --yes
+  node scripts/split-layout-adopt.mjs finalize --yes
+Options: [--namespace-id ID]... [--occ-namespace NAME] [--context NAME] [--kubeconfig FILE]`;
+
+export class AdoptError extends Error {}
+
+const sha256Hex = (value, length) =>
+  createHash("sha256").update(value).digest("hex").slice(0, length);
+export const storageNamespaceName = (id) => `oce-gateways-${sha256Hex(id, 24)}`;
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const labelsOf = (object) => object?.metadata?.labels ?? {};
+const managed = (object, id) =>
+  labelsOf(object)[MANAGED_BY] === MANAGER && labelsOf(object)[TENANT_LABEL] === id;
+const terminating = (object) =>
+  object.metadata?.deletionTimestamp !== undefined || object.status?.phase === "Terminating";
+
+/** A kubectl client over `run(args, input)`, which returns `{status, stdout, stderr}`. */
+export function createKubectl(run) {
+  const call = (args, input) => {
+    const result = run(args, input);
+    if (result.status !== 0) {
+      // kubectl errors name the object, never Secret data.
+      throw new AdoptError(
+        `kubectl ${args.slice(0, 3).join(" ")}: ${String(result.stderr).trim()}`,
+      );
+    }
+    return result.stdout;
+  };
+  const json = (args, input) => {
+    const out = call(args, input);
+    return out.trim() === "" ? undefined : JSON.parse(out);
+  };
+  const scope = (namespace) => (namespace === undefined ? [] : ["-n", namespace]);
+  return {
+    get: (resource, name, namespace) =>
+      json(["get", resource, name, ...scope(namespace), "--ignore-not-found", "-o", "json"]),
+    list: (resource, namespace, selector) =>
+      json([
+        "get",
+        resource,
+        ...scope(namespace),
+        ...(selector === undefined ? [] : ["-l", selector]),
+        "-o",
+        "json",
+      ])?.items ?? [],
+    resources: () =>
+      call(["api-resources", "--verbs=list", "--namespaced", "-o", "name"])
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+    create: (object) => json(["create", "-f", "-", "-o", "json"], JSON.stringify(object)),
+    patch: (resource, name, namespace, type, patch) =>
+      json([
+        "patch",
+        resource,
+        name,
+        ...scope(namespace),
+        "--type",
+        type,
+        "-p",
+        JSON.stringify(patch),
+        "-o",
+        "json",
+      ]),
+    // kubectl has no precondition flag; the raw DELETE carries the API's DeleteOptions.
+    deleteExact: (path, uid) =>
+      call(
+        ["delete", "--raw", path, "-f", "-"],
+        JSON.stringify({ kind: "DeleteOptions", apiVersion: "v1", preconditions: { uid } }),
+      ),
+  };
+}
+
+function objectPath(object, resource) {
+  const plural = resource.split(".")[0];
+  const base = object.apiVersion.includes("/") ? `/apis/${object.apiVersion}` : "/api/v1";
+  const scoped = object.metadata.namespace ? `/namespaces/${object.metadata.namespace}` : "";
+  return `${base}${scoped}/${plural}/${object.metadata.name}`;
+}
+
+const mountedClaims = (pods) =>
+  new Set(
+    pods.flatMap((pod) =>
+      (pod.spec?.volumes ?? []).map((volume) => volume.persistentVolumeClaim?.claimName),
+    ),
+  );
+
+function hasGrant(bindings, { role, serviceAccount }) {
+  return bindings.some(
+    (binding) =>
+      binding.roleRef?.kind === "ClusterRole" &&
+      (binding.roleRef.name === role || binding.roleRef.name?.endsWith(`-${role}`)) &&
+      (binding.subjects ?? []).some(
+        (subject) => subject.kind === "ServiceAccount" && subject.name === serviceAccount,
+      ),
+  );
+}
+
+/** Sorts every object in the old Harness namespace into moved, dropped or refused. */
+export function classify(resource, object, id) {
+  const name = object.metadata.name;
+  if (DERIVED_RESOURCES.has(resource)) {
+    return "derived";
+  }
+  if (
+    (resource === "configmaps" && name === "kube-root-ca.crt") ||
+    (resource === "serviceaccounts" && name === "default")
+  ) {
+    return "derived";
+  }
+  // Operator grants; the storage namespace holds its own (checked separately).
+  if (resource === "rolebindings.rbac.authorization.k8s.io") {
+    return "drop";
+  }
+  if (!managed(object, id)) {
+    return "refuse";
+  }
+  if (resource === "persistentvolumeclaims") {
+    return MOVED_CLAIM.test(name) ? "move-claim" : "refuse";
+  }
+  if (resource === "secrets") {
+    return PROJECTED_SECRET.test(name) ? "drop" : "copy-secret";
+  }
+  if (ROUTE_RESOURCES.has(resource.split(".")[0])) {
+    return "route";
+  }
+  return "drop";
+}
+
+/** Reads one tenant's two namespaces and decides what adoption must do. Read-only. */
+export function planTenant(kubectl, storage, resources) {
+  const id = labelsOf(storage)[STORAGE_LABEL];
+  const plan = {
+    namespaceId: id,
+    storage: storage.metadata.name,
+    storageUid: storage.metadata.uid,
+    tenant: undefined,
+    tenantUid: undefined,
+    claims: [],
+    secrets: [],
+    routes: [],
+    dropped: {},
+    running: [],
+    refusals: [],
+  };
+  const refuse = (reason) => plan.refusals.push(reason);
+  if (
+    storage.metadata.annotations?.[ID_ANNOTATION] !== id ||
+    labelsOf(storage)[MANAGED_BY] !== MANAGER
+  ) {
+    refuse(`${storage.metadata.name} is not an OCE-managed storage namespace`);
+  }
+  if (terminating(storage)) {
+    refuse(`${storage.metadata.name} is terminating`);
+  }
+  const tenants = kubectl.list("namespaces", undefined, `${TENANT_LABEL}=${id}`);
+  if (tenants.length !== 1) {
+    refuse(
+      tenants.length === 0
+        ? "no tenant namespace in this cluster (a two-cluster control target is not affected)"
+        : `${tenants.length} namespaces claim the tenant`,
+    );
+    return plan;
+  }
+  const tenant = tenants[0];
+  plan.tenant = tenant.metadata.name;
+  plan.tenantUid = tenant.metadata.uid;
+  if (tenant.metadata.annotations?.[LIFECYCLE_ANNOTATION] === "external") {
+    refuse(`${plan.tenant} is an existing namespace; use scripts/split-layout-tenants.mjs`);
+  } else if (
+    tenant.metadata.annotations?.[ID_ANNOTATION] !== id ||
+    labelsOf(tenant)[MANAGED_BY] !== MANAGER
+  ) {
+    refuse(`${plan.tenant} is not an OCE-managed tenant namespace`);
+  }
+  if (terminating(tenant)) {
+    refuse(`${plan.tenant} is terminating`);
+  }
+  for (const resource of resources.filter(listedResource)) {
+    let objects;
+    try {
+      objects = kubectl.list(resource, plan.tenant);
+    } catch (error) {
+      refuse(`cannot list ${resource} in ${plan.tenant}: ${error.message}`);
+      continue;
+    }
+    for (const object of objects) {
+      const name = object.metadata.name;
+      const verdict = classify(resource, object, id);
+      if (verdict === "move-claim") {
+        plan.claims.push(name);
+      } else if (verdict === "copy-secret") {
+        plan.secrets.push(name);
+      } else if (verdict === "route") {
+        plan.routes.push({ resource, name });
+      } else if (verdict === "drop") {
+        plan.dropped[resource] = (plan.dropped[resource] ?? 0) + 1;
+      } else if (verdict === "refuse") {
+        refuse(`${plan.tenant} holds ${resource}/${name}, which adoption does not move`);
+      }
+    }
+  }
+  for (const name of plan.claims) {
+    if (kubectl.get("persistentvolumeclaims", name, plan.storage) !== undefined) {
+      refuse(`${plan.storage} already has PersistentVolumeClaim ${name}`);
+    }
+  }
+  for (const name of plan.secrets) {
+    const existing = kubectl.get("secrets", name, plan.storage);
+    const source = kubectl.get("secrets", name, plan.tenant);
+    if (existing !== undefined && !sameSecret(existing, source)) {
+      refuse(`${plan.storage} already has a different Secret ${name}`);
+    }
+  }
+  const bindings = kubectl.list("rolebindings.rbac.authorization.k8s.io", plan.storage);
+  for (const grant of REQUIRED_GRANTS) {
+    if (!hasGrant(bindings, grant)) {
+      refuse(
+        `${plan.storage} lacks a RoleBinding of ClusterRole *-${grant.role} to ` +
+          `${grant.serviceAccount}; see production-agents.md#grant-tenant-rolebindings`,
+      );
+    }
+  }
+  for (const namespace of [plan.tenant, plan.storage]) {
+    for (const deployment of kubectl.list("deployments.apps", namespace, "openclaw.dev/agent")) {
+      if ((deployment.spec?.replicas ?? 0) > 0) {
+        plan.running.push(labelsOf(deployment)["openclaw.dev/agent"]);
+      }
+    }
+  }
+  plan.running = [...new Set(plan.running)].sort();
+  return plan;
+}
+
+function sameSecret(left, right) {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.type === right.type &&
+    JSON.stringify(Object.entries(left.data ?? {}).sort()) ===
+      JSON.stringify(Object.entries(right.data ?? {}).sort())
+  );
+}
+
+/** Plans every released split-layout tenant, or only the selected Namespace IDs. */
+export function planAll(kubectl, { namespaceIds = [] } = {}) {
+  const resources = kubectl.resources();
+  const plans = [];
+  const adopted = [];
+  for (const storage of kubectl.list("namespaces", undefined, STORAGE_LABEL)) {
+    const id = labelsOf(storage)[STORAGE_LABEL];
+    if (namespaceIds.length > 0 && !namespaceIds.includes(id)) {
+      continue;
+    }
+    if (storage.metadata.name !== storageNamespaceName(id)) {
+      continue;
+    }
+    // A journal marks a tenant this script already started; apply resumes it, finalize ends it.
+    if (storage.metadata.annotations?.[JOURNAL_ANNOTATION] !== undefined) {
+      adopted.push({ namespaceId: id, storage: storage.metadata.name });
+      continue;
+    }
+    if (labelsOf(storage)[TENANT_LABEL] !== undefined) {
+      continue;
+    }
+    plans.push(planTenant(kubectl, storage, resources));
+  }
+  return { plans, adopted };
+}
+
+function readJournal(kubectl, storage) {
+  const object = kubectl.get("namespaces", storage);
+  const raw = object?.metadata?.annotations?.[JOURNAL_ANNOTATION];
+  if (raw === undefined) {
+    return undefined;
+  }
+  const journal = JSON.parse(raw);
+  if (journal?.format !== JOURNAL_FORMAT) {
+    throw new AdoptError(`${storage} has an unreadable ${JOURNAL_ANNOTATION} annotation`);
+  }
+  return journal;
+}
+
+function writeJournal(kubectl, journal) {
+  kubectl.patch("namespaces", journal.storage, undefined, "merge", {
+    metadata: { annotations: { [JOURNAL_ANNOTATION]: JSON.stringify(journal) } },
+  });
+}
+
+async function waitFor(check, description, { timeoutMs, intervalMs = 2_000, sleep }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (check()) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new AdoptError(`timed out after ${timeoutMs} ms waiting for ${description}`);
+    }
+    await sleep(intervalMs);
+  }
+}
+
+function writerDeployments(kubectl, occNamespace) {
+  return Object.fromEntries(
+    WRITERS.map((component) => {
+      const name = `openclaw-enterprise-${component}`;
+      const deployment = kubectl.get("deployments.apps", name, occNamespace);
+      if (deployment === undefined) {
+        throw new AdoptError(`${occNamespace}/${name} does not exist; set --occ-namespace`);
+      }
+      return [component, deployment];
+    }),
+  );
+}
+
+const images = (deployment) =>
+  (deployment.spec?.template?.spec?.containers ?? []).map(({ image }) => image).sort();
+
+/**
+ * Moves one claim's PersistentVolume from `from` to `to`. Every step reads live state first,
+ * so a rerun after any failure continues where the last one stopped.
+ */
+export async function rebindClaim(kubectl, entry, from, to, { sleep, timeoutMs }) {
+  const { name, pv } = entry;
+  const readVolume = () => {
+    const volume = kubectl.get("persistentvolumes", pv);
+    if (volume === undefined) {
+      throw new AdoptError(`PersistentVolume ${pv} of claim ${name} is missing`);
+    }
+    return volume;
+  };
+  // Retain first: the claim delete below must never release the volume's data.
+  if (readVolume().spec.persistentVolumeReclaimPolicy !== "Retain") {
+    kubectl.patch("persistentvolumes", pv, undefined, "merge", {
+      spec: { persistentVolumeReclaimPolicy: "Retain" },
+    });
+    if (readVolume().spec.persistentVolumeReclaimPolicy !== "Retain") {
+      throw new AdoptError(`PersistentVolume ${pv} did not keep reclaim policy Retain`);
+    }
+  }
+  const source = kubectl.get("persistentvolumeclaims", name, from);
+  if (source !== undefined && source.spec?.volumeName === pv) {
+    if (mountedClaims(kubectl.list("pods", from)).has(name)) {
+      throw new AdoptError(`a Pod in ${from} still mounts ${name}; stop it and run again`);
+    }
+    kubectl.deleteExact(
+      `/api/v1/namespaces/${from}/persistentvolumeclaims/${name}`,
+      source.metadata.uid,
+    );
+    await waitFor(
+      () => kubectl.get("persistentvolumeclaims", name, from) === undefined,
+      `claim ${from}/${name} to be deleted`,
+      { sleep, timeoutMs },
+    );
+  } else if (source !== undefined) {
+    throw new AdoptError(`${from}/${name} is bound to another volume`);
+  }
+  const target = kubectl.get("persistentvolumeclaims", name, to);
+  if (target !== undefined && target.spec?.volumeName !== pv) {
+    throw new AdoptError(`${to}/${name} already exists for another volume`);
+  }
+  const claimRef = readVolume().spec.claimRef;
+  const reserved =
+    claimRef?.namespace === to &&
+    claimRef.name === name &&
+    (claimRef.uid === undefined || claimRef.uid === target?.metadata.uid);
+  if (!reserved) {
+    // Without uid and resourceVersion, the reference reserves the volume for the new claim.
+    kubectl.patch("persistentvolumes", pv, undefined, "json", [
+      {
+        op: claimRef === undefined ? "add" : "replace",
+        path: "/spec/claimRef",
+        value: { apiVersion: "v1", kind: "PersistentVolumeClaim", namespace: to, name },
+      },
+    ]);
+    const observed = readVolume().spec.claimRef;
+    if (observed?.namespace !== to || observed.name !== name || observed.uid !== undefined) {
+      throw new AdoptError(`PersistentVolume ${pv} did not accept the new claim reference`);
+    }
+  }
+  if (target === undefined) {
+    kubectl.create({
+      apiVersion: "v1",
+      kind: "PersistentVolumeClaim",
+      metadata: { name, namespace: to, labels: entry.labels, annotations: entry.annotations },
+      spec: { ...entry.spec, volumeName: pv },
+    });
+  }
+  await waitFor(
+    () => {
+      const claim = kubectl.get("persistentvolumeclaims", name, to);
+      return (
+        claim?.status?.phase === "Bound" && readVolume().spec.claimRef?.uid === claim.metadata.uid
+      );
+    },
+    `claim ${to}/${name} to bind ${pv}`,
+    { sleep, timeoutMs },
+  );
+  if (entry.reclaimPolicy !== "Retain") {
+    kubectl.patch("persistentvolumes", pv, undefined, "merge", {
+      spec: { persistentVolumeReclaimPolicy: entry.reclaimPolicy },
+    });
+    if (readVolume().spec.persistentVolumeReclaimPolicy !== entry.reclaimPolicy) {
+      throw new AdoptError(`PersistentVolume ${pv} did not restore ${entry.reclaimPolicy}`);
+    }
+  }
+}
+
+// Server-populated fields that must not be sent back on create.
+function portable(object) {
+  const copy = structuredClone(object);
+  for (const field of [
+    "uid",
+    "resourceVersion",
+    "creationTimestamp",
+    "generation",
+    "managedFields",
+  ]) {
+    delete copy.metadata[field];
+  }
+  delete copy.metadata.annotations?.["kubectl.kubernetes.io/last-applied-configuration"];
+  delete copy.status;
+  return copy;
+}
+
+const CLAIM_ANNOTATION_PREFIXES = [
+  "pv.kubernetes.io/",
+  "volume.beta.kubernetes.io/",
+  "volume.kubernetes.io/",
+];
+
+function claimEntry(kubectl, plan, name) {
+  const claim = kubectl.get("persistentvolumeclaims", name, plan.tenant);
+  const pv = claim?.spec?.volumeName;
+  if (claim === undefined || claim.status?.phase !== "Bound" || !pv) {
+    throw new AdoptError(`${plan.tenant}/${name} is not a bound claim`);
+  }
+  const volume = kubectl.get("persistentvolumes", pv);
+  return {
+    name,
+    pv,
+    reclaimPolicy: volume.spec.persistentVolumeReclaimPolicy,
+    labels: claim.metadata.labels ?? {},
+    annotations: Object.fromEntries(
+      Object.entries(claim.metadata.annotations ?? {}).filter(
+        ([key]) => !CLAIM_ANNOTATION_PREFIXES.some((prefix) => key.startsWith(prefix)),
+      ),
+    ),
+    // The live claim's class, not the release's manifest: a defaulted class must match the PV.
+    spec: {
+      accessModes: claim.spec.accessModes,
+      resources: { requests: { storage: claim.spec.resources.requests.storage } },
+      volumeMode: claim.spec.volumeMode ?? "Filesystem",
+      ...(claim.spec.storageClassName === undefined
+        ? {}
+        : { storageClassName: claim.spec.storageClassName }),
+    },
+    moved: false,
+  };
+}
+
+function writePrivate(path, value) {
+  const partial = `${path}.partial`;
+  writeFileSync(partial, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  renameSync(partial, path);
+}
+
+function archiveDirectory(archive, id) {
+  mkdirSync(archive, { recursive: true, mode: 0o700 });
+  if ((statSync(archive).mode & 0o077) !== 0) {
+    throw new AdoptError(`${archive} must be private (mode 0700)`);
+  }
+  const directory = join(archive, id);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return directory;
+}
+
+/** Adopts every planned tenant. Stops OCC's API and worker first and leaves them stopped. */
+export async function applyAdoption(
+  kubectl,
+  {
+    archive,
+    occNamespace = "openclaw-system",
+    namespaceIds = [],
+    log = () => {},
+    sleep = defaultSleep,
+    timeoutMs = 300_000,
+  },
+) {
+  const { plans, adopted } = planAll(kubectl, { namespaceIds });
+  const started = adopted.map(({ storage }) => readJournal(kubectl, storage));
+  const resumed = started.filter(({ state }) => state === "applying");
+  const refusals = plans.flatMap(({ storage, refusals }) =>
+    refusals.map((reason) => `${storage}: ${reason}`),
+  );
+  for (const { storage } of started.filter(({ state }) => state === "reverting")) {
+    refusals.push(`${storage}: a revert is unfinished; run revert again`);
+  }
+  if (refusals.length > 0) {
+    throw new AdoptError(`refusing to start:\n${refusals.join("\n")}`);
+  }
+  if (plans.length + resumed.length === 0) {
+    log("no split-layout tenants to adopt");
+    return [];
+  }
+  const writers = writerDeployments(kubectl, occNamespace);
+  // A resumed run finds OCC already stopped; keep the replicas recorded before the first stop.
+  const recorded =
+    resumed[0]?.writers ??
+    Object.fromEntries(
+      WRITERS.map((component) => [
+        component,
+        { replicas: writers[component].spec.replicas ?? 1, images: images(writers[component]) },
+      ]),
+    );
+  // Journals are written before any change, so revert can always restore what was there.
+  const journals = [...resumed];
+  for (const plan of plans) {
+    const journal = readJournal(kubectl, plan.storage) ?? {
+      format: JOURNAL_FORMAT,
+      state: "applying",
+      namespaceId: plan.namespaceId,
+      storage: plan.storage,
+      storageUid: plan.storageUid,
+      tenant: plan.tenant,
+      tenantUid: plan.tenantUid,
+      writers: recorded,
+      running: plan.running,
+      workloads: {},
+      claims: plan.claims.map((name) => claimEntry(kubectl, plan, name)),
+      secrets: Object.fromEntries(plan.secrets.map((name) => [name, null])),
+      routes: plan.routes,
+      routesArchived: false,
+    };
+    writeJournal(kubectl, journal);
+    journals.push(journal);
+  }
+  for (const component of WRITERS) {
+    const name = `openclaw-enterprise-${component}`;
+    if ((writers[component].spec.replicas ?? 1) !== 0) {
+      kubectl.patch("deployments.apps", name, occNamespace, "merge", { spec: { replicas: 0 } });
+      log(`scaled ${occNamespace}/${name} to 0`);
+    }
+    await waitFor(
+      () => (kubectl.get("deployments.apps", name, occNamespace)?.status?.replicas ?? 0) === 0,
+      `${name} to stop`,
+      { sleep, timeoutMs },
+    );
+  }
+  for (const journal of journals) {
+    await adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs });
+  }
+  return journals;
+}
+
+async function adoptTenant(kubectl, journal, { archive, log, sleep, timeoutMs }) {
+  const { tenant, storage, namespaceId: id } = journal;
+  const save = () => writeJournal(kubectl, journal);
+  // The plan ran while OCC still served. With OCC stopped nothing new appears, so take in
+  // what appeared meanwhile; anything adoption does not handle stops here, before any change.
+  for (const resource of kubectl.resources()) {
+    const kind = resource.split(".")[0];
+    if (!["persistentvolumeclaims", "secrets", ...ROUTE_RESOURCES].includes(kind)) {
+      continue;
+    }
+    for (const object of kubectl.list(resource, tenant)) {
+      const name = object.metadata.name;
+      const verdict = classify(resource, object, id);
+      if (verdict === "refuse") {
+        throw new AdoptError(`${tenant} gained ${resource}/${name}, which adoption does not move`);
+      }
+      if (verdict === "move-claim" && !journal.claims.some((entry) => entry.name === name)) {
+        journal.claims.push(claimEntry(kubectl, journal, name));
+      } else if (verdict === "copy-secret" && !(name in journal.secrets)) {
+        journal.secrets[name] = null;
+      } else if (
+        verdict === "route" &&
+        !journal.routesArchived &&
+        !journal.routes.some((route) => route.resource === resource && route.name === name)
+      ) {
+        journal.routes.push({ resource, name });
+      }
+    }
+  }
+  save();
+  for (const deployment of kubectl.list("deployments.apps", tenant)) {
+    const name = deployment.metadata.name;
+    if (journal.workloads[name] === undefined) {
+      journal.workloads[name] = deployment.spec?.replicas ?? 1;
+      save();
+    }
+    if ((deployment.spec?.replicas ?? 1) !== 0) {
+      kubectl.patch("deployments.apps", name, tenant, "merge", { spec: { replicas: 0 } });
+    }
+  }
+  const moving = new Set(journal.claims.map(({ name }) => name));
+  await waitFor(
+    () => ![...mountedClaims(kubectl.list("pods", tenant))].some((claim) => moving.has(claim)),
+    `Pods in ${tenant} to release their claims`,
+    { sleep, timeoutMs },
+  );
+  log(`${tenant}: workloads stopped`);
+  for (const name of Object.keys(journal.secrets)) {
+    const source = kubectl.get("secrets", name, tenant);
+    const existing = kubectl.get("secrets", name, storage);
+    if (existing !== undefined) {
+      if (!sameSecret(existing, source ?? existing)) {
+        throw new AdoptError(`${storage} already has a different Secret ${name}`);
+      }
+      continue;
+    }
+    if (source === undefined) {
+      throw new AdoptError(`${tenant}/${name} disappeared before it was copied`);
+    }
+    const copy = portable(source);
+    copy.metadata.namespace = storage;
+    // An owner in the old namespace would make the garbage collector delete the copy.
+    delete copy.metadata.ownerReferences;
+    journal.secrets[name] = kubectl.create(copy).metadata.uid;
+    save();
+  }
+  log(`${tenant}: ${Object.keys(journal.secrets).length} Agent Secrets copied to ${storage}`);
+  // Archive the routes before deleting them: revert recreates them from this file.
+  const routesFile = join(archiveDirectory(archive, id), "routes.json");
+  if (!journal.routesArchived) {
+    const routes = journal.routes
+      .map(({ resource, name }) => ({ resource, object: kubectl.get(resource, name, tenant) }))
+      .filter(({ object }) => object !== undefined);
+    writePrivate(routesFile, routes);
+    journal.routesArchived = true;
+    save();
+  }
+  for (const { resource, object } of JSON.parse(readFileSync(routesFile, "utf8"))) {
+    const live = kubectl.get(resource, object.metadata.name, tenant);
+    if (live !== undefined) {
+      kubectl.deleteExact(objectPath(live, resource), live.metadata.uid);
+    }
+  }
+  log(`${tenant}: ${journal.routes.length} routes archived and deleted`);
+  for (const entry of journal.claims) {
+    if (!entry.moved) {
+      await rebindClaim(kubectl, entry, tenant, storage, { sleep, timeoutMs });
+      entry.moved = true;
+      save();
+      log(`${tenant}/${entry.name} -> ${storage} (${entry.pv})`);
+    }
+  }
+  // Storage first: until the tenant label leaves the old namespace, both claim the tenant and
+  // OCC refuses to pick one, which is the safe state for a crash between the two patches.
+  kubectl.patch("namespaces", storage, undefined, "merge", {
+    metadata: { labels: { [TENANT_LABEL]: id } },
+  });
+  kubectl.patch("namespaces", tenant, undefined, "merge", {
+    metadata: { labels: { [TENANT_LABEL]: null } },
+  });
+  journal.state = "applied";
+  save();
+  log(`${storage} is now the tenant namespace of ${id}`);
+}
+
+/** Undoes apply while the old release is still installed (its API and worker stopped). */
+export async function revertAdoption(
+  kubectl,
+  {
+    archive,
+    occNamespace = "openclaw-system",
+    namespaceIds = [],
+    log = () => {},
+    sleep = defaultSleep,
+    timeoutMs = 300_000,
+  },
+) {
+  const journals = kubectl
+    .list("namespaces", undefined, STORAGE_LABEL)
+    .filter((storage) => storage.metadata.annotations?.[JOURNAL_ANNOTATION] !== undefined)
+    .map((storage) => readJournal(kubectl, storage.metadata.name))
+    .filter(({ namespaceId }) => namespaceIds.length === 0 || namespaceIds.includes(namespaceId));
+  if (journals.length === 0) {
+    log("nothing to revert");
+    return [];
+  }
+  const writers = writerDeployments(kubectl, occNamespace);
+  for (const component of WRITERS) {
+    const recorded = journals[0].writers[component];
+    if (
+      JSON.stringify(images(writers[component])) !== JSON.stringify(recorded.images) ||
+      (writers[component].spec.replicas ?? 1) !== 0
+    ) {
+      throw new AdoptError(
+        `openclaw-enterprise-${component} no longer runs the adopted release stopped; ` +
+          "revert is only possible before the upgrade starts it",
+      );
+    }
+  }
+  for (const journal of journals) {
+    const { tenant, storage, namespaceId: id } = journal;
+    kubectl.patch("namespaces", tenant, undefined, "merge", {
+      metadata: { labels: { [TENANT_LABEL]: id } },
+    });
+    kubectl.patch("namespaces", storage, undefined, "merge", {
+      metadata: { labels: { [TENANT_LABEL]: null } },
+    });
+    journal.state = "reverting";
+    writeJournal(kubectl, journal);
+    for (const entry of journal.claims) {
+      if (
+        kubectl.get("persistentvolumeclaims", entry.name, tenant)?.spec?.volumeName !== entry.pv
+      ) {
+        await rebindClaim(kubectl, entry, storage, tenant, { sleep, timeoutMs });
+        log(`${storage}/${entry.name} -> ${tenant} (${entry.pv})`);
+      }
+      entry.moved = false;
+      writeJournal(kubectl, journal);
+    }
+    for (const [name, uid] of Object.entries(journal.secrets)) {
+      if (uid !== null && kubectl.get("secrets", name, storage)?.metadata.uid === uid) {
+        kubectl.deleteExact(`/api/v1/namespaces/${storage}/secrets/${name}`, uid);
+      }
+    }
+    if (journal.routesArchived) {
+      const routesFile = join(archiveDirectory(archive, id), "routes.json");
+      for (const { resource, object } of JSON.parse(readFileSync(routesFile, "utf8"))) {
+        if (kubectl.get(resource, object.metadata.name, tenant) === undefined) {
+          kubectl.create(portable(object));
+        }
+      }
+    }
+    for (const [name, replicas] of Object.entries(journal.workloads)) {
+      kubectl.patch("deployments.apps", name, tenant, "merge", { spec: { replicas } });
+    }
+    kubectl.patch("namespaces", storage, undefined, "merge", {
+      metadata: { annotations: { [JOURNAL_ANNOTATION]: null } },
+    });
+    log(`${tenant} is the tenant namespace of ${id} again`);
+  }
+  for (const component of WRITERS) {
+    const { replicas } = journals[0].writers[component];
+    kubectl.patch("deployments.apps", `openclaw-enterprise-${component}`, occNamespace, "merge", {
+      spec: { replicas },
+    });
+  }
+  log("OCC API and worker restored; the old release serves again");
+  return journals;
+}
+
+/** Deletes each adopted tenant's old Harness namespace once the new release runs. */
+export async function finalizeAdoption(
+  kubectl,
+  {
+    occNamespace = "openclaw-system",
+    namespaceIds = [],
+    log = () => {},
+    sleep = defaultSleep,
+    timeoutMs = 300_000,
+  },
+) {
+  const writers = writerDeployments(kubectl, occNamespace);
+  const finalized = [];
+  for (const storage of kubectl.list("namespaces", undefined, STORAGE_LABEL)) {
+    const journal = readJournal(kubectl, storage.metadata.name);
+    if (
+      journal === undefined ||
+      (namespaceIds.length > 0 && !namespaceIds.includes(journal.namespaceId))
+    ) {
+      continue;
+    }
+    const { tenant, namespaceId: id } = journal;
+    if (journal.state !== "applied" || labelsOf(storage)[TENANT_LABEL] !== id) {
+      throw new AdoptError(
+        `${storage.metadata.name} is not fully adopted (state ${journal.state}); run apply`,
+      );
+    }
+    if (
+      WRITERS.some(
+        (component) =>
+          JSON.stringify(images(writers[component])) ===
+          JSON.stringify(journal.writers[component].images),
+      )
+    ) {
+      throw new AdoptError("upgrade the controller first; finalize removes the way back");
+    }
+    const old = kubectl.get("namespaces", tenant);
+    if (old !== undefined) {
+      if (old.metadata.uid !== journal.tenantUid || labelsOf(old)[TENANT_LABEL] !== undefined) {
+        throw new AdoptError(`${tenant} changed since apply; inspect it before deleting`);
+      }
+      const left = kubectl
+        .list("persistentvolumeclaims", tenant)
+        .map(({ metadata }) => metadata.name);
+      if (left.length > 0) {
+        throw new AdoptError(`${tenant} still holds claims ${left.join(", ")}`);
+      }
+      for (const entry of journal.claims) {
+        if (
+          kubectl.get("persistentvolumeclaims", entry.name, journal.storage)?.status?.phase !==
+          "Bound"
+        ) {
+          throw new AdoptError(`${journal.storage}/${entry.name} is not bound`);
+        }
+      }
+      if (!terminating(old)) {
+        kubectl.deleteExact(`/api/v1/namespaces/${tenant}`, journal.tenantUid);
+      }
+      await waitFor(
+        () => kubectl.get("namespaces", tenant) === undefined,
+        `${tenant} to be deleted`,
+        {
+          sleep,
+          timeoutMs,
+        },
+      );
+    }
+    kubectl.patch("namespaces", journal.storage, undefined, "merge", {
+      metadata: { annotations: { [JOURNAL_ANNOTATION]: null } },
+    });
+    log(`${tenant} deleted; ${journal.storage} keeps tenant ${id}`);
+    finalized.push(journal);
+  }
+  return finalized;
+}
+
+function parseArgs(argv) {
+  const [command, ...rest] = argv;
+  const options = { command, namespaceIds: [], kubectlArgs: [] };
+  for (let index = 0; index < rest.length; index += 1) {
+    const flag = rest[index];
+    const value = rest[index + 1];
+    if (flag === "--yes") {
+      options.yes = true;
+    } else if (["--context", "--kubeconfig"].includes(flag) && value !== undefined) {
+      options.kubectlArgs.push(flag, value);
+      index += 1;
+    } else if (flag === "--namespace-id" && value !== undefined) {
+      options.namespaceIds.push(value);
+      index += 1;
+    } else if (["--out", "--archive", "--occ-namespace"].includes(flag) && value !== undefined) {
+      options[flag.slice(2).replace(/-(\w)/gu, (_, c) => c.toUpperCase())] = value;
+      index += 1;
+    } else {
+      throw new AdoptError(`unknown argument ${flag}\n${usage}`);
+    }
+  }
+  return options;
+}
+
+export async function main(argv, { run } = {}) {
+  const options = parseArgs(argv);
+  const kubectl = createKubectl(
+    run ??
+      ((args, input) =>
+        spawnSync("kubectl", ["--request-timeout=30s", ...options.kubectlArgs, ...args], {
+          input,
+          encoding: "utf8",
+          timeout: 60_000,
+          maxBuffer: 256 * 1024 * 1024,
+        })),
+  );
+  const log = (line) => console.log(`${new Date().toISOString()} ${line}`);
+  const common = { occNamespace: options.occNamespace, namespaceIds: options.namespaceIds, log };
+  if (options.command === "plan") {
+    const result = planAll(kubectl, options);
+    for (const plan of result.plans) {
+      log(
+        `${plan.storage} <- ${plan.tenant ?? "?"} (${plan.namespaceId}): ${plan.claims.length} claims, ` +
+          `${plan.secrets.length} Secrets, ${plan.routes.length} routes; running Agents: ` +
+          `${plan.running.join(", ") || "none"}`,
+      );
+      for (const reason of plan.refusals) {
+        log(`  refused: ${reason}`);
+      }
+    }
+    for (const { storage } of result.adopted) {
+      log(`${storage}: adopted; finalize pending`);
+    }
+    if (options.out) {
+      writePrivate(options.out, result);
+    }
+    return result.plans.some(({ refusals }) => refusals.length > 0) ? 2 : 0;
+  }
+  if (!options.yes || (options.command !== "finalize" && !options.archive)) {
+    throw new AdoptError(usage);
+  }
+  if (options.command === "apply") {
+    const journals = await applyAdoption(kubectl, { ...common, archive: options.archive });
+    const running = journals.flatMap(({ running }) => running);
+    log(
+      "adopted; OCC stays stopped. Upgrade the controller now, then deploy the Agents that " +
+        `were running: ${running.join(" ") || "none"}`,
+    );
+  } else if (options.command === "revert") {
+    await revertAdoption(kubectl, { ...common, archive: options.archive });
+  } else if (options.command === "finalize") {
+    await finalizeAdoption(kubectl, common);
+  } else {
+    throw new AdoptError(usage);
+  }
+  return 0;
+}
+
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+) {
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (error) => {
+      console.error(error instanceof AdoptError ? error.message : error);
+      process.exit(1);
+    },
+  );
+}
