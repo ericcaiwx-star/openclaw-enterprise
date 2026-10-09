@@ -1861,6 +1861,15 @@ export interface ComputeDriver extends Driver {
     request: AgentRuntimeLogRequest,
   ): Promise<AgentRuntimeLogChunk>;
   deleteAgentRuntimeCredentials?(binding: ComputeAgentBinding): Promise<void>;
+  /**
+   * Removes a ServiceAccount's account-owned access-token Secret. A force-delete with no
+   * ServiceAccount Driver left calls it so no copy of the unrevoked token stays behind.
+   */
+  deleteServiceAccountCredential?(input: {
+    readonly namespaceId: string;
+    readonly serviceAccountId: string;
+    readonly secretRef: ServiceAccountCredential["secretRef"];
+  }): Promise<void>;
   getGatewayEndpoint?(revision: AgentRevision): string | undefined;
   ensureNamespace(namespace: Namespace): Promise<NamespaceEnsureResult>;
   deleteNamespace(namespace: Namespace): Promise<NamespaceDeleteResult>;
@@ -1873,7 +1882,9 @@ export interface ComputeDriver extends Driver {
    * Revokes `source` from the revision's paired Sandbox through the selected Credential
    * Gateway. Returns `revoked` only after the gateway confirms revocation, and `absent` when
    * the revision has no Sandbox or attachment left to revoke. Required for withdrawal.
-   * `options.recheck` is passed through to the gateway's withdrawal context.
+   * `options.recheck` is passed through to the gateway's withdrawal context. Throws OCC's
+   * CredentialWithdrawalRefusedError when retrying cannot help: a configuration that cannot
+   * reach the revision's Sandbox, or an object the Driver does not own.
    */
   withdrawCredentialSource?(
     revision: Readonly<AgentRevision>,

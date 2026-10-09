@@ -248,6 +248,59 @@ if (command === "docker" || command === "podman") {
     state.tag = args[args.indexOf("-t") + 1];
     finish();
   }
+  // The cache-only probe reports each image's config digest. In the engine-*
+  // scenarios the cache resolves to images the engine may hold: engine-holds-images
+  // holds both; the others fail one step of the probe.
+  const heldImages = { controller: "sha256:" + "d".repeat(64), runtime: "sha256:" + "e".repeat(64) };
+  const absentImage = "sha256:" + "f".repeat(64);
+  if (equals(args.slice(0, 4), ["buildx", "build", "--output", "type=image,push=false,store=false"])) {
+    assert.equal(args[4], "--provenance=false");
+    assert.equal(args.includes("--load") || args.includes("--cache-to"), false);
+    const role = args.includes("--target") ? "controller" : "runtime";
+    const metadata = args[args.indexOf("--metadata-file") + 1];
+    if (scenario === "engine-bad-metadata") {
+      // Unparsable for the controller, no image digest for the runtime.
+      writeFileSync(metadata, role === "controller" ? "{" : JSON.stringify({
+        "containerimage.config.digest": "sha256:not-a-digest",
+      }));
+      finish();
+    }
+    writeFileSync(metadata, JSON.stringify({
+      "containerimage.config.digest": scenario.startsWith("engine-")
+        ? heldImages[role]
+        : absentImage,
+    }));
+    finish();
+  }
+  if (equals(args.slice(0, 4), ["image", "inspect", "--format", "{{.Id}}"]) &&
+      [...Object.values(heldImages), absentImage].includes(args[4])) {
+    if (scenario === "engine-inspect-hung") await hang();
+    if (scenario === "engine-inspect-failed") {
+      process.stderr.write("Cannot connect to the Docker daemon\n");
+      process.exit(1);
+    }
+    // The engine holds another image under the reference (a different ID).
+    if (scenario === "engine-holds-different") finish("sha256:" + "a".repeat(64) + "\n");
+    if (scenario.startsWith("engine-")) finish(args[4] + "\n");
+    process.stderr.write("Error response from daemon: No such image: " + args[4] + "\n");
+    process.exit(1);
+  }
+  if (
+    scenario === "engine-tag-failed" &&
+    args[0] === "tag" &&
+    args.length === 3 &&
+    Object.values(heldImages).includes(args[1])
+  ) {
+    process.stderr.write("Error response from daemon: synthetic tag failure\n");
+    process.exit(1);
+  }
+  if (scenario === "engine-holds-images" && args[0] === "tag" && args.length === 3) {
+    const role = Object.keys(heldImages).find((key) => heldImages[key] === args[1]);
+    assert.ok(role, args[1]);
+    assert.match(args[2], new RegExp("/" + role + ":local$"));
+    state[role] = args[2];
+    finish();
+  }
   if (equals(args.slice(0, 2), ["buildx", "build"]) && args.includes("--target")) {
     assert.equal(args[args.indexOf("--target") + 1], "runtime");
     if (scenario === "controller-build-failed") {
@@ -264,6 +317,14 @@ if (command === "docker" || command === "podman") {
   if ((args[0] === "build" || equals(args.slice(0, 2), ["buildx", "build"])) && args.includes("-f")) {
     assert.ok(args[args.indexOf("-f") + 1].endsWith("/deploy/runtime/Dockerfile"));
     state.runtime = args[args.indexOf("-t") + 1];
+    finish();
+  }
+  // The main image cache warm job keeps its runtime image under a tag naming its ID.
+  if (state.runtime && equals(args, ["image", "inspect", "--format", "{{.Id}}", state.runtime])) {
+    finish(configId + "\n");
+  }
+  if (args[0] === "tag" && args[2]?.startsWith("localhost/openclaw-ci-main/")) {
+    assert.deepEqual(args, ["tag", state.runtime, "localhost/openclaw-ci-main/runtime:bbbbbbbbbbbb"]);
     finish();
   }
   if (equals(args.slice(0, 3), ["build", "--pull=false", "-t"]) && args.length === 5) {
@@ -417,31 +478,41 @@ if (command === "corepack" && equals(args, ["pnpm", "db:migrate"])) {
 }
 if (command === "k3d") {
   if (equals(args, ["version"])) finish("k3d version v5.8.3\n");
-  if (equals(args.slice(0, 2), ["cluster", "create"]) && [13, 15, 16].includes(args.length)) {
+  if (equals(args.slice(0, 2), ["cluster", "create"]) && [15, 17, 18].includes(args.length)) {
     assert.match(args[2], /^openclaw-k8s-/);
     assert.deepEqual(args.slice(3, 5), ["--image", process.env.OPENCLAW_CI_K3S_IMAGE || ${JSON.stringify(defaultK3sImage)}]);
     // A channel such as +v1.35 makes k3d query update.k3s.io on every cluster
     // create; the forwarded node image must be a digest-pinned K3s 1.35 image.
     assert.match(args[4], /:v1\.35\.\d+-k3s\d+@sha256:[a-f0-9]{64}$/);
-    if (args.length >= 15) {
+    if (args.length >= 17) {
     assert.deepEqual(args.slice(5, 10), ["--servers", "1", "--agents", "1", "--volume"]);
     const storage = args[10].split(":");
     assert.equal(storage[1], "/var/lib/rancher/k3s/storage@all");
     assert.ok(existsSync(storage[0]), "both nodes must mount an existing shared host directory");
     assert.equal(args[11], "--api-port");
     assert.match(args[12], /^127\.0\.0\.1:\d+$/);
-    assert.deepEqual(args.slice(13, 15), ["--kubeconfig-update-default=false", "--kubeconfig-switch-context=false"]);
+    assert.deepEqual(args.slice(13, 17), [
+      "--kubeconfig-update-default=false",
+      "--kubeconfig-switch-context=false",
+      "--lb-config-override",
+      "settings.workerConnections=8192",
+    ]);
     // The creation-failure case models k3d's default rollback so it can prove
     // that the preparation owner retains containers for diagnosis and cleanup.
     if (scenario !== "cluster-create-failed") {
-      assert.deepEqual(args.slice(15), ["--no-rollback"]);
+      assert.deepEqual(args.slice(17), ["--no-rollback"]);
     } else {
-      assert.ok(equals(args.slice(15), []) || equals(args.slice(15), ["--no-rollback"]));
+      assert.ok(equals(args.slice(17), []) || equals(args.slice(17), ["--no-rollback"]));
     }
     } else {
     assert.deepEqual(args.slice(5, 10), ["--servers", "1", "--agents", "0", "--api-port"]);
     assert.match(args[10], /^127\.0\.0\.1:\d+$/);
-    assert.deepEqual(args.slice(11), ["--kubeconfig-update-default=false", "--kubeconfig-switch-context=false"]);
+    assert.deepEqual(args.slice(11), [
+      "--kubeconfig-update-default=false",
+      "--kubeconfig-switch-context=false",
+      "--lb-config-override",
+      "settings.workerConnections=8192",
+    ]);
     }
     state.cluster = args[2];
     state.clusterDeleted = false;
@@ -1307,9 +1378,15 @@ test("repository platform preparation restores the runtime image cache without e
   const prepared = commands.prepare();
   assert.equal(prepared.status, 0, prepared.stderr);
   const calls = (await commands.commands()).filter(({ command }) => command === "docker");
-  const runtime = calls.filter(({ args }) => args[0] === "buildx");
+  const runtime = calls.filter(({ args }) => args[0] === "buildx" && args.includes("--load"));
   assert.equal(runtime.length, 1);
   const { args } = runtime[0];
+  // The engine lacked the probed image, so the lane loaded the build.
+  const probes = calls.filter(({ args }) => args[0] === "buildx" && args.includes("--output"));
+  assert.deepEqual(
+    probes.map(({ args: probe }) => probe.slice(7)),
+    [args.slice(3)],
+  );
   assert.deepEqual(args.slice(0, 3), ["buildx", "build", "--load"]);
   assert.equal(
     args[args.indexOf("--cache-from") + 1],
@@ -1388,8 +1465,20 @@ test("Images and Packaging exports the image caches only on main pushes", async 
     });
     const prepared = commands.prepare();
     assert.equal(prepared.status, 0, `${event}: ${prepared.stderr}`);
-    const builds = (await commands.commands()).filter(({ args }) => args[0] === "buildx");
+    const calls = (await commands.commands()).filter(({ args }) => args[0] === "buildx");
+    const builds = calls.filter(({ args }) => args.includes("--load"));
     assert.equal(builds.length, 2, event);
+    // Only a lane that exports the cache skips the probe for an existing image.
+    assert.equal(calls.length, exported ? 2 : 4, event);
+    // A fixed epoch keeps independent builds of the same layers on one image ID;
+    // the probe must resolve the same ID the build would load.
+    for (const { args } of calls) {
+      assert.equal(args[args.indexOf("SOURCE_DATE_EPOCH=0") - 1], "--build-arg", event);
+    }
+    if (!exported) {
+      assert.match(prepared.stderr, /"stage":"controller-image-reuse","outcome":"absent"/, event);
+      assert.match(prepared.stderr, /"stage":"runtime-image-reuse","outcome":"absent"/, event);
+    }
     for (const { args } of builds) {
       const role = args.includes("--target") ? "controller" : "runtime";
       const cache = `type=gha,version=2,scope=oce-ci-${role}-${process.platform}-${process.arch}-v1`;
@@ -1404,6 +1493,128 @@ test("Images and Packaging exports the image caches only on main pushes", async 
     assert.equal(cleaned.status, 0, `${event}: ${cleaned.stderr}`);
   }
 });
+
+test("image lanes tag the engine's copy when the restored cache resolves to an image it holds", async (t) => {
+  const commands = await fixtureImageCommands(t, "engine-holds-images", "images-packaging", {
+    GITHUB_ACTIONS: "true",
+    GITHUB_EVENT_NAME: "pull_request",
+    OCC_CI_IMAGE_CACHE: "1",
+    ACTIONS_RUNTIME_TOKEN: "synthetic-cache-credential",
+    ACTIONS_RESULTS_URL: "https://cache.example.test/",
+  });
+  const prepared = commands.prepare();
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const calls = (await commands.commands()).filter(({ command }) => command === "docker");
+  // Both images resolve from the cache without loading any layer.
+  const builds = calls.filter(({ args }) => args[0] === "buildx");
+  assert.equal(builds.length, 2);
+  assert.ok(builds.every(({ args }) => args.includes("--output") && !args.includes("--load")));
+  const tags = calls.filter(({ args }) => args[0] === "tag");
+  assert.deepEqual(tags.map(({ args }) => args[1]).sort(), [
+    "sha256:" + "d".repeat(64),
+    "sha256:" + "e".repeat(64),
+  ]);
+  const state = JSON.parse(await readFile(commands.statePath, "utf8"));
+  for (const { args } of tags) {
+    const tagged = state.resources.find(
+      ({ kind, name }) => kind === "image-tag" && name === args[2],
+    );
+    assert.equal(tagged?.status, "ready", args[2]);
+  }
+  // The log names each resolved image ID.
+  assert.match(
+    prepared.stderr,
+    new RegExp(
+      `"stage":"controller-image-reuse","outcome":"reused","image":"sha256:${"d".repeat(64)}"`,
+    ),
+  );
+  assert.match(
+    prepared.stderr,
+    new RegExp(
+      `"stage":"runtime-image-reuse","outcome":"reused","image":"sha256:${"e".repeat(64)}"`,
+    ),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(calls) + prepared.stdout + prepared.stderr,
+    /synthetic-cache-credential/,
+  );
+  const cleaned = commands.cleanup();
+  assert.equal(cleaned.status, 0, cleaned.stderr);
+});
+
+for (const { scenario, outcome, env = {} } of [
+  {
+    scenario: "engine-holds-different",
+    outcome: { controller: "different", runtime: "different" },
+  },
+  {
+    scenario: "engine-bad-metadata",
+    outcome: { controller: "probe-failed", runtime: "unresolved" },
+  },
+  {
+    scenario: "engine-inspect-failed",
+    outcome: { controller: "probe-failed", runtime: "probe-failed" },
+  },
+  {
+    scenario: "engine-inspect-hung",
+    outcome: { controller: "probe-failed", runtime: "probe-failed" },
+    env: { OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000" },
+  },
+  {
+    scenario: "engine-tag-failed",
+    outcome: { controller: "probe-failed", runtime: "probe-failed" },
+  },
+  // The probe's temporary directory cannot be created.
+  {
+    scenario: "engine-holds-images",
+    outcome: { controller: "probe-failed", runtime: "probe-failed" },
+    env: { RUNNER_TEMP: "/nonexistent/oce-ci-prepare-runner-temp" },
+  },
+]) {
+  test(`image lanes build when the engine image probe cannot reuse: ${scenario} ${JSON.stringify(env)}`, async (t) => {
+    const commands = await fixtureImageCommands(t, scenario, "images-packaging", {
+      GITHUB_ACTIONS: "true",
+      GITHUB_EVENT_NAME: "pull_request",
+      OCC_CI_IMAGE_CACHE: "1",
+      ACTIONS_RUNTIME_TOKEN: "synthetic-cache-credential",
+      ACTIONS_RESULTS_URL: "https://cache.example.test/",
+      ...env,
+    });
+    const prepared = commands.prepare();
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const calls = (await commands.commands()).filter(({ command }) => command === "docker");
+    // Both images build and load as if no probe had run.
+    const builds = calls.filter(({ args }) => args[0] === "buildx" && args.includes("--load"));
+    assert.equal(builds.length, 2);
+    const state = JSON.parse(await readFile(commands.statePath, "utf8"));
+    for (const { args } of builds) {
+      const tag = args[args.indexOf("-t") + 1];
+      const tagged = state.resources.find(({ kind, name }) => kind === "image-tag" && name === tag);
+      assert.equal(tagged?.status, "ready", tag);
+    }
+    for (const [role, expected] of Object.entries(outcome)) {
+      assert.match(
+        prepared.stderr,
+        new RegExp(`"stage":"${role}-image-reuse","outcome":"${expected}"`),
+        role,
+      );
+    }
+    // Only a probe that failed at the tag itself tried to tag.
+    assert.equal(
+      calls.filter(({ args }) => args[0] === "tag").length,
+      scenario === "engine-tag-failed" ? 2 : 0,
+    );
+    if (env.RUNNER_TEMP !== undefined) {
+      // No probe build ran without a metadata directory.
+      assert.equal(
+        calls.filter(({ args }) => args.includes("type=image,push=false,store=false")).length,
+        0,
+      );
+    }
+    const cleaned = commands.cleanup();
+    assert.equal(cleaned.status, 0, cleaned.stderr);
+  });
+}
 
 const warmCacheEnv = {
   GITHUB_ACTIONS: "true",
@@ -1454,8 +1665,33 @@ test("the main image cache warm job builds the packaging images and exports both
     JSON.stringify(builds) + state + warmed.stdout + warmed.stderr,
     /synthetic-cache-credential/,
   );
+  // The runtime image stays tagged under a local name that cleanup does not own and that
+  // names its ID, so the runners' shared image cache keeps main's image for the image lanes.
+  const kept = `localhost/openclaw-ci-main/runtime:${"b".repeat(12)}`;
+  const calls = await commands.commands();
+  const runtimeBuild = calls.findIndex(
+    ({ args }) => args[0] === "buildx" && !args.includes("--target"),
+  );
+  const tagged = calls.findIndex(({ args }) => args[0] === "tag" && args[2] === kept);
+  assert.ok(runtimeBuild >= 0 && tagged > runtimeBuild);
+  assert.match(calls[tagged].args[1], /^localhost\/openclaw-ci-image-[a-z0-9-]+\/runtime:local$/);
+  assert.match(
+    warmed.stderr,
+    new RegExp(`"stage":"runtime-image-kept","image":"sha256:${"b".repeat(64)}","tag":"${kept}"`),
+  );
+  assert.doesNotMatch(state, /openclaw-ci-main/);
   const cleaned = commands.cleanup();
   assert.equal(cleaned.status, 0, cleaned.stderr);
+  const removed = (await commands.commands()).filter(
+    ({ args }) => args[0] === "image" && args[1] === "rm",
+  );
+  assert.deepEqual(
+    removed.map(({ args }) => args.at(-1)).sort(),
+    [
+      calls[tagged].args[1],
+      builds.find(({ args }) => args.includes("--target")).args.at(-2),
+    ].sort(),
+  );
 });
 
 test("the image cache warm job prints a failed build's output and fails", async (t) => {
@@ -1471,6 +1707,8 @@ test("the image cache warm job prints a failed build's output and fails", async 
     warmed.stderr,
     /^\[image-cache-warm\] controller build\n#7 \[runtime 3\/9\] synthetic controller step$/m,
   );
+  // A failed warm build keeps nothing.
+  assert.equal((await commands.commands()).filter(({ args }) => args[0] === "tag").length, 0);
   assert.doesNotMatch(warmed.stdout + warmed.stderr, /synthetic-cache-credential/);
   const cleaned = commands.cleanup();
   assert.equal(cleaned.status, 0, cleaned.stderr);

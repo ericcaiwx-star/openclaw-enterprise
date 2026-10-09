@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
   chmod,
@@ -33,18 +33,22 @@ async function writeJson(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function runnerEnv(env = {}) {
+  return {
+    ...process.env,
+    GITHUB_SHA: currentSha(),
+    CI_RUNNER_PARENT_SECRET: "secretauthvalue-parent",
+    // Fixture failures quote this value; the reporter must redact env values.
+    CI_RUNNER_FIXTURE_CREDENTIAL: "secretauthvalue",
+    ...env,
+  };
+}
+
 function run(root, args, env = {}) {
   return spawnSync(process.execPath, [runnerPath, ...args], {
     cwd: repositoryRoot,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      GITHUB_SHA: currentSha(),
-      CI_RUNNER_PARENT_SECRET: "secretauthvalue-parent",
-      // Fixture failures quote this value; the reporter must redact env values.
-      CI_RUNNER_FIXTURE_CREDENTIAL: "secretauthvalue",
-      ...env,
-    },
+    env: runnerEnv(env),
   });
 }
 
@@ -738,6 +742,153 @@ test(
     assert.equal(alive(), false);
   },
 );
+
+// Polls until check() is truthy or the deadline passes; returns check()'s last value.
+async function waitFor(check, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let value = check();
+  while (!value && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    value = check();
+  }
+  return value;
+}
+
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  test(
+    `run kills every live test group on ${signal} and exits by that signal`,
+    { skip: process.platform !== "linux" && "reads /proc" },
+    async (t) => {
+      const root = await fixture(t);
+      const recordPath = join(root, "state/hang-pids.json");
+      // The isolated test-file child ignores the signal and has a child of its own, so
+      // only the forwarded SIGKILL to the Node test runner's group can end them.
+      await writeFile(
+        join(root, "tests/integration/hang.test.mjs"),
+        [
+          'import { spawn } from "node:child_process";',
+          'import { readFileSync, renameSync, writeFileSync } from "node:fs";',
+          'import test from "node:test";',
+          'test("hangs with the signal ignored", async () => {',
+          `  process.on(${JSON.stringify(signal)}, () => {});`,
+          '  const grandchild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });',
+          '  const pgid = (pid) => Number(readFileSync(`/proc/${pid}/stat`, "utf8").replace(/^.*\\) /su, "").split(" ")[2]);',
+          "  const record = process.env.CI_RUNNER_ORPHAN_RECORD;",
+          "  writeFileSync(`${record}.partial`, JSON.stringify({",
+          "    runner: process.ppid, file: process.pid, grandchild: grandchild.pid,",
+          "    pgid: pgid(process.pid), grandchildPgid: pgid(grandchild.pid),",
+          "  }));",
+          "  renameSync(`${record}.partial`, record);",
+          "  await new Promise((resolve) => setTimeout(resolve, 30_000));",
+          "});",
+          "",
+        ].join("\n"),
+      );
+      await writeJson(join(root, "manifest.json"), {
+        version: 1,
+        lanes: { hang: { files: [{ path: "tests/integration/hang.test.mjs" }] } },
+        groups: { ci: ["hang"] },
+      });
+
+      // Detached, so the signal reaches only run-tests.mjs, never this test's group.
+      const ciRunner = spawn(
+        process.execPath,
+        [
+          runnerPath,
+          "run",
+          "hang",
+          "--manifest",
+          "manifest.json",
+          "--root",
+          root,
+          "--state",
+          join(root, "state/hang.json"),
+          "--results",
+          join(root, "results/hang.json"),
+        ],
+        {
+          cwd: repositoryRoot,
+          detached: true,
+          stdio: ["ignore", "ignore", "pipe"],
+          env: runnerEnv({
+            CI_RUNNER_TEST_TIMEOUT_MS: "30000",
+            CI_RUNNER_ORPHAN_RECORD: recordPath,
+          }),
+        },
+      );
+      let stderr = "";
+      ciRunner.stderr.setEncoding("utf8");
+      ciRunner.stderr.on("data", (chunk) => (stderr += chunk));
+      let exit;
+      const exited = new Promise((resolve) =>
+        ciRunner.on("exit", (code, exitSignal) => {
+          exit = { code, signal: exitSignal };
+          resolve(exit);
+        }),
+      );
+      let pids;
+      // Never leave processes behind, whatever the outcome: only the pid this test
+      // spawned, and the exact pids the fixture recorded while still in its group.
+      t.after(async () => {
+        if (exit === undefined) {
+          // Let run-tests.mjs end its test groups first: they may not have recorded pids.
+          for (const lastResort of ["SIGTERM", "SIGKILL"]) {
+            try {
+              process.kill(ciRunner.pid, lastResort);
+            } catch {
+              // Already gone.
+            }
+            if (await waitFor(() => exit !== undefined, 2_000)) {
+              break;
+            }
+          }
+        }
+        for (const pid of [pids?.runner, pids?.file, pids?.grandchild]) {
+          if (Number.isSafeInteger(pid) && pid > 1 && procStat(pid)?.pgid === pids.pgid) {
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {
+              // Already gone.
+            }
+          }
+        }
+      });
+
+      const recorded = await waitFor(() => {
+        try {
+          return JSON.parse(readFileSync(recordPath, "utf8"));
+        } catch {
+          return exit !== undefined ? "exited" : undefined;
+        }
+      }, 30_000);
+      assert.equal(typeof recorded, "object", `no test file started (${recorded}): ${stderr}`);
+      pids = recorded;
+      // The Node test runner leads its own group, apart from run-tests.mjs and this test.
+      assert(Number.isSafeInteger(pids.runner) && pids.runner > 1, String(pids.runner));
+      assert.equal(pids.pgid, pids.runner);
+      assert.equal(pids.grandchildPgid, pids.runner);
+      assert.notEqual(pids.pgid, ciRunner.pid);
+      assert.notEqual(pids.pgid, procStat(process.pid).pgid);
+
+      process.kill(ciRunner.pid, signal);
+      let timer;
+      const outcome = await Promise.race([
+        exited,
+        new Promise((resolve) => (timer = setTimeout(resolve, 10_000, "still running"))),
+      ]);
+      clearTimeout(timer);
+      assert.deepEqual(outcome, { code: null, signal }, stderr);
+      // Killed processes are reaped by their new parent asynchronously; a zombie is gone.
+      const alive = () =>
+        [pids.runner, pids.file, pids.grandchild].filter((pid) => {
+          const stat = procStat(pid);
+          return stat !== undefined && stat.state !== "Z" && stat.pgid === pids.pgid;
+        });
+      await waitFor(() => alive().length === 0, 5_000);
+      assert.deepEqual(alive(), []);
+    },
+  );
+}
 
 test("run redacts arbitrary stdout, stderr, assertion payloads, and stacks from artifacts", async (t) => {
   const root = await fixture(t);
@@ -2838,6 +2989,62 @@ test("run records only allowlisted measurements from test diagnostics", async (t
           sample: 0,
           seconds: "secretauthvalue-seconds",
         }),
+        measurement({
+          kind: "runtime-model-probe",
+          case: "gateway-500m-answer",
+          code: "READY",
+          elapsedMs: 61_234,
+          capMs: 110_000,
+          cpuWaitMs: 4_321,
+          setupMs: 2_345,
+          probeDoneMs: 63_456,
+          readyMs: null,
+          extra: "secretauthvalue-extra",
+        }),
+        measurement({
+          kind: "runtime-model-probe",
+          case: "gateway-1cpu-answer",
+          code: "secretauthvalue-code",
+          elapsedMs: 1,
+          capMs: 65_000,
+          cpuWaitMs: null,
+          setupMs: 1,
+          probeDoneMs: 1,
+          readyMs: 1,
+        }),
+        measurement({
+          kind: "runtime-model-probe",
+          case: "gateway-500m-contended",
+          code: null,
+          elapsedMs: null,
+          capMs: null,
+          cpuWaitMs: null,
+          setupMs: 1,
+          probeDoneMs: null,
+          readyMs: null,
+        }),
+        measurement({
+          kind: "runtime-model-probe",
+          case: "secretauthvalue-case",
+          code: "READY",
+          elapsedMs: 1,
+          capMs: 1,
+          cpuWaitMs: 1,
+          setupMs: 1,
+          probeDoneMs: 1,
+          readyMs: 1,
+        }),
+        measurement({
+          kind: "runtime-model-probe",
+          case: "gateway-500m-hang",
+          code: "MODEL_PROBE_TIMEOUT",
+          elapsedMs: "secretauthvalue-elapsed",
+          capMs: 1,
+          cpuWaitMs: 1,
+          setupMs: 1,
+          probeDoneMs: 1,
+          readyMs: 1,
+        }),
         "openclaw-ci-measurement secretauthvalue-not-json",
         "secretauthvalue-plain-diagnostic",
       ].map((message) => `  t.diagnostic(${JSON.stringify(message)});`),
@@ -2873,6 +3080,39 @@ test("run records only allowlisted measurements from test diagnostics", async (t
       nudge: "pod-annotation",
       sample: 1,
       seconds: 1.2,
+    },
+    {
+      kind: "runtime-model-probe",
+      case: "gateway-500m-answer",
+      code: "READY",
+      elapsedMs: 61_234,
+      capMs: 110_000,
+      cpuWaitMs: 4_321,
+      setupMs: 2_345,
+      probeDoneMs: 63_456,
+      readyMs: null,
+    },
+    {
+      kind: "runtime-model-probe",
+      case: "gateway-1cpu-answer",
+      code: "other",
+      elapsedMs: 1,
+      capMs: 65_000,
+      cpuWaitMs: null,
+      setupMs: 1,
+      probeDoneMs: 1,
+      readyMs: 1,
+    },
+    {
+      kind: "runtime-model-probe",
+      case: "gateway-500m-contended",
+      code: null,
+      elapsedMs: null,
+      capMs: null,
+      cpuWaitMs: null,
+      setupMs: 1,
+      probeDoneMs: null,
+      readyMs: null,
     },
   ]);
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}\n${artifact}`, /secretauthvalue/);
