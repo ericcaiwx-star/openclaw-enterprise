@@ -279,12 +279,14 @@ function partialWrite(fixture, method, path, session, declaredBytes) {
     request.on("response", (response) => {
       const chunks = [];
       response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () =>
-        settle(resolve, {
-          status: response.statusCode,
-          body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
-        }),
-      );
+      response.on("end", () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          settle(resolve, { status: response.statusCode, body });
+        } catch (error) {
+          settle(reject, error);
+        }
+      });
       response.on("error", (error) => settle(reject, error));
     });
     request.on("error", (error) => settle(reject, error));
@@ -312,16 +314,32 @@ test("Preset writes refuse a caller without the grant before reading the body", 
   const session = await fixture.signIn(member.credentials);
   // Over the general 64 KiB limit and under the Preset route limit (6 MiB + 8 KiB).
   const declaredBytes = 6 * 1024 * 1024;
-  for (const [method, path, action] of [
-    ["POST", collection(namespace.id), "openclaw.presets.create"],
-    ["PATCH", `${collection(namespace.id)}/${existing.id}`, "openclaw.presets.update"],
+  const forbidden = {
+    code: "FORBIDDEN",
+    message: "The exact platform operation was not authorized.",
+  };
+  for (const [method, path, action, grant, target] of [
+    [
+      "POST",
+      collection(namespace.id),
+      "openclaw.presets.create",
+      "create",
+      { kind: "preset", id: namespace.id, namespaceId: namespace.id },
+    ],
+    [
+      "PATCH",
+      `${collection(namespace.id)}/${existing.id}`,
+      "openclaw.presets.update",
+      "update",
+      { kind: "preset", id: existing.id, namespaceId: namespace.id },
+    ],
   ]) {
-    // The refusal a small body gets, as before this check moved ahead of the body.
     const small = await fixture.request(method, path, {
       session,
       body: { name: "Unauthorized", template: {} },
     });
     assert.equal(small.status, 403, `${method}: ${JSON.stringify(small.body)}`);
+    assert.deepEqual(small.body.error, forbidden, method);
     const denials = () =>
       fixture.audit.events.filter(
         (event) =>
@@ -333,12 +351,17 @@ test("Preset writes refuse a caller without the grant before reading the body", 
     const refused = await partialWrite(fixture, method, path, session, declaredBytes);
     assert.notEqual(refused, null, `${method}: the controller waited for the unread body`);
     assert.equal(refused.status, 403, `${method}: ${JSON.stringify(refused.body)}`);
-    assert.deepEqual(refused.body.error, small.body.error, method);
-    // The early refusal keeps its audit row, naming the same grant and target.
+    assert.deepEqual(refused.body.error, forbidden, method);
+    // The refusal keeps its audit row, naming the exact grant the write itself checks.
     const recorded = denials().slice(before);
     assert.equal(recorded.length, 1, method);
-    assert.deepEqual(recorded[0].resource, denials()[0].resource, method);
-    assert.deepEqual(recorded[0].authorization, denials()[0].authorization, method);
+    assert.equal(recorded[0].reasonCode, "AUTHORIZATION_DENIED", method);
+    assert.deepEqual(recorded[0].resource, target, method);
+    assert.deepEqual(
+      recorded[0].authorization,
+      { principalId: memberId, action: grant, resource: target },
+      method,
+    );
   }
   assert.deepEqual(
     (await fixture.request("GET", `${collection(namespace.id)}/${existing.id}`)).data,

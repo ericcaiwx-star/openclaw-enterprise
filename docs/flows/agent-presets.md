@@ -119,8 +119,8 @@ the new Namespace. Disabling defaults leaves persisted copies alone.
 
 `apps/controller/src/index.ts:createFastifyApp` gives Preset POST/PATCH a
 transport budget for 1 MiB templates, JSON escapes and the envelope; overflow
-returns 413. Their `onRequest` hook runs `authorizePresetWrite` first: callers
-without the grant get 403 before any body is read.
+returns 413. Their `onRequest` hook runs `authorizePresetWrite`: callers without
+the grant get 403 before any body is read.
 
 `packages/occ/src/index.ts:OpenClawController.createPreset`
 
