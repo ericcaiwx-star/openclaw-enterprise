@@ -2547,3 +2547,62 @@ test("container wire-prefix builds retain fetched masking evidence without advan
   assert.equal(rest.status, 200);
   assert.ok(!messages(rest.data).includes("QUJD"));
 });
+
+test("container wire continuation retains fetched JSON withholding decisions", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  for (const offset of [0]) {
+    const fixture = await createRuntimeLogFixture();
+    const target = await fixture.deployAgent("container-json-evidence");
+    const start = Date.now() - 1000;
+    const rows = [
+      ...wireContainerRows(null, 42).map((line, index) => ({
+        ...line,
+        raw: JSON.stringify({
+          level: "info",
+          subsystem: "gateway",
+          message: `row=${index}; diagnostic ${" ".repeat(500)}${'"a" '.repeat(2100)}`,
+        }),
+      })),
+      ...Array.from({ length: offset }, () => ({
+        raw: JSON.stringify({ ordinary_metadata: "padding" }),
+        time: null,
+      })),
+      { raw: "[", time: null },
+      ...Array.from({ length: 15 }, () => [
+        { raw: "1".repeat(32769) + ",", time: null },
+        { raw: "  true,", time: null },
+      ]).flat(),
+      { raw: "]", time: null },
+    ];
+    fixture.computeDriver.state.lines = rows.map((line, index) => ({
+      ...line,
+      time: new Date(start + index).toISOString(),
+    }));
+    assert.ok(
+      fixture.computeDriver.state.lines.reduce(
+        (bytes, line) => bytes + Buffer.byteLength(line.raw) + Buffer.byteLength(line.time) + 2,
+        0,
+      ) <=
+        1024 * 1024,
+      "the whole fetched fixture respects the Driver read bound",
+    );
+    let cursor;
+    let cut = false;
+    for (let page = 0; page < 10; page += 1) {
+      const response = await fixture.request(
+        "GET",
+        target.logsPath(
+          `source=gateway&tailLines=1000${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+        ),
+      );
+      assert.equal(response.status, 200);
+      assert.ok(!messages(response.data).some((message) => message.trim() === "true,"));
+      cursor = response.data.cursor;
+      cut ||= response.data.truncated;
+      if (!response.data.truncated) {
+        break;
+      }
+    }
+    assert.equal(cut, true);
+  }
+});

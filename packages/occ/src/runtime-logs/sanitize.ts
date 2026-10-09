@@ -563,19 +563,23 @@ export interface SanitizedRuntimeLogChunk {
   readonly withheld: number;
 }
 
-/** Masking evidence from fetched text; it never advances delivered PEM context. */
-export function runtimeLogPemEvidence(
-  lines: AgentRuntimeLogChunk["lines"],
-): ReadonlyMap<number, string> {
+/** Fetched safety decisions; they never advance delivered masking context. */
+export function runtimeLogEvidence(lines: AgentRuntimeLogChunk["lines"]): {
+  readonly masks: ReadonlyMap<number, string>;
+  readonly withheld: ReadonlyMap<number, RuntimeLogWithheldReason>;
+} {
   const block: JsonBlock = { depth: 0 };
-  return maskPemBlockLines(
-    lines.map((line) => {
-      const classified = classify(line.raw, block);
-      return classified.type === "line" && classified.kind === "text"
-        ? classified.message
-        : undefined;
-    }),
-  );
+  const withheld = new Map<number, RuntimeLogWithheldReason>();
+  const texts = lines.map((line, index) => {
+    const classified = classify(line.raw, block);
+    if (classified.type === "withheld") {
+      withheld.set(index, classified.reason);
+    }
+    return classified.type === "line" && classified.kind === "text"
+      ? classified.message
+      : undefined;
+  });
+  return { masks: maskPemBlockLines(texts), withheld };
 }
 
 /**
@@ -589,6 +593,7 @@ export function sanitizeRuntimeLogChunk(
     readonly open: boolean | undefined;
     readonly canClose?: readonly boolean[] | undefined;
     readonly evidence?: readonly (string | undefined)[];
+    readonly withheld?: readonly (RuntimeLogWithheldReason | undefined)[];
   },
 ): SanitizedRuntimeLogChunk & { readonly pemOpen?: boolean } {
   const stream = cleanStream(chunk.stream);
@@ -602,7 +607,11 @@ export function sanitizeRuntimeLogChunk(
   let run: Mutable<Extract<RuntimeLogRecord, { type: "withheld" }>> | undefined;
   const block: JsonBlock = { depth: 0 };
   // Classify in order: an open pretty-printed JSON block carries across lines.
-  const classifiedLines = lines.map((line) => classify(line.raw, block));
+  const classifiedLines = lines.map((line, index): Classified => {
+    const local = classify(line.raw, block);
+    const reason = pemContext?.withheld?.[index];
+    return reason === undefined ? local : { type: "withheld", reason };
+  });
   // A key printed over several lines is split across records; mask the whole block.
   const pemState = { open: pemContext?.open, canClose: pemContext?.canClose };
   const pem = maskPemBlockLines(

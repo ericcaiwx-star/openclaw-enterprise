@@ -142,7 +142,7 @@ undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 `SanitizedRuntimeLogRecord`. `page-budget.ts` measures serialized pages,
 signed cursors and the HTTP envelope against 512 KiB. Full candidates precede
 bounded prefix builds reuse admission and clocks without I/O or audits. Fit is
-checked; maximum filling is not promised. Fetched masking evidence survives prefix builds; persistent state advances only
+checked; maximum filling is not promised. Fetched masking/withholding survive prefix builds; persistent state advances only
 through delivered rows. Sources share the budget.
 
 For container follow polls, the signed cursor also carries optional `pemOpen`
