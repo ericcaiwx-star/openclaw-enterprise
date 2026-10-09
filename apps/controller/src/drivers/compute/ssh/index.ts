@@ -165,12 +165,15 @@ function usesGatewayPasswordReference(value: unknown): boolean {
 
 function sshGatewayConfigurationDocument(
   configuration: OpenClawConfigurationDocument,
+  validateTransport = true,
 ): OpenClawConfigurationDocument {
-  validatePlaintextNativeGateway(
-    configuration,
-    (setting, requirement) =>
-      new ConfigurationFailure(`Configuration setting ${setting} ${requirement}.`),
-  );
+  if (validateTransport) {
+    validatePlaintextNativeGateway(
+      configuration,
+      (setting, requirement) =>
+        new ConfigurationFailure(`Configuration setting ${setting} ${requirement}.`),
+    );
+  }
   const gatewayRecord = asRecord(configuration.gateway);
   if (configuration.gateway !== undefined && gatewayRecord === undefined) {
     throw new ConfigurationFailure("SSH native gateway configuration must be an object.");
@@ -619,7 +622,13 @@ export class SshComputeDriver implements ComputeDriver {
     context?: ComputeRevisionContext,
   ): Promise<Record<string, unknown>> {
     const namespace = this.validateRevision(revision);
-    const renderedConfiguration = sshGatewayConfigurationDocument(revision.configuration);
+    // Previously admitted TLS revisions still need their original snapshot hash
+    // for verified teardown. Preparation and activation require native HTTP.
+    const teardown = ["verify-revision", "stop-revision", "retire-revision"].includes(operation);
+    const renderedConfiguration = sshGatewayConfigurationDocument(
+      revision.configuration,
+      !teardown,
+    );
     const effectiveRevision = { ...revision, configuration: renderedConfiguration };
     return this.execute(this.host(namespace), {
       operation,

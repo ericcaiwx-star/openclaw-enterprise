@@ -661,6 +661,43 @@ WantedBy=multi-user.target
   );
 });
 
+test("SSH can verify, stop and retire a previously admitted native TLS snapshot", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-old-tls", {
+    gateway: { tls: { enabled: true } },
+  });
+  await f.driver.ensureNamespace(tenant);
+  bind(f.driver, rev);
+  await assert.rejects(f.driver.prepareRevision(rev), /gateway\.tls\.enabled/);
+  // Seed the exact configuration/hash the old producer admitted through the
+  // real host helper, not by editing its private ownership/snapshot records.
+  // SSH/systemd remain fixtures; this protects persisted teardown semantics.
+  const configuration = expectedRuntimeConfiguration(rev);
+  await f.driver.execute(f.configured.hosts.stable, {
+    operation: "prepare-revision",
+    namespace: tenant,
+    revision: { ...rev, configuration },
+    configurationHash: digest(JSON.stringify(configuration)),
+  });
+  assert.deepEqual(await json(join(f.revisionDir(rev), "openclaw.json")), configuration);
+  await f.driver.deactivateRevision(rev);
+  const changed = {
+    ...rev,
+    configuration: { ...rev.configuration, gateway: { tls: { enabled: false } } },
+  };
+  await assert.rejects(f.driver.stopRevision(changed), /immutable snapshot mismatch/);
+  await access(f.revisionDir(rev));
+  await f.driver.stopRevision(rev);
+  await access(f.revisionDir(rev));
+  await f.driver.retireRevision(rev);
+  await assert.rejects(access(f.revisionDir(rev)), { code: "ENOENT" });
+  await f.driver.deleteAgentRuntimeCredentials({
+    namespace: tenant,
+    agent: { id: rev.agentId, namespaceId: tenant.id },
+  });
+  await assert.rejects(access(f.agentDir(rev)), { code: "ENOENT" });
+});
+
 test("SSH trusted-proxy omits gateway.env, and allocation spans Agents and Namespaces on a host", async (t) => {
   const f = await fixture(t);
   const first = await prepare(f);
