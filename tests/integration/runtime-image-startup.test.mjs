@@ -25,7 +25,6 @@ import {
   CODEX_OAUTH_BOOTSTRAP_ENTRYPOINT,
   GATEWAY_RUNTIME_ENTRYPOINT as KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
   GATEWAY_STOP_TIMEOUT_MS,
-  GATEWAY_READINESS_ENTRYPOINT,
   NATIVE_WORKER_ENTRYPOINT,
   OPENCLAW_AGENT_DATABASE_SCHEMA_VERSION,
   PLUGIN_RUNTIME_HELPERS,
@@ -2377,12 +2376,12 @@ http.createServer((req, res) => {
           containerName,
           "node",
           "-e",
-          ...nodeProgramArguments(GATEWAY_READINESS_ENTRYPOINT),
+          'fetch("http://127.0.0.1:18791/readyz").then(async r=>{if(await r.text()!=="")process.exit(2);console.log(r.status);process.exit(r.status===200?0:1)}).catch(()=>process.exit(2));',
         ]);
       if (enabled) {
         await assert.rejects(
           readiness,
-          (error) => error.code === 1 && /Gateway \/readyz unavailable/.test(error.stdout),
+          (error) => error.code === 1 && error.stdout.trim() === "503",
         );
         for (const [kind, driver] of drivers) {
           assert.throws(
