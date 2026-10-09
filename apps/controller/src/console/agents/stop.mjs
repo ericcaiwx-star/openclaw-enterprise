@@ -80,11 +80,7 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
     refresh.disabled = state.pending;
     refresh.textContent = state.pending ? "Checking…" : "Refresh stop status";
     if (requested || state.needsRefresh) {
-      actions.replaceChildren(
-        stop,
-        ...(requested && state.agent.activeRevisionId ? [repeat] : []),
-        refresh,
-      );
+      actions.replaceChildren(stop, ...(requested ? [repeat] : []), refresh);
     } else {
       actions.replaceChildren(stop);
     }
@@ -151,11 +147,7 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
   }
 
   async function stopAgent(dialog, cancel, confirm) {
-    if (
-      state.pending ||
-      state.needsRefresh ||
-      (state.agent.desiredRuntimeState === "stopped" && !state.agent.activeRevisionId)
-    ) {
+    if (state.pending || state.needsRefresh) {
       return;
     }
     state.pending = true;
@@ -222,11 +214,7 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
   }
 
   function openConfirmation() {
-    if (
-      state.pending ||
-      state.needsRefresh ||
-      (state.agent.desiredRuntimeState === "stopped" && !state.agent.activeRevisionId)
-    ) {
+    if (state.pending || state.needsRefresh) {
       return;
     }
     const dialog = element("dialog", {

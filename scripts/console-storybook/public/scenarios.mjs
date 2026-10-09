@@ -4249,15 +4249,15 @@ export const scenarios = {
     description:
       "An explicit repeated Stop uses the same confirmation and preserves the selected version.",
   },
-  stopCompleted: {
+  stopNoSelection: {
     group: "Components/Stop Agent",
     name: "No selected version",
     path: revision,
     deployed: true,
     stopped: true,
-    stopCompleted: true,
+    stopNoSelection: true,
     description:
-      "Without a selected version, there is no repeated Stop control. Revision history remains readable.",
+      "An absent selected version does not establish candidate cleanup. Explicit repeated Stop remains available; history is readable.",
   },
   stopRepeatUnknown: {
     group: "Components/Stop Agent",

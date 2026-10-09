@@ -4913,7 +4913,7 @@ test("Credentials saves an issued service account as a PAT source without granti
   await page.getByText(`ChatGPT service account · ${account.id}`, { exact: true }).waitFor();
 });
 
-test("Console can repeat Stop while the stopped Agent still has a selected revision", async (t) => {
+test("Console can repeat Stop without treating the selected version as cleanup completion", async (t) => {
   const { fixture, namespace, state } = await createRuntimeAuthFixture(t, "Repeat Stop");
   const agent = await fixture.createAgent(
     namespace.id,
@@ -4955,7 +4955,7 @@ test("Console can repeat Stop while the stopped Agent still has a selected revis
   assert.equal(after.data.activeRevisionId, active.revision.id);
   assert.equal(after.data.desiredRuntimeState, "stopped");
   assert.equal(after.data.configurationId, agent.configurationId);
-  // A worker-cleared selection ends manual stop recovery; history remains.
+  // No selected version does not prove candidate/history cleanup completed.
   await state.transact((unit) =>
     unit.agents.compareAndClearActiveRevision(namespace.id, agent.id, active.revision.id),
   );
@@ -4963,6 +4963,17 @@ test("Console can repeat Stop while the stopped Agent still has a selected revis
   await page
     .getByText("No version is selected. Deploy a new version to start this Agent.")
     .waitFor();
-  assert.equal(await repeat.count(), 0);
+  assert.equal(await repeat.isEnabled(), true);
   assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 1);
+  await repeat.click();
+  const noSelectionResult = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" && new URL(response.url()).pathname === `${path}/stop`,
+  );
+  await page
+    .getByRole("dialog", { name: "Stop Repeat Stop?" })
+    .getByRole("button", { name: "Stop Agent", exact: true })
+    .click();
+  assert.equal((await noSelectionResult).status(), 202);
+  assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 2);
 });

@@ -276,10 +276,10 @@ composed by `apps/controller/src/console/agents/detail.mjs:renderAgentDetail`. C
 bodyless `POST` to the exact Agent's `/stop` route. OCC's
 `packages/occ/src/index.ts:stopAgent` checks exact-Agent `operate`, persists the
 requested stopped state, and queues reconciliation. The response proves
-admission, not completed Compute shutdown. When stopped with a selected revision,
+admission, not completed Compute shutdown. When stopped,
 **Request Stop again** confirms a new stop intent through the same authorized route.
-It is absent without a selected revision and blocked by an uncertain write until
-readback succeeds; it does not infer shutdown failure.
+It remains available without a selected revision because history/candidate cleanup
+is not exposed, and an uncertain write blocks it until readback succeeds.
 
 **Refresh stop status** reads the exact Agent again. It displays desired runtime
 state and selected revision without inferring live health or completion from a
