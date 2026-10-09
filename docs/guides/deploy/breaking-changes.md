@@ -19,6 +19,7 @@ state in an OpenClaw agent database at schema 23. Runtimes since #587
 Gateway exits and restarts into the same refusal. Since #1986 the Gateway runs
 that migration itself before OpenClaw starts; see
 [Gateway storage](../../reference/drivers/kubernetes-compute/storage-and-credentials.md#gateway-storage).
+The Docker development gateway does the same since finding 975's fix.
 
 **Who is affected.** Installations upgraded from the 2026-09-28 release whose
 Agents are deployed again by a controller before #1986. Gateways without chat

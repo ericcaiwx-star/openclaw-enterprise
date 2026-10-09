@@ -2191,16 +2191,19 @@ export const OPENCLAW_AGENT_DATABASE_SCHEMA_VERSION = 24;
 // A Gateway keeps its agent databases across runtime image upgrades. OpenClaw
 // refuses one with an older schema (exit 78) until "openclaw doctor --fix"
 // migrates it, and its own image entrypoint runs that Doctor pass before every
-// Gateway start. This wrapper replaces that entrypoint, so it runs the same
-// pass, but only when a database needs it: fresh and current state start
-// without Doctor's ~15 s. Doctor must not rewrite the controller-owned
-// configuration (OPENCLAW_CONFIG_READONLY). The schema versions after Doctor,
-// not its exit status, decide: Doctor also exits non-zero for problems it can
-// only report here. A failure holds the Gateway unready with the step named,
-// rather than restarting into the same refusal and another Doctor backup.
-const GATEWAY_STATE_MIGRATION_HELPER = String.raw`
+// Gateway start. The Kubernetes and Docker Gateway wrappers replace that
+// entrypoint, so they run the same pass, but only when a database needs it:
+// fresh and current state start without Doctor's ~15 s. Doctor must not
+// rewrite the controller-owned configuration (OPENCLAW_CONFIG_READONLY). The
+// schema versions after Doctor, not its exit status, decide: Doctor also exits
+// non-zero for problems it can only report here. On failure the step is named
+// and the wrapper must not start OpenClaw; `retry` completes the log line's
+// remedy. The wrapper provides `spawn`, `logStartupPhase` and
+// `publishRuntimeFailure`.
+export function gatewayStateMigrationHelper(retry: string): string {
+  return String.raw`
 function outdatedAgentDatabases() {
-  const agentsDirectory = join(process.env.OPENCLAW_STATE_DIR || "/home/node/.openclaw", "agents");
+  const agentsDirectory = require("node:path").join(process.env.OPENCLAW_STATE_DIR || "/home/node/.openclaw", "agents");
   let agentIds;
   try {
     agentIds = require("node:fs").readdirSync(agentsDirectory);
@@ -2212,7 +2215,7 @@ function outdatedAgentDatabases() {
   const { DatabaseSync } = require("node:sqlite");
   const outdated = [];
   for (const agentId of agentIds) {
-    const path = join(agentsDirectory, agentId, "agent", "openclaw-agent.sqlite");
+    const path = require("node:path").join(agentsDirectory, agentId, "agent", "openclaw-agent.sqlite");
     let version;
     try {
       // A read-only open of a missing database fails here.
@@ -2237,11 +2240,12 @@ function runStateMigrationDoctor() {
     const doctor = spawn(
       process.execPath,
       ["/app/openclaw.mjs", "doctor", "--fix", "--non-interactive"],
-      { stdio: "inherit", env: { ...gatewayEnvironment(), OPENCLAW_CONFIG_READONLY: "1" } },
+      { stdio: "inherit", env: { ...process.env, OPENCLAW_CONFIG_READONLY: "1" } },
     );
+    let terminating = false;
     // Doctor's maintenance lease owns termination: let it stop its transaction.
     const stop = (signal) => {
-      gatewayTerminating = true;
+      terminating = true;
       doctor.kill(signal);
     };
     const onTerm = () => stop("SIGTERM");
@@ -2251,22 +2255,23 @@ function runStateMigrationDoctor() {
     const settle = (outcome) => {
       process.off("SIGTERM", onTerm);
       process.off("SIGINT", onInt);
-      resolve(outcome);
+      resolve({ outcome, terminating });
     };
     doctor.on("error", (error) => settle("error-" + (error?.code ?? "spawn")));
     doctor.on("exit", (code, signal) => settle(signal ?? "exit-" + code));
   });
 }
 
-// Resolves true once Doctor brought every outdated database current; otherwise holds.
+// Resolves true once Doctor brought every outdated database current, false
+// after naming the failure; exits when terminated during Doctor.
 async function migrateGatewayState(outdated) {
   const startedAt = Date.now();
   console.error(
     "Migrating " + outdated.length + " OpenClaw agent database(s) from schema " +
       outdated.map(({ version }) => version).join(", ") + " to ${OPENCLAW_AGENT_DATABASE_SCHEMA_VERSION} with openclaw doctor --fix.",
   );
-  const doctorOutcome = await runStateMigrationDoctor();
-  if (gatewayTerminating) process.exit(0);
+  const doctor = await runStateMigrationDoctor();
+  if (doctor.terminating) process.exit(0);
   const remaining = outdatedAgentDatabases();
   if (remaining.length === 0) {
     logStartupPhase("state-migration", startedAt);
@@ -2275,14 +2280,14 @@ async function migrateGatewayState(outdated) {
   logStartupPhase("state-migration", startedAt, "failed");
   publishRuntimeFailure("state-migration", "UNAVAILABLE");
   console.error(
-    "Gateway state migration failed: openclaw doctor --fix (" + doctorOutcome + ") left " +
+    "Gateway state migration failed: openclaw doctor --fix (" + doctor.outcome + ") left " +
       remaining.map(({ path, version }) => path + " at schema " + version).join(", ") +
-      ". OpenClaw was not started. Read the Doctor output above, fix the cause, then restart the Pod.",
+      ". OpenClaw was not started. Read the Doctor output above, fix the cause, then ${retry}.",
   );
-  setInterval(() => {}, 3600000);
   return false;
 }
 `;
+}
 
 export const GATEWAY_RUNTIME_ENTRYPOINT = String.raw`
 const { accessSync, constants: fsConstants, mkdirSync, rmSync } = require("node:fs");
@@ -2296,7 +2301,7 @@ ${PLUGIN_RUNTIME_HELPERS}
 ${WORKSPACE_ASSET_HELPERS}
 ${OPENCLAW_AUTH_PROBE_HELPERS}
 ${startupPhaseHelper("gateway")}
-${GATEWAY_STATE_MIGRATION_HELPER}
+${gatewayStateMigrationHelper("restart the Pod")}
 
 function gatewayRuntimeReady() {
   if (pluginRuntimeStatusPort() !== undefined && pluginStatusReport.phase !== "ready") {
@@ -2809,8 +2814,13 @@ peerStatus = followsPeerStatus
 const started = configureGateway(peerStatus);
 // Doctor reads the configuration the Gateway starts with. Current state adds
 // no await before the spawn.
+// A failure holds the Gateway unready with the step named, rather than
+// restarting into the same refusal and another Doctor backup.
 const outdatedDatabases = outdatedAgentDatabases();
-if (outdatedDatabases.length > 0 && !(await migrateGatewayState(outdatedDatabases))) return;
+if (outdatedDatabases.length > 0 && !(await migrateGatewayState(outdatedDatabases))) {
+  setInterval(() => {}, 3600000);
+  return;
+}
 pluginResult = started.pluginResult;
 publishPluginRuntimeStatus({ phase: "ready", ...pluginResult });
 const startWorkspaceNodeId = started.workspaceNodeId;

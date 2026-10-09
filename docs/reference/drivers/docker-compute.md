@@ -134,6 +134,14 @@ Driver retains the Agent-owned state and workspace volumes used for initial
 workspace setup across stop and revision replacement. Without initial workspace
 inputs, writable container tmpfs remains ephemeral.
 
+State on that volume outlives runtime image upgrades. Before OpenClaw starts,
+the gateway runs the same agent database migration as a
+[Kubernetes Gateway](kubernetes-compute/storage-and-credentials.md#gateway-storage):
+`openclaw doctor --fix --non-interactive` once, with the configuration
+read-only, when an agent database uses an older schema. If a database is still
+older afterwards, the container logs `Gateway state migration failed` and exits
+without starting OpenClaw, and the deployment fails as an unready container.
+
 ## Gateway authentication
 
 The container implementation renders `gateway.auth.mode: password` when native

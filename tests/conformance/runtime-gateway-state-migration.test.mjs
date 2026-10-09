@@ -7,18 +7,17 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import vm from "node:vm";
+import { GATEWAY_RUNTIME_ENTRYPOINT as DOCKER_GATEWAY_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/docker/index.ts";
 import {
   GATEWAY_RUNTIME_ENTRYPOINT,
   OPENCLAW_AGENT_DATABASE_SCHEMA_VERSION,
+  gatewayStateMigrationHelper,
 } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 
-// Exercise the state migration step embedded in the generated Gateway program,
-// against real SQLite files. Only Doctor is replaced: the runtime image test
-// proves the real Doctor migrates a database from the released runtime.
-const helperStart = GATEWAY_RUNTIME_ENTRYPOINT.indexOf("function outdatedAgentDatabases() {");
-const helperEnd = GATEWAY_RUNTIME_ENTRYPOINT.indexOf("\nfunction gatewayRuntimeReady() {");
-assert.ok(helperStart >= 0 && helperEnd > helperStart);
-const helper = GATEWAY_RUNTIME_ENTRYPOINT.slice(helperStart, helperEnd);
+// Exercise the state migration step the Kubernetes and Docker Gateway programs
+// share, against real SQLite files. Only Doctor is replaced: the runtime image
+// tests prove the real Doctor migrates a database from the released runtime.
+const helper = gatewayStateMigrationHelper("restart the Pod");
 const nodeRequire = createRequire(import.meta.url);
 const CURRENT = OPENCLAW_AGENT_DATABASE_SCHEMA_VERSION;
 
@@ -70,9 +69,8 @@ function migrate(directory, doctor = () => assert.fail("Doctor must not run")) {
     Date,
     JSON,
     Promise,
-    join,
     process: {
-      env: { OPENCLAW_STATE_DIR: directory },
+      env: { OPENCLAW_CONFIG_PATH: "/etc/openclaw/openclaw.json", OPENCLAW_STATE_DIR: directory },
       execPath: "/usr/local/bin/node",
       on: (signal, listener) => listeners[signal].push(listener),
       off: (signal, listener) => {
@@ -92,8 +90,6 @@ function migrate(directory, doctor = () => assert.fail("Doctor must not run")) {
       setImmediate(() => doctor(child, { listeners }));
       return child;
     },
-    gatewayEnvironment: () => ({ OPENCLAW_CONFIG_PATH: "/etc/openclaw/openclaw.json" }),
-    gatewayTerminating: false,
     logStartupPhase: (phase, startedAt, outcome = "ok") => phases.push({ phase, outcome }),
     publishRuntimeFailure: (check, code) => failures.push({ check, code }),
     setInterval: () => {
@@ -165,6 +161,7 @@ test("Gateway state migration runs Doctor once for an older agent database and t
     {
       OPENCLAW_CONFIG_PATH: "/etc/openclaw/openclaw.json",
       OPENCLAW_CONFIG_READONLY: "1",
+      OPENCLAW_STATE_DIR: directory,
     },
   );
   assert.deepEqual(outcome.phases, [{ phase: "state-migration", outcome: "ok" }]);
@@ -174,7 +171,7 @@ test("Gateway state migration runs Doctor once for an older agent database and t
   assert.match(outcome.errors.join("\n"), new RegExp(`from schema ${CURRENT - 1} to ${CURRENT}`));
 });
 
-test("Gateway state migration holds the Gateway unready when Doctor leaves an older agent database", async (t) => {
+test("Gateway state migration names the failure when Doctor leaves an older agent database", async (t) => {
   const directory = await stateDirectory(t, { main: CURRENT - 1 });
   // Doctor can hold back a store it cannot verify and still exit 0.
   const outcome = await migrate(directory, (child) => child.emit("exit", 0, null));
@@ -182,12 +179,13 @@ test("Gateway state migration holds the Gateway unready when Doctor leaves an ol
   assert.equal(outcome.spawned.length, 1);
   assert.deepEqual(outcome.phases, [{ phase: "state-migration", outcome: "failed" }]);
   assert.deepEqual(outcome.failures, [{ check: "state-migration", code: "UNAVAILABLE" }]);
-  assert.equal(outcome.holds, 1);
+  // Each wrapper decides how to stay down: Kubernetes holds, Docker exits.
+  assert.equal(outcome.holds, 0);
   assert.deepEqual(outcome.exits, []);
   const message = outcome.errors.at(-1);
   assert.match(message, /^Gateway state migration failed: openclaw doctor --fix \(exit-0\) left /);
   assert.ok(message.includes(`${databasePath(directory, "main")} at schema ${CURRENT - 1}`));
-  assert.match(message, /OpenClaw was not started\./);
+  assert.match(message, /OpenClaw was not started\. .* then restart the Pod\.$/);
   assert.equal(readVersion(databasePath(directory, "main")), CURRENT - 1);
 });
 
@@ -207,4 +205,127 @@ test("Gateway state migration stops Doctor and exits on termination", async (t) 
   assert.deepEqual(outcome.exits, [0]);
   assert.deepEqual(outcome.failures, []);
   assert.deepEqual(outcome.listeners, { SIGTERM: [], SIGINT: [] });
+});
+
+test("Kubernetes and Docker Gateway programs share the migration step and stay down after a failure", () => {
+  assert.ok(GATEWAY_RUNTIME_ENTRYPOINT.includes(gatewayStateMigrationHelper("restart the Pod")));
+  assert.ok(
+    DOCKER_GATEWAY_RUNTIME_ENTRYPOINT.includes(
+      gatewayStateMigrationHelper("deploy the Agent again"),
+    ),
+  );
+  // Kubernetes holds the Pod unready with its status published instead of restarting.
+  assert.ok(
+    GATEWAY_RUNTIME_ENTRYPOINT.includes(
+      "!(await migrateGatewayState(outdatedDatabases))) {\n  setInterval(() => {}, 3600000);\n  return;\n}",
+    ),
+  );
+});
+
+// Runs the whole Docker development Gateway program with its file writes and
+// child processes replaced; agent databases are read from `directory`.
+async function runDockerGateway(directory, doctor = () => assert.fail("Doctor must not run")) {
+  const spawned = [];
+  const errors = [];
+  const exits = [];
+  const realFs = nodeRequire("node:fs");
+  const context = {
+    Buffer,
+    Date,
+    JSON,
+    Promise,
+    URL,
+    console: { error: (line) => errors.push(line), log() {} },
+    process: {
+      env: {
+        OPENCLAW_CONFIG_JSON: "{}",
+        OPENCLAW_CONFIG_PATH: "/home/node/.openclaw/openclaw.json",
+        OPENCLAW_GATEWAY_PORT: "8080",
+        OPENCLAW_STATE_DIR: directory,
+      },
+      execPath: "/usr/local/bin/node",
+      on() {},
+      off() {},
+      // The program calls exit last on every path it can reach here.
+      exit: (code) => exits.push(code),
+    },
+    setInterval: () => assert.fail("Docker Gateway must not hold"),
+    setTimeout: () => ({ unref() {} }),
+    require(specifier) {
+      if (specifier === "node:fs") {
+        return { ...realFs, chmodSync() {}, mkdirSync() {}, writeFileSync() {} };
+      }
+      if (specifier === "node:child_process") {
+        return {
+          spawn(command, args, options) {
+            const child = new EventEmitter();
+            child.kill = () => {};
+            spawned.push({ command, args: [...args], env: options.env });
+            if (args[1] === "doctor") {
+              setImmediate(() => doctor(child));
+            }
+            return child;
+          },
+        };
+      }
+      return nodeRequire(specifier);
+    },
+  };
+  vm.runInNewContext(DOCKER_GATEWAY_RUNTIME_ENTRYPOINT, context);
+  const gatewayStarted = () => spawned.some(({ args }) => args[1] === "gateway");
+  for (let turn = 0; turn < 100 && !gatewayStarted() && exits.length === 0; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return { spawned, errors, exits };
+}
+
+test("Docker development Gateway starts current state without Doctor", async (t) => {
+  const directory = await stateDirectory(t, { main: CURRENT });
+  const outcome = await runDockerGateway(directory);
+  assert.deepEqual(
+    outcome.spawned.map(({ command, args }) => [command, ...args]),
+    [["node", "/app/openclaw.mjs", "gateway", "--port", "8080"]],
+  );
+  assert.deepEqual(outcome.exits, []);
+});
+
+test("Docker development Gateway migrates an older agent database before starting OpenClaw", async (t) => {
+  const directory = await stateDirectory(t, { main: CURRENT - 1 });
+  const outcome = await runDockerGateway(directory, (child) => {
+    setVersion(databasePath(directory, "main"), CURRENT);
+    child.emit("exit", 1, null);
+  });
+  assert.deepEqual(
+    outcome.spawned.map(({ command, args }) => [command, ...args]),
+    [
+      ["/usr/local/bin/node", "/app/openclaw.mjs", "doctor", "--fix", "--non-interactive"],
+      ["node", "/app/openclaw.mjs", "gateway", "--port", "8080"],
+    ],
+  );
+  assert.equal(outcome.spawned[0].env.OPENCLAW_CONFIG_READONLY, "1");
+  // The configuration document was written before Doctor and left out of its environment.
+  assert.equal(outcome.spawned[0].env.OPENCLAW_CONFIG_JSON, undefined);
+  assert.deepEqual(outcome.exits, []);
+  assert.ok(
+    outcome.errors.some(
+      (line) =>
+        typeof line === "string" &&
+        line.includes('"phase":"state-migration"') &&
+        line.includes('"outcome":"ok"'),
+    ),
+  );
+});
+
+test("Docker development Gateway exits without starting OpenClaw when Doctor leaves an older agent database", async (t) => {
+  const directory = await stateDirectory(t, { main: CURRENT - 1 });
+  const outcome = await runDockerGateway(directory, (child) => child.emit("exit", 0, null));
+  assert.deepEqual(
+    outcome.spawned.map(({ args }) => args[1]),
+    ["doctor"],
+  );
+  assert.deepEqual(outcome.exits, [1]);
+  const message = outcome.errors.at(-1);
+  assert.match(message, /^Gateway state migration failed: openclaw doctor --fix \(exit-0\) left /);
+  assert.match(message, /OpenClaw was not started\. .* then deploy the Agent again\.$/);
+  assert.equal(readVersion(databasePath(directory, "main")), CURRENT - 1);
 });
