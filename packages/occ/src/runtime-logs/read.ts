@@ -522,11 +522,12 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
     const prefixEnd =
       end === 0 ? (checkpointValid ? checkpoint.count : 0) : remaining[end - 1]!.index + 1;
     const consumed = end === lines.length ? completeLines.length : prefixEnd;
+    // A Driver byte cut does not invalidate its complete fetched prefix. Keep
+    // untimed progress after the last wire page drains, so polling cannot replay it.
     const retainCheckpoint =
       !skipStalled &&
       (pageCut ||
         (checkpoint !== undefined &&
-          !chunk.truncated &&
           (eligible.some(({ line }) => line.time === null) || lines.length === 0)));
     const prefix = completeLines.slice(0, prefixEnd);
     const ordered = prefix.every(

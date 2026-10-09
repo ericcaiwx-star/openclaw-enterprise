@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/858ce292-681c-43ab-a4d3-0640d3380971
+last_updated_session: authoring-run/3dcf8b04-24bd-4739-ac19-fb70f6064952
 ---
 
 # Agent runtime logs flow
@@ -171,11 +171,9 @@ batches them, and filters `since_time` by that stamp, so a resume sends a time
 `SANDBOX_LOG_OVERLAP_MS` (5 s) behind the newest delivered line; the cursor
 keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
-Both readers checkpoint serialized cuts with an authenticated window digest,
-raw-prefix count, query floor and pre-cut baseline. Sandbox checkpoints reuse the
-outer time and hashes for that baseline; fixed-width hashes and window tuples
-retain every occurrence without duplicate fields or array punctuation,
-keeping emitted cursors within response and query admission limits. Known container times retain
+Signed cut checkpoints retain the raw-prefix digest/count, query floor and pre-cut
+baseline. Sandbox checkpoints reuse outer time/hashes for the baseline. Fixed-width hashes
+and window tuples retain occurrences within response and query cursor limits. Untimed checkpoints retain consumed prefixes after Driver byte cuts. Known container times retain
 the captured floor; empty checkpoints persist. A matching checkpoint retains
 observed positional proof across append-only growth and later cuts. Stable windows
 drain, including untimed lines and over-capacity timestamp groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
@@ -245,6 +243,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 07:32: Preserve drained untimed byte-cut progress. (authoring-run/3dcf8b04-24bd-4739-ac19-fb70f6064952 - f9b208a0ac5e1e5118c2f8dcc9050c27ff23061c)
 
 - 2026-10-10 07:17: Retain validated positional progress as the tail fills. (authoring-run/858ce292-681c-43ab-a4d3-0640d3380971 - a9176a61cf209915e2ccab3f862db9a2bc750754)
 
