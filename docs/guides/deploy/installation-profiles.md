@@ -142,7 +142,7 @@ discovery egress into the base input:
 ```json
 {
   "runtime": {
-    "codexSeccompProfile": "openclaw/codex-0.160.0-<profile-sha256>.json"
+    "codexSeccompProfile": "openclaw/codex-0.163.0-alpha.1-<profile-sha256>.json"
   },
   "codex": {
     "modelDiscoveryCidrs": ["198.51.100.20/32"]
@@ -215,6 +215,11 @@ as behind a source-preserving NLB, needs none.
 
 Client-ID and client-secret Secret keys must differ. Preflight compares custom
 keys with the chart defaults (`client-id` and `client-secret`) when a key is omitted.
+Each provider needs its own Secret, as the chart requires: its `secretName`
+(default `occ-github-login`, `occ-google-login` or `occ-oidc-login`) must not
+name another provider's Secret, `gatewayApiKeySecretName`, the ChatGPT admin
+Secret when `codex.managedServiceAccounts` is set, a repository Secret, or the
+chart's `occ-installation-startup`, `occ-database` and `occ-auth` Secrets.
 
 `github`, `google` and `oidc` also accept `secretName`, `clientIdKey`, `clientSecretKey`
 and `egressCidrs`; `github` also accepts `allowedOrgs` and `allowedTeams`
@@ -297,9 +302,16 @@ Skip both configuration-generation branches and continue at the
 The runbook covers Secret creation, Helm installation, bootstrap key retrieval,
 and authenticated API verification.
 
-`controlPlane.nodeSelector` requires Kubernetes label keys and label values
-that are empty or a label name of at most 63 characters, matching Helm and
-bootstrap-volume preparation.
+If `controlPlane.databaseCa` supplies a CA Secret, omit `mountPath` to use
+`/etc/openclaw/database-ca`, or choose a path distinct from the other active
+database-client mounts. Preflight rejects collisions with platform mounts and,
+when enabled, repository credentials or managed ChatGPT account mounts before
+writing deployment files. See the [rendering flow](../../flows/installation-profile-rendering.md#4-build-helm-values).
+
+`controlPlane.nodeSelector`, `runtime.nodeSelector` and `runtime.gatewayNodeSelector`
+require Kubernetes label keys and label values that are empty or a label name of
+at most 63 characters, matching Helm, bootstrap-volume preparation and Pod
+admission.
 Preflight rejects invalid placement labels before writing deployment files.
 
 If rendering fails or either YAML file is absent, stop and fix the input. Do not

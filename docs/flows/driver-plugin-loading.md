@@ -1,7 +1,7 @@
 ---
 created: 2026-08-21
 updated: 2026-10-09
-last_updated_session: authoring-run/480d2d81-8f6a-43f5-854d-6ce9ee130ea5
+last_updated_session: fix-962-964
 ---
 
 # Installation Driver Package Loading Flow
@@ -22,7 +22,8 @@ without startup YAML uses the defaults traced in [platform startup](platform-sta
 - Source:
   `apps/controller/src/composition/installation-config.ts:loadInstallationConfiguration`,
   `apps/controller/src/composition/driver-packages.ts:loadDriverPackage`,
-  `apps/controller/src/composition/production.ts:composeProduction`.
+  `apps/controller/src/composition/production.ts:composeProduction`, and
+  `apps/controller/src/worker.ts:ControllerWorker.start`.
 - Assumptions: An operator has installed and selected the reviewed package;
   [Install Driver packages](../reference/drivers/selection.md) owns installation,
   package formats, configuration examples, private registries, and deployment.
@@ -67,12 +68,23 @@ it has no package-loading path. The
 pinning, registry, and configuration contract. TypeBox checks each selected
 Driver's closed schema before implementation-owned semantic validation;
 invalid package exports, identity, capability, or lifecycle wiring reject
-startup without fallback. The package root export resolver follows ordered target
-arrays through the existing `import`, `node`, and `default` conditions. Invalid
-targets and unmatched conditions can select a later array entry; a matched null
-condition ends that condition branch. Once a file target is selected, resolution,
-compiled ESM checks, package containment, and import must succeed before Driver
-construction. Missing files and import failures do not select another target.
+startup without fallback. The package root export resolver follows Node's
+`import()` resolution: `"."` selects a subpath only at the top level (nested, it
+is an unmatched condition name), conditions are Node's defaults (`node`,
+`import`, `module-sync`, `node-addons`, `default`) in key order, and mixed
+subpath and condition keys or numeric keys are invalid. Invalid targets and
+unmatched conditions can select a later array entry; a matched null condition
+ends that condition branch. The selected target is resolved as a URL inside the
+package and percent-decoded; it must name an existing file exactly, with no
+extension, directory index or `main` lookup, and an encoded separator or
+directory is refused. Package containment, the compiled ESM check, and import
+must then succeed before Driver construction. The entry must be `.mjs`, or `.js`
+whose nearest `package.json` (searched from the entry's directory up to the
+package root, stopping at a `node_modules` directory, as Node's import does)
+declares `"type": "module"`. The refusal names that `package.json`, or says the
+entry is neither `.mjs` nor `.js`. Unlike Node, the check never detects ESM
+syntax in a `.js` file outside a module scope. Missing files and import failures
+do not select another target.
 
 For packageless Compute, the exact id `compute-ssh` selects `SshComputeDriver`
 with implementation `occ/ssh`. Every other packageless id retains Kubernetes
@@ -161,6 +173,12 @@ their existing Harness-owned runtime topology.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-09 17:39: Name the deciding `package.json` in the compiled ESM refusal. (fix-962-964)
+
+- 2026-10-09 16:21: Decide a `.js` Driver entry is ESM from its nearest `package.json` scope, as Node's import does, instead of the package root manifest. (fix-956)
+
+- 2026-10-09 15:42: Resolve the Driver package root export as Node's `import()` does (top-level `"."` only, default conditions, exact existing file) and restore the worker entry in Source. (fix-949-950)
 
 - 2026-10-09 22:04: Admit compiled Driver export target arrays through startup and preserve selected-file failure boundaries. (authoring-run/480d2d81-8f6a-43f5-854d-6ce9ee130ea5 - dc95c2261d4b46cff8aca703e13e43cdd71d153e)
 

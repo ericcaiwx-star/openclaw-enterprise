@@ -244,8 +244,8 @@ parent directory must be private and neither destination may already exist.
 Helm sets the key path from `bootstrap.password.mountPath` and
 `bootstrap.serviceKey.fileName` (default `initial-admin-service-key.json`). The
 key filename must be a simple basename distinct from `bootstrap.password.fileName`.
-`bootstrap.password.claimName` must be a DNS subdomain of at most 253 characters,
-with each label at most 63, the same rule `prepare-bootstrap-volume` applies to
+`bootstrap.password.claimName` must follow Kubernetes' DNS-subdomain name rule:
+253 characters total, the same rule `prepare-bootstrap-volume` applies to
 `--claim`. Both use that existing PVC. Reruns do not inspect,
 replace, or regenerate output; see [recovery](../../guides/deploy/service-keys.md#recover-an-incomplete-bootstrap).
 
@@ -307,7 +307,8 @@ both are set. Partial selectors and invalid or API-colliding ports fail renderin
 See [scraping and discovery](../../guides/observability/metrics.md).
 
 For an in-cluster log receiver, set both
-`logging.collector.exporter.namespaceLabels` and `podLabels`, set its `port`,
+`logging.collector.exporter.namespaceLabels` and `podLabels`, set decimal `port`
+(1–65535, no leading zeros),
 and leave `cidr` empty. This alternative cannot be combined with a CIDR.
 Collector metrics use the same paired selector contract under
 `logging.collector.metrics`, on fixed port `8888`; metrics ingress is opt-in.

@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
-updated: 2026-10-09
-last_updated_session: authoring-run/9f37d8ec-6a5b-4676-a134-8a6fb5c54f3a
+updated: 2026-10-10
+last_updated_session: authoring-run/b0c35eb4-2b87-4f3e-aec3-8c416cdef3bb
 ---
 
 # Agent runtime logs flow
@@ -77,14 +77,16 @@ reads, so a denial is always audited and never spends a token.
 
 ### 2. Describe the runtime
 
-`KubernetesComputeDriver.describeAgentRuntime` resolves the owned Namespace, then
+`KubernetesComputeDriver.describeAgentRuntime` reports the current termination
+when a container is terminated, otherwise its prior termination. It resolves the owned Namespace, then
 lists Pods by the exact Agent, revision and workload-role labels: dedicated
 Gateways and Harnesses in the shared tenant namespace in a single cluster. The
 two-cluster profile reads dedicated Gateways in its control target and Harnesses
 in its execution target. It lists Events by
 `involvedObject.uid`, keeps only that Pod's Events, drops the scheduler's
 `FailedScheduling` retry after a lost PVC update race once the Pod has a node,
-caps them at 100 and takes each
+follows Event-list continuation under the same five-second deadline, retains
+the newest 100 eligible Events across all pages, and takes each
 Event's `container` from `involvedObject.fieldPath` (`spec.containers{name}` or
 the init or ephemeral form; `null` for Pod-level Events such as `Scheduled`). A log
 read passes `{ source, events: false }`, so it lists only that source's Pods and
@@ -110,7 +112,10 @@ restarts and no current or previous instance can return kubelet's exact `400`
 waiting-to-start Status. The Driver treats only that matching Pod/container/reason
 answer as an empty page. It still requests logs, so a stale waiting status cannot
 hide output already available from kubelet. Other current-instance failures keep
-their error mapping. A cursor
+their error mapping.
+`kubernetesRuntimeLogLine` separates kubelet's RFC3339 timestamp from each raw
+line and converts numeric offsets to UTC while retaining every fractional digit.
+Unknown or malformed offset prefixes remain untimed raw text. A cursor
 poll derives `sinceSeconds` from the cursor: from its newest delivered line, or,
 when the view has delivered nothing yet, from the previous read (a full or
 byte-cut tail then emits `window_exceeded`). When a resumed read delivers nothing
@@ -121,16 +126,24 @@ continues from this read, as a view that has delivered nothing yet does. The pag
 emits `window_exceeded` dated at that line: it and the lines logged after
 it until this read are lost. A carried PEM block then keeps no delivered frontier,
 so it stays masked for the rest of the view. OCC
-drops earlier lines and consumes one remembered hash per delivered occurrence at
-the cursor time. Identical lines beyond the remembered count stay visible only
-when the signed cursor's `frontierComplete` is true and fewer than 16 hashes are
-remembered. A new frontier is complete when its consumed prefix is ordered and
-starts after the earliest fetched timestamp, or the Driver page is shorter than
-the requested tail and not byte-cut. The bit persists while the frontier timestamp
-stays the same. A missing or false bit, or a full hash history, keeps matching-text
-suppression until the timestamp advances: expanding a previously cut tail must not
-make an older occurrence appear new. A page byte cut retains counts for delivered
-lines, allowing undelivered copies at a complete frontier to resume. It emits `stream_replaced`,
+drops earlier lines. For the cursor time, the signed cursor carries
+`frontierComplete`, `frontierCount` (lines delivered at that time) and the last
+16 of their hashes. When `frontierComplete` is true and the read holds that
+time's first line (it starts earlier, or the Driver page is shorter than the tail
+and not byte-cut) with its timed lines in order through that time, OCC skips the
+first `frontierCount` lines at that time, if the hashes match the end of that run,
+and delivers the rest: a group larger than 16 lines neither replays nor hides
+later lines. Otherwise it consumes one remembered hash per delivered occurrence,
+and lines it then delivers at that time drop the count. Text with no remembered hash is new
+only while the hashes cover the whole count; identical text beyond its count also
+needs `frontierComplete`. A new frontier is complete when its consumed prefix is
+ordered and starts after the earliest fetched timestamp, or the Driver page is
+shorter than the requested tail and not byte-cut. The bit persists while the
+frontier timestamp stays the same. Otherwise matching-time text stays suppressed
+until the timestamp advances: expanding a previously cut tail must not make an
+older occurrence appear new. A legacy cursor without `frontierCount` has a count
+only when it holds fewer than 16 hashes. A page byte cut keeps the count, so
+undelivered lines at a complete frontier resume. It emits `stream_replaced`,
 `window_exceeded`, `cursor_expired` or `truncated` gaps, and passes the rest to
 `runtime-logs/sanitize.ts:sanitizeRuntimeLogChunk`, the only producer of
 `SanitizedRuntimeLogRecord`. It classifies the whole page first, so
@@ -241,7 +254,19 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 
 ## Changelog
 
+- 2026-10-10 07:06: Preserve initial-container log continuation and main timestamp, Event and termination behavior when resolving the requested main merge. (authoring-run/b0c35eb4-2b87-4f3e-aec3-8c416cdef3bb - b744ee6f217d17942cdaacea80cbbd08126aa87f)
+
 - 2026-10-09 23:09: Continue current-container log reads through initial Pod preparation without concealing unrelated failures. (authoring-run/9f37d8ec-6a5b-4676-a134-8a6fb5c54f3a - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)
+- 2026-10-10 02:50: Preserve Event pagination and current termination when merging main; retain both regression groups and histories. (authoring-run/794085ff-b0bd-422e-8fe7-6b6e9846ca0f - 880b645f5e5fb5c99c6046c1eac6ca81211be584)
+
+- 2026-10-10 00:33: Read Pod Event continuation pages before returning the newest 100 diagnostics. (authoring-run-9eade0ab-4aa4-4b21-9faa-e7478c6a8983 - 3e34cc0f4b469d29fc79d2c10a33f87a0921ee47)
+
+- 2026-10-10 02:35: Preserve current termination projection and both flow histories when merging main timestamp parsing changes. (authoring-run/f9b46af2-6bd4-4636-b675-dd9bea82a566 - db4ccbdea96a752cd99a66cf4cf02c195f5fe3ba)
+
+- 2026-10-10 00:51: Report the latest exit details for currently terminated containers while retaining prior exits for running and waiting instances. (authoring-run/3d28a5c1-f0ee-4fbd-97de-52993c05b57d - 4f29773d098d2288a805d0ad80e0c65474e162d9)
+- 2026-10-10 00:04: Normalize supported kubelet timestamp offsets without losing nanoseconds, so classification and cursor overlap use the raw message and UTC time. (authoring-run/e25eab96-1110-45ec-b677-916a98b34613 - ba3686748ddf56052dc2717cc2ce6eaa3710c1f0)
+
+- 2026-10-09 15:42: Count container lines delivered at the cursor time, so a timestamp group larger than the 16-hash history neither replays nor hides later lines; a full history without that evidence stays suppressed. (fix-949-950)
 
 - 2026-10-09 22:24: Authenticate frontier completeness and retain conservative suppression for cut or legacy timestamp groups. (authoring-run/ce414344-4cec-4d51-accd-f66b2ece9e0f - f060fefd260b552e44d5549f549436d6147a474c)
 

@@ -25,6 +25,7 @@ import { captureK3dDiagnostics, k3dHostMetrics } from "./k3d-diagnostics.mjs";
 import { prepareGatewayRouting } from "./routing.mjs";
 import { prepareLogging, readDefaultCollectorImage } from "./logging.mjs";
 import { pullImage } from "./image-pull.mjs";
+import { keycloakResourceKind, prepareKeycloak, readKeycloakImage } from "./keycloak.mjs";
 import { metricsMonitoringImages } from "./metrics-monitoring-images.mjs";
 import {
   prepareRepositoryCredentials,
@@ -916,18 +917,21 @@ function imageBuildArgs(state, role, localStore, cacheWarm = false) {
 // image from the BuildKit cache without exporting its layers, then tag the
 // engine's image if it has the same ID. The ID is the digest of a config that
 // names every layer's content digest, so the tagged image is the one the build
-// would load. Lanes that export the cache, and any probe failure, build as
-// before.
+// would load. Lanes that export the cache, and any probe failure (a timeout, an
+// engine error, unreadable metadata, a failed tag), build as before. The log
+// says "absent" only when the engine reports no such image, "different" when it
+// holds another image under that reference, and "probe-failed" otherwise.
 async function reuseEngineImage(state, role, args, tag) {
   if (args[0] !== "buildx" || !args.includes("--load") || args.includes("--cache-to")) {
     return false;
   }
   const docker = process.env.OCC_DOCKER_BIN ?? "docker";
   const started = performance.now();
-  const directory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "oce-image-probe-"));
+  let directory;
   let outcome = "unresolved";
   let image;
   try {
+    directory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "oce-image-probe-"));
     const metadata = join(directory, "metadata.json");
     await execFile(
       docker,
@@ -951,23 +955,34 @@ async function reuseEngineImage(state, role, args, tag) {
     }
     image = id;
     // Under Docker's containerd image store the engine reports a manifest
-    // digest here instead, so the comparison fails safe and the lane builds.
-    const held = await execFile(docker, ["image", "inspect", "--format", "{{.Id}}", id]).then(
-      ({ stdout }) => stdout.trim(),
-      () => "",
-    );
-    if (held !== id) {
+    // digest here instead, so the comparison fails safe, the log says
+    // "different", and the lane builds.
+    let held;
+    try {
+      held = (
+        await boundedImageCommand(["image", "inspect", "--format", "{{.Id}}", id])
+      ).stdout.trim();
+    } catch (error) {
+      if (!/No such (?:image|object)|image not known/i.test(error.stderr ?? "")) {
+        throw error;
+      }
       outcome = "absent";
       return false;
     }
-    await execFile(docker, ["tag", id, tag]);
+    if (held !== id) {
+      outcome = "different";
+      return false;
+    }
+    await boundedImageCommand(["tag", id, tag]);
     outcome = "reused";
     return true;
   } catch {
     outcome = "probe-failed";
     return false;
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    if (directory !== undefined) {
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
     progress(
       state.lane,
       JSON.stringify({
@@ -2102,6 +2117,12 @@ async function prepareRuntimeSmokeCodexSeccompProfile(statePath, state, env, cre
   await writeState(statePath, state);
 }
 
+async function prepareNativeWorkspaceEnvoyImage(state, env) {
+  const image = effectiveLaneEnv("images-runtime-startup", env).OCC_TEST_WORKSPACE_ENVOY_IMAGE;
+  await ensureDockerSourceImage(state, image, "OCC_TEST_WORKSPACE_ENVOY_IMAGE");
+  env.OCC_TEST_WORKSPACE_ENVOY_IMAGE = image;
+}
+
 export async function prepareRuntimeImageSmoke({ image, statePath }) {
   assertDockerImageId(image, "Runtime smoke image");
   const path = normalizeStatePath(statePath);
@@ -2117,6 +2138,7 @@ export async function prepareRuntimeImageSmoke({ image, statePath }) {
     // Import the caller's exact loaded config ID without rebuilding or pulling.
     await execFile(process.env.OCC_DOCKER_BIN ?? "docker", ["tag", image, tag]);
     await markResourceReady(path, state, resource);
+    await prepareNativeWorkspaceEnvoyImage(state, env);
     await prepareRuntimeSmokeCodexSeccompProfile(path, state, env);
     await saveLaneEnv(path, state, env);
     return { env, cleanup: () => cleanupResourceIds(path) };
@@ -2238,6 +2260,7 @@ async function prepareLane({ lane, statePath }) {
     case "postgres-application":
     case "postgres-auth":
     case "postgres-platform":
+    case "keycloak-oidc": // Browser sign-in composes the production API on PostgreSQL.
       await ensurePostgresServer(resolvedStatePath, state);
       break;
     case "runtime-image-fixture":
@@ -2282,6 +2305,11 @@ async function prepareLane({ lane, statePath }) {
         ]),
       );
       Object.assign(env, built.env);
+      if (name === "images-runtime-startup") {
+        await timedPreparation(name, "workspace-envoy-image", () =>
+          prepareNativeWorkspaceEnvoyImage(state, env),
+        );
+      }
       if (codexSeccomp) {
         await prepareRuntimeSmokeCodexSeccompProfile(resolvedStatePath, state, env, cluster);
       }
@@ -2673,6 +2701,19 @@ async function prepareLane({ lane, statePath }) {
             ),
         }),
       );
+      // The OAuth2 refresh proof's Keycloak: pulled here with pullImage's retry and
+      // imported, so the cluster never pulls it from the registry.
+      env.OCC_TEST_KEYCLOAK_IMAGE = (
+        await timedPreparation(name, "keycloak-image-import", async () =>
+          registerImageInK3d(
+            resolvedStatePath,
+            state,
+            cluster,
+            effectiveLaneEnv(name, env).OCC_TEST_KEYCLOAK_IMAGE || (await readKeycloakImage()),
+            "OCC_TEST_KEYCLOAK_IMAGE",
+          ),
+        )
+      ).reference;
       break;
     }
     case "logging-collector": {
@@ -2700,6 +2741,27 @@ async function prepareLane({ lane, statePath }) {
     }
     case "helper-timeout":
       break;
+  }
+
+  if (lanePrepare(name).keycloak) {
+    const keycloak = await timedPreparation(name, "keycloak-start", () =>
+      prepareKeycloak({
+        stateDirectory: dirname(resolvedStatePath),
+        name: ownedName("openclaw-ci-kc", state.prefix, { maxLength: 63 }),
+        execFile,
+        docker: process.env.OCC_DOCKER_BIN ?? "docker",
+        ensureImage: (image) => ensureDockerSourceImage(state, image, "Keycloak image"),
+        reservePort: reserveLoopbackPort,
+        registerResource: async (details) => {
+          const resource = addResource(state, keycloakResourceKind, details);
+          await writeState(resolvedStatePath, state);
+          return resource;
+        },
+        saveState: () => writeState(resolvedStatePath, state),
+      }),
+    );
+    Object.assign(env, keycloak.env);
+    await markResourceReady(resolvedStatePath, state, keycloak.resource);
   }
 
   applyLaneEnv(name, env);
@@ -2872,6 +2934,10 @@ async function prepareFileWithState({ name, relativeFile, resolvedStatePath, tem
   };
 }
 
+// Repository of main's runtime images left tagged in the runners' shared image
+// cache (see warmImageCache). It is outside cleanup's owned names and is never pushed.
+const warmRuntimeImageRepository = "localhost/openclaw-ci-main/runtime";
+
 // Builds the Images and Packaging controller and runtime images only to write
 // main's hosted BuildKit cache (ci-image-cache.yml). It uses that lane's state,
 // inputs and build arguments, so the cache keys are the ones the CI image lanes
@@ -2893,16 +2959,39 @@ async function warmImageCache({ statePath }) {
   await writeState(resolvedStatePath, state);
   const nodeBaseImage = effectiveLaneEnv(lane).NODE_BASE_IMAGE;
   // The two builds are independent; in parallel their exports land sooner.
-  await timedPreparation("image-cache-warm", "controller-runtime-image-build", () =>
-    prepareTogether([
-      () =>
-        buildRuntimeImages(resolvedStatePath, state, {
-          controller: true,
-          nodeBaseImage,
-          cacheWarm: true,
-        }),
-      () => buildRuntimeImages(resolvedStatePath, state, { runtime: true, cacheWarm: true }),
-    ]),
+  const [, runtime] = await timedPreparation(
+    "image-cache-warm",
+    "controller-runtime-image-build",
+    () =>
+      prepareTogether([
+        () =>
+          buildRuntimeImages(resolvedStatePath, state, {
+            controller: true,
+            nodeBaseImage,
+            cacheWarm: true,
+          }),
+        () => buildRuntimeImages(resolvedStatePath, state, { runtime: true, cacheWarm: true }),
+      ]),
+  );
+  // The hosted runners' Docker data comes from a shared image cache, which keeps
+  // the images a job leaves tagged. Cleanup removes this run's owned tag, so also
+  // tag main's runtime image under a local name that no cleanup owns: image lanes
+  // then find the ID their restored cache resolves to (reuseEngineImage) instead
+  // of downloading and loading it. The tag names the image ID, so each new image
+  // gets its own tag instead of moving one; the shared cache evicts images unused
+  // for 8 days. Nothing is pushed.
+  const owned = runtime.env.OCC_TEST_RUNTIME_IMAGE;
+  const id = (
+    await boundedImageCommand(["image", "inspect", "--format", "{{.Id}}", owned])
+  ).stdout.trim();
+  if (!/^sha256:[a-f0-9]{64}$/u.test(id)) {
+    throw new Error("The warm runtime image has no image ID to keep.");
+  }
+  const kept = `${warmRuntimeImageRepository}:${id.slice("sha256:".length, "sha256:".length + 12)}`;
+  await boundedImageCommand(["tag", owned, kept]);
+  progress(
+    "image-cache-warm",
+    JSON.stringify({ stage: "runtime-image-kept", image: id, tag: kept }),
   );
 }
 
