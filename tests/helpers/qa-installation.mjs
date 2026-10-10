@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, copyFile, chmod, readFile, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -382,6 +382,68 @@ export async function createQaInstallation(
         "Agent deployment",
         async () => {
           const value = await f.api("GET", base + `/deployments/${agent.revision.id}`);
+          if (
+            value.error?.code === "RUNTIME_AUTHENTICATION_FAILED" &&
+            agent.preset === "OpenClaw"
+          ) {
+            // A failed deployment holds its Pod for diagnosis. Check delivery and
+            // provider rejection there without exporting the Pod's credential.
+            try {
+              const data = JSON.parse(
+                await f.kubectl(
+                  "get",
+                  "pods",
+                  "-A",
+                  "-l",
+                  `openclaw.dev/agent=${agent.id},openclaw.dev/revision=${agent.revision.id},openclaw.dev/workload-role=gateway`,
+                  "-o",
+                  "json",
+                ),
+              );
+              const pods = data.items.filter((pod) => !pod.metadata.deletionTimestamp);
+              assert.equal(pods.length, 1);
+              const [pod] = pods;
+              const expected = createHash("sha256")
+                .update(
+                  await protectedText(process.env.OCC_TEST_QA_OPENAI_KEY_FILE, "model credential"),
+                )
+                .digest("hex");
+              const script = `
+                const crypto = require('node:crypto');
+                const key = process.env[process.env.OPENCLAW_HARNESS_CREDENTIAL_ENV] ?? '';
+                const matchesInput = crypto.createHash('sha256').update(key).digest('hex') === process.argv[1];
+                const allowed = new Set(['invalid_api_key', 'insufficient_quota', 'model_not_found', 'unsupported_country_region_territory', 'account_deactivated', 'permission_denied', 'missing_required_parameter', 'invalid_organization', 'project_not_found']);
+                fetch('https://api.openai.com/v1/responses', {
+                  method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
+                  body: '{}', signal: AbortSignal.timeout(15000),
+                }).then(async (response) => {
+                  const body = await response.json().catch(() => ({}));
+                  const code = body.error?.code;
+                  console.log(JSON.stringify({ credentialPresent: key.length > 0, matchesInput, httpStatus: response.status, code: allowed.has(code) ? code : 'other' }));
+                }, () => console.log(JSON.stringify({ credentialPresent: key.length > 0, matchesInput, networkFailure: true })));
+              `;
+              const diagnostic = JSON.parse(
+                await f.kubectl(
+                  "-n",
+                  pod.metadata.namespace,
+                  "exec",
+                  pod.metadata.name,
+                  "-c",
+                  "gateway",
+                  "--",
+                  "node",
+                  "-e",
+                  script,
+                  expected,
+                ),
+              );
+              await f.record(`${agent.id}-${agent.revision.id}-authentication`, diagnostic);
+            } catch {
+              await f.record(`${agent.id}-${agent.revision.id}-authentication`, {
+                unavailable: true,
+              });
+            }
+          }
           assert.ok(
             !["failed", "cancelled"].includes(value.status),
             `Agent deployment ${value.status}: ${JSON.stringify(value.error)}`,
