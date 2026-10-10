@@ -1248,19 +1248,20 @@ async function ensureK3dCluster(statePath, state) {
       await chmod(kubeconfig, 0o600);
       await validateLoopbackKubeconfig(kubeconfig, resource.context, resource.kubectl);
     });
-    await k3dStage(state, "k3d-nodes-ready", () =>
-      execFile(resource.kubectl ?? process.env.OCC_KUBECTL_BIN ?? "kubectl", [
-        "--kubeconfig",
-        kubeconfig,
-        "--context",
-        resource.context,
+    await k3dStage(state, "k3d-nodes-ready", async () => {
+      const kubectl = resource.kubectl ?? process.env.OCC_KUBECTL_BIN ?? "kubectl";
+      const kubectlArgs = ["--kubeconfig", kubeconfig, "--context", resource.context];
+      // `wait nodes --all` covers only the nodes registered when it starts.
+      await waitForK3dNodesRegistered(kubectl, kubectlArgs, resource.nodes);
+      await execFile(kubectl, [
+        ...kubectlArgs,
         "wait",
         "--for=condition=Ready",
         "nodes",
         "--all",
         "--timeout=120s",
-      ]),
-    );
+      ]);
+    });
     if (!openShell) {
       resource.kubernetesVersion = await k3dStage(state, "k3d-version", async () => {
         const version = await execFile(process.env.OCC_KUBECTL_BIN ?? "kubectl", [
@@ -1326,6 +1327,38 @@ async function ensureK3dCluster(statePath, state) {
 // (530-760 on ubuntu-22.04), and kubectl reported "Unable to connect to the
 // server: EOF" (finding 682). With this limit it peaks at about 2,000.
 const k3dLoadBalancerWorkerConnections = 8192;
+
+const k3dNodeRegistrationTimeoutMs = 120_000;
+
+// Wait until every node this cluster owns is registered, so the Ready wait
+// cannot pass on the server alone while the worker is still joining.
+async function waitForK3dNodesRegistered(kubectl, kubectlArgs, nodes) {
+  const deadline = performance.now() + k3dNodeRegistrationTimeoutMs;
+  for (;;) {
+    let missing = nodes;
+    let lastError;
+    try {
+      const listed = await execFile(kubectl, [...kubectlArgs, "get", "nodes", "-o", "name"], {
+        timeoutMs: 30_000,
+      });
+      const registered = new Set(listed.stdout.split(/\r?\n/).map((line) => line.trim()));
+      missing = nodes.filter((node) => !registered.has(`node/${node}`));
+      if (missing.length === 0) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `k3d node ${missing.join(", ")} did not register within ${k3dNodeRegistrationTimeoutMs} ms` +
+          (lastError ? `: ${lastError.message}` : "."),
+        { cause: lastError },
+      );
+    }
+    await delay(1_000);
+  }
+}
 
 // Hosted CI creates a cluster, node image pull included, in 26-48 s (284 runs,
 // 2026-10-08: p50 27 s, p99 44 s). A create that never returns once held a lane
@@ -1847,6 +1880,47 @@ async function assertK3dImageReference(lane, cluster, reference, envName) {
   }
 }
 
+// A Ready node's containerd can still refuse connections: a worker import once
+// failed with "connect: connection refused" 6 s after every node was Ready
+// (finding 1006). Probe each node's containerd before streaming an image to it.
+// A probe that hangs is final; any other failure is retried until the deadline.
+const k3dContainerdWaitMs =
+  Number(process.env.OPENCLAW_CI_K3D_CONTAINERD_WAIT_MS) > 0
+    ? Number(process.env.OPENCLAW_CI_K3D_CONTAINERD_WAIT_MS)
+    : 60_000;
+
+async function waitForK3dContainerd(lane, cluster) {
+  // The first failed node ends the wait; the others stop polling.
+  let failed = false;
+  await Promise.all(
+    cluster.nodes.map(async (node) => {
+      const deadline = performance.now() + k3dContainerdWaitMs;
+      for (let attempt = 1; !failed; attempt += 1) {
+        try {
+          await k3dNodeImageCheck(node, ["ctr", "-n", "k8s.io", "version"], "containerd");
+          return;
+        } catch (error) {
+          const remainingMs = deadline - performance.now();
+          if (error.cause?.timedOut === true || remainingMs <= 0) {
+            failed = true;
+            throw error.cause?.timedOut === true
+              ? error
+              : new Error(
+                  `containerd on ${node} did not answer within ${k3dContainerdWaitMs} ms: ${error.message}`,
+                  { cause: error },
+                );
+          }
+          progress(
+            lane,
+            `containerd on ${node} is not answering yet (attempt ${attempt}); retrying.`,
+          );
+          await delay(Math.min(250 * attempt, 2_000, remainingMs));
+        }
+      }
+    }),
+  );
+}
+
 // Stream one image export into every owned node's containerd at once. No
 // archive touches the host or node disks. The export and every node import
 // must exit 0; the caller then verifies the imported reference on each node.
@@ -1952,6 +2026,7 @@ async function registerImageInK3d(statePath, state, cluster, image, envName) {
   // k3d can exit successfully after containerd rejects missing index content.
   // Export only the platform pulled locally, then verify the imported reference.
   const containerEngine = process.env.OCC_DOCKER_BIN ?? "docker";
+  await waitForK3dContainerd(state.lane, cluster);
   await timedPreparation(state.lane, "image-stream-import", () =>
     // k3d tools-node mode can exit successfully after a per-node import
     // failure, so stream the export into each owned node's containerd directly

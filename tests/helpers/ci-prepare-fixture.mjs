@@ -404,6 +404,19 @@ if (command === "docker" || command === "podman") {
         ? "10.42.7.0 dev flannel.1\n"
         : "10.42.7.0 via 10.42.7.0 dev flannel.1 src 10.42.3.0\n");
     }
+    if (equals(args.slice(2), ["ctr", "-n", "k8s.io", "version"])) {
+      // A Ready worker whose containerd refuses connections for a while (finding 1006).
+      state.containerdProbes ??= {};
+      state.containerdProbes[node] = (state.containerdProbes[node] ?? 0) + 1;
+      if (node.endsWith("-agent-0") && (scenario === "containerd-down" ||
+          (scenario === "late-worker" && state.containerdProbes[node] <= 2))) {
+        commitState();
+        process.stderr.write('ctr: connection error: desc = "transport: Error while dialing: dial unix ' +
+          '/run/k3s/containerd/containerd.sock: connect: connection refused"\n');
+        process.exit(1);
+      }
+      finish("Client:\n  Version:  v2.1.5-k3s1\n\nServer:\n  Version:  v2.1.5-k3s1\n");
+    }
     const ctr = ["ctr", "-n", "k8s.io", "images"];
     if (equals(args.slice(2), [...ctr, "list"])) {
       if (scenario === "hung-ctr-list" && node.endsWith("-agent-0")) await hang();
@@ -495,6 +508,7 @@ if (command === "k3d") {
     ]);
     }
     state.cluster = args[2];
+    state.agents = Number(args[args.indexOf("--agents") + 1]);
     state.clusterDeleted = false;
     const hangOnce = ["cluster-create-hangs-once", "cluster-create-hangs-escaped"].includes(scenario);
     if (scenario === "cluster-create-hangs" || (hangOnce && !state.createHung)) {
@@ -542,7 +556,16 @@ if (command === "kubectl") {
     if (equals(args.slice(4), ["config", "view", "--minify", "--flatten", "-o", "json"])) {
       finish(JSON.stringify({ clusters: [{ cluster: { server: "https://127.0.0.1:6443" } }] }));
     }
+    if (equals(args.slice(4), ["get", "nodes", "-o", "name"])) {
+      // The worker can register after the server (finding 1006).
+      state.nodeListings = (state.nodeListings ?? 0) + 1;
+      const worker = state.agents > 0 && !(scenario === "late-worker" && state.nodeListings <= 2);
+      commitState();
+      finish("node/k3d-" + state.cluster + "-server-0\n" +
+        (worker ? "node/k3d-" + state.cluster + "-agent-0\n" : ""));
+    }
     if (equals(args.slice(4), ["wait", "--for=condition=Ready", "nodes", "--all", "--timeout=120s"])) {
+      assert.equal(state.nodeListings > 0, true, "the Ready wait follows node registration");
       if (scenario.startsWith("nodes-unready")) {
         process.stderr.write("synthetic node readiness timeout\n");
         process.exit(1);
