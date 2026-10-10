@@ -5264,7 +5264,13 @@ test(
         return fixture.compute.prepareRevision(revision, deploymentContext);
       },
       async stopRevision(revision) {
-        effects.push("stop");
+        // The failed work's repository cleanup retires the runtime afterwards. Only a stop while
+        // the deployment work is unfinished would be the refused-candidate stop.
+        const work = await fixture.observerPool.query(
+          "SELECT state FROM occ.controller_work WHERE idempotency_key = $1",
+          [candidate.idempotencyKey],
+        );
+        effects.push(`stop:${work.rows[0].state}`);
         return fixture.compute.stopRevision(revision);
       },
     });
@@ -5276,7 +5282,13 @@ test(
     );
     assert.deepEqual(failure.rows, [{ code: "AUTHORIZATION_DENIED" }]);
     assert.equal(repository.calls.filter(({ operation }) => operation === "open").length, 1);
-    assert.deepEqual(effects, []);
+    await waitFor("the repository cleanup to retire the runtime", async () =>
+      effects.includes("stop:failed_permanent") ? true : undefined,
+    );
+    assert.ok(
+      effects.every((effect) => effect === "stop:failed_permanent"),
+      effects.join(","),
+    );
     assert.equal((await fixture.currentAgent(owner)).activeRevisionId, undefined);
   },
 );
