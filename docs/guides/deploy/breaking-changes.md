@@ -14,14 +14,15 @@ real Installation.
 
 **What breaks.** Provisioning and deployment answer `409` for a `gateway.bind`
 other than `auto`, `lan` or `custom`, `custom` unless `customBindHost` is
-`0.0.0.0`, or a `gateway.tailscale.mode` other than `off`. Native startup
-refused these or listened only on loopback.
+`0.0.0.0`, or Tailscale exposure. These never served routed traffic.
 
 **Who is affected.** Such Configurations on Kubernetes or Docker Compute.
+Kubernetes renders an omitted or `auto` bind as `lan` from the next deployment.
 
 **How to tell.** The `409` names the setting.
 
-**Steps.** Use `lan` or omit `gateway.bind`, then deploy again.
+**Steps.** Fix the named setting and deploy again. On containerd with cgroup v2,
+also redeploy Agents whose bind is omitted or `auto`.
 
 ## 2026-10-10: Agent saves check the automatic plugin reviewer
 
@@ -233,9 +234,8 @@ inner hyphens). The observability demo chart refuses such
 an `occ.namespace`, `dns.namespace` or `grafana.clients[N].namespace`.
 
 **Who is affected.** Only a hand-written `installation.yaml` or demo chart
-values with such a value. No Namespace can have that name, so the peer's
-NetworkPolicy matched nothing or could not be applied: the peer was already
-unreachable. The profile renderer and product charts refuse these values
+values with such a value. Such a peer was already unreachable: no Namespace can
+have that name. The profile renderer and product charts refuse these values
 already.
 
 **How to tell.** The controller logs the message above at startup; `helm
@@ -314,7 +314,7 @@ before it changes anything. See
 
 **Who is affected.** Single-cluster Installations created by the 2026-09-28
 release, or by any main before `dd344a97c`, with at least one Namespace.
-Bootstrap creates `default`, so that is nearly all of them. The experimental
+Bootstrap creates `default`, so nearly all are. The experimental
 two-cluster profile is not affected.
 
 **How to tell.**

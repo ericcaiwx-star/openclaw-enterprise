@@ -2301,6 +2301,28 @@ function gatewayConfigurationDocument(
   return document;
 }
 
+// Until finding 996, Compute rendered an omitted or auto gateway.bind as submitted. A revision
+// prepared then keeps that immutable document, and its Pods, until the Agent is deployed again;
+// any other difference from the current rendering is still refused.
+function gatewayDocumentBeforeLanBind(
+  submitted: OpenClawConfigurationDocument,
+  rendered: OpenClawConfigurationDocument,
+): string | undefined {
+  const bind = asRecord(submitted.gateway)?.bind;
+  const earlier = structuredClone(rendered);
+  const gateway = asRecord(earlier.gateway) as
+    Record<string, OpenClawConfigurationValue> | undefined;
+  if ((bind !== undefined && bind !== "auto") || gateway === undefined) {
+    return undefined;
+  }
+  if (bind === undefined) {
+    delete gateway.bind;
+  } else {
+    gateway.bind = bind;
+  }
+  return JSON.stringify(earlier);
+}
+
 export class KubernetesComputeDriver implements ComputeDriver {
   readonly discoverHarnessModels = discoverHarnessModels;
   readonly startHarnessDeviceAuthorization = startHarnessDeviceAuthorization;
@@ -4734,7 +4756,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
     await this.prepareRevisionStage("workspace_setup", () =>
       this.deliverWorkspaceSetup(revision, workspaceSetup, namespace),
     );
-    const document = JSON.stringify(gatewayConfigurationDocument(admittedRevision, nativeRuntime));
+    const nativeDocument = gatewayConfigurationDocument(admittedRevision, nativeRuntime);
+    const document = JSON.stringify(nativeDocument);
+    const earlierDocument = gatewayDocumentBeforeLanBind(nativeConfiguration, nativeDocument);
     const configuration = await this.prepareRevisionStage("gateway_configuration", async () =>
       this.gatewayConfiguration(
         admittedRevision,
@@ -4850,6 +4874,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
       gatewayOwnership,
       gatewayNamespace,
     );
+    const executionCaData: Record<string, string> =
+      this.options.executionCluster?.caBundle === undefined
+        ? {}
+        : { "execution-ca.pem": this.options.executionCluster.caBundle };
     await this.prepareRevisionStage("gateway_config_map", () =>
       this.reconcile(
         {
@@ -4861,13 +4889,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
           immutable: true,
           data: {
             [CONFIGURATION_DOCUMENT]: document,
-            ...(this.options.executionCluster?.caBundle === undefined
-              ? {}
-              : { "execution-ca.pem": this.options.executionCluster.caBundle }),
+            ...executionCaData,
           },
         },
         gatewayOwnership,
         gatewayNamespace,
+        undefined,
+        earlierDocument === undefined
+          ? []
+          : [{ [CONFIGURATION_DOCUMENT]: earlierDocument, ...executionCaData }],
       ),
     );
     if (pluginRuntime !== undefined) {

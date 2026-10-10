@@ -7,6 +7,7 @@ import {
   DockerComputeDriver,
 } from "../../apps/controller/src/drivers/compute/docker/index.ts";
 import { admitLoggingConfiguration } from "../../packages/contracts/src/index.ts";
+import { ComputeGatewaySettingError } from "../../packages/occ/src/index.ts";
 
 test("Docker preflight rejects an interrupted response and can retry", async () => {
   // Redirect only the socket address in an isolated child. The real Driver,
@@ -372,6 +373,18 @@ test("Docker Compute rejects unsupported native gateway settings before Docker e
     assert.equal(networkAccesses, 0);
     assert.equal(dockerRequests, 0);
   }
+  // Admission names the same listener settings with a 409 before a revision exists.
+  for (const [gateway, setting] of [
+    [{ bind: "loopback" }, "gateway.bind"],
+    [{ bind: "custom", customBindHost: "127.0.0.1" }, "gateway.customBindHost"],
+    [{ tailscale: { mode: "funnel" } }, "gateway.tailscale.mode"],
+  ]) {
+    assert.throws(
+      () => driver.validateGatewaySettings({ gateway }),
+      (error) => error instanceof ComputeGatewaySettingError && error.setting === setting,
+    );
+  }
+  assert.doesNotThrow(() => driver.validateGatewaySettings({ gateway: { bind: "lan" } }));
 });
 
 async function gatewayContainerLaunch(configuration = {}) {
