@@ -1775,6 +1775,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   readonly capability = "sandbox" as const;
   readonly implementation: string;
   readonly facets = Object.freeze(["networking", "filesystem", "process"] as const);
+  // environment() sets HOME to this for every Sandbox it creates.
+  readonly harnessHome = OPENSHELL_HOME;
   private readonly options: OpenShellSandboxDriverOptions;
   private readonly backend: Backend<OpenShellGateway>;
 
