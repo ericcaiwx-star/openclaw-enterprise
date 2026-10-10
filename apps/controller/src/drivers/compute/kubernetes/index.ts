@@ -119,7 +119,10 @@ import {
   workspaceSetupVerifier,
 } from "../workspace-setup-runtime.ts";
 import { ComputeLifecycleDispatcher } from "../lifecycle-hooks.ts";
-import { validatePlaintextNativeGateway } from "../native-gateway-transport.ts";
+import {
+  validatePlaintextNativeGateway,
+  validateRoutableNativeListener,
+} from "../native-gateway-transport.ts";
 import { validateCodexApprovalPolicySetting } from "../../../gateway/codex-approval-policy.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import { discoverHarnessModels } from "../model-discovery.ts";
@@ -2296,6 +2299,28 @@ function gatewayConfigurationDocument(
     delete openai.apiKey;
   }
   return document;
+}
+
+// Until finding 996, Compute rendered an omitted or auto gateway.bind as submitted. A revision
+// prepared then keeps that immutable document, and its Pods, until the Agent is deployed again;
+// any other difference from the current rendering is still refused.
+function gatewayDocumentBeforeLanBind(
+  submitted: OpenClawConfigurationDocument,
+  rendered: OpenClawConfigurationDocument,
+): string | undefined {
+  const bind = asRecord(submitted.gateway)?.bind;
+  const earlier = structuredClone(rendered);
+  const gateway = asRecord(earlier.gateway) as
+    Record<string, OpenClawConfigurationValue> | undefined;
+  if ((bind !== undefined && bind !== "auto") || gateway === undefined) {
+    return undefined;
+  }
+  if (bind === undefined) {
+    delete gateway.bind;
+  } else {
+    gateway.bind = bind;
+  }
+  return JSON.stringify(earlier);
 }
 
 export class KubernetesComputeDriver implements ComputeDriver {
@@ -4731,7 +4756,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
     await this.prepareRevisionStage("workspace_setup", () =>
       this.deliverWorkspaceSetup(revision, workspaceSetup, namespace),
     );
-    const document = JSON.stringify(gatewayConfigurationDocument(admittedRevision, nativeRuntime));
+    const nativeDocument = gatewayConfigurationDocument(admittedRevision, nativeRuntime);
+    const document = JSON.stringify(nativeDocument);
+    const earlierDocument = gatewayDocumentBeforeLanBind(nativeConfiguration, nativeDocument);
     const configuration = await this.prepareRevisionStage("gateway_configuration", async () =>
       this.gatewayConfiguration(
         admittedRevision,
@@ -4847,6 +4874,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
       gatewayOwnership,
       gatewayNamespace,
     );
+    const executionCaData: Record<string, string> =
+      this.options.executionCluster?.caBundle === undefined
+        ? {}
+        : { "execution-ca.pem": this.options.executionCluster.caBundle };
     await this.prepareRevisionStage("gateway_config_map", () =>
       this.reconcile(
         {
@@ -4858,13 +4889,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
           immutable: true,
           data: {
             [CONFIGURATION_DOCUMENT]: document,
-            ...(this.options.executionCluster?.caBundle === undefined
-              ? {}
-              : { "execution-ca.pem": this.options.executionCluster.caBundle }),
+            ...executionCaData,
           },
         },
         gatewayOwnership,
         gatewayNamespace,
+        undefined,
+        earlierDocument === undefined
+          ? []
+          : [{ [CONFIGURATION_DOCUMENT]: earlierDocument, ...executionCaData }],
       ),
     );
     if (pluginRuntime !== undefined) {
@@ -10232,27 +10265,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       throw new GatewaySettingFailure("gateway", "must be an object");
     }
     const gateway = (gatewayRecord ?? {}) as Record<string, OpenClawConfigurationValue>;
-    // Services and private routes target the Pod IP. A loopback-only native
-    // listener can pass the wrapper's local readiness gate without serving them.
-    if (gateway.bind === "loopback" || gateway.bind === "tailnet") {
-      throw new GatewaySettingFailure(
-        "gateway.bind",
-        "must listen on the Pod-facing interface: use auto, lan, or omit the setting",
-      );
-    }
-    const customBindHost =
-      typeof gateway.customBindHost === "string" ? gateway.customBindHost.trim() : undefined;
-    if (
-      gateway.bind === "custom" &&
-      customBindHost !== undefined &&
-      isIP(customBindHost) === 4 &&
-      customBindHost.startsWith("127.")
-    ) {
-      throw new GatewaySettingFailure(
-        "gateway.customBindHost",
-        "must not be a loopback address: Kubernetes gateway traffic targets the Pod IP",
-      );
-    }
+    validateRoutableNativeListener(
+      configuration,
+      (setting, requirement) => new GatewaySettingFailure(setting, requirement),
+    );
     const authRecord = asRecord(gateway.auth);
     if (gateway.auth !== undefined && authRecord === undefined) {
       throw new GatewaySettingFailure("gateway.auth", "must be an object");
@@ -10362,6 +10378,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       ...configuration,
       gateway: {
         ...gateway,
+        // Omitted and auto resolve to loopback unless OpenClaw detects a container,
+        // and containerd on cgroup v2 leaves no marker it recognizes (finding 996).
+        bind: gateway.bind === "custom" ? "custom" : "lan",
         trustedProxies: [...this.options.network.gatewayTrustedProxyCidrs],
         allowRealIpFallback: true,
         auth: {
