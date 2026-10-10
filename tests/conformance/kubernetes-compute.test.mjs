@@ -4177,6 +4177,7 @@ test("gateway routing derives stable endpoints and exact Envoy HTTPRoutes", asyn
       /identityScopes/i,
     ],
     [{ gateway: { trustedProxies: ["10.99.0.0/16"] } }, /gatewayTrustedProxyCidrs/i],
+    [{ gateway: { tls: { enabled: true } } }, /gateway\.tls\.enabled must be omitted or false/i],
   ]) {
     for (const configure of [options, routedOptions]) {
       for (const operation of ["prepareRevision", "activateRevision"]) {
