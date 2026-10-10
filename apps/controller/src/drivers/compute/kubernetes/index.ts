@@ -148,6 +148,7 @@ import {
   type CodexRepositoryBrokerNetworkPolicy,
   type PluginRuntimeSpec,
   pluginRuntimeConfigMapData,
+  pluginRuntimeEarlierConfigMapData,
   pluginRuntimeSpecForRevision,
 } from "../plugin-runtime.ts";
 import {
@@ -4866,11 +4867,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     );
     if (pluginRuntime !== undefined) {
       await this.prepareRevisionStage("plugin_runtime", () =>
-        this.reconcile(
-          this.pluginRuntimeConfigMap(pluginRuntime, pluginOwnership, namespace),
-          pluginOwnership,
-          namespace,
-        ),
+        this.reconcilePluginRuntimeConfigMap(pluginRuntime, pluginOwnership, namespace),
       );
     }
     const gatewayAccountName = embedded ? agentName : gatewayName;
@@ -4991,11 +4988,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     );
     if (!embedded && pluginRuntime !== undefined) {
       await this.prepareRevisionStage("plugin_runtime", () =>
-        this.reconcile(
-          this.pluginRuntimeConfigMap(pluginRuntime, pluginOwnership, gatewayNamespace),
-          pluginOwnership,
-          gatewayNamespace,
-        ),
+        this.reconcilePluginRuntimeConfigMap(pluginRuntime, pluginOwnership, gatewayNamespace),
       );
     }
     let launchPrepared = false;
@@ -11058,6 +11051,23 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     };
   }
 
+  // A revision prepared before a controller upgrade keeps the plugin-runtime files its
+  // Pods mounted; a new deployment of the Agent renders the current ones. Any other
+  // difference, including an old rendering of another runtime, is still refused.
+  private async reconcilePluginRuntimeConfigMap(
+    snapshot: PluginRuntimeSnapshot,
+    ownership: Ownership,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<void> {
+    await this.reconcile(
+      this.pluginRuntimeConfigMap(snapshot, ownership, namespace),
+      ownership,
+      namespace,
+      undefined,
+      pluginRuntimeEarlierConfigMapData(snapshot.runtime),
+    );
+  }
+
   private harnessWorkspaceClaimName(agentId: string): string {
     return `workspace-${sha256Hex(agentId, 12)}`;
   }
@@ -13458,6 +13468,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     ownership: Ownership,
     namespace: KubernetesNamespaceAddress,
     precondition?: ReconcilePrecondition,
+    // An existing immutable ConfigMap may instead hold exactly one of these complete
+    // data sets: what an earlier controller rendered for the same object.
+    earlierConfigMapData: readonly Readonly<Record<string, string>>[] = [],
   ): Promise<void> {
     const clients = await this.clients(namespace.plane);
     const existing = await this.getOwned(desired.kind, desired.metadata.name, namespace, ownership);
@@ -13482,15 +13495,17 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       }
       if (desired.kind === "ConfigMap") {
         const annotations = desired.metadata.annotations ?? {};
-        const data = desired.data ?? {};
         const existingData = existing.data ?? {};
         if (
           existing.immutable !== true ||
           Object.entries(annotations).some(
             ([name, value]) => existing.metadata.annotations?.[name] !== value,
           ) ||
-          Object.keys(existingData).length !== Object.keys(data).length ||
-          Object.entries(data).some(([name, value]) => existingData[name] !== value) ||
+          ![desired.data ?? {}, ...earlierConfigMapData].some(
+            (data) =>
+              Object.keys(existingData).length === Object.keys(data).length &&
+              Object.entries(data).every(([name, value]) => existingData[name] === value),
+          ) ||
           Object.keys(existing.binaryData ?? {}).length !== 0
         ) {
           throw new OwnershipFailure(

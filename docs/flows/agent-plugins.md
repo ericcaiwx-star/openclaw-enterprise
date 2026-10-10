@@ -1,6 +1,6 @@
 ---
 created: 2026-09-08
-updated: 2026-10-09
+updated: 2026-10-10
 last_updated_session: authoring-run/72c276e8-6db5-44e5-aac1-f9e3fdc34ff2
 ---
 
@@ -136,6 +136,12 @@ nonsecret request; Docker uses bounded environment delivery. For Codex, Compute
 copies the configured `appServer.approvalPolicy` into native `approval_policy`
 before startup validation. Omission preserves native defaults; incompatible
 explicit policies remain subject to reviewer checks.
+
+The Kubernetes ConfigMap is immutable and per revision. A revision prepared
+before 2026-10-09 keeps its earlier `config.toml`, without
+`[plugins._default]` or `approval_policy`, until the Agent is deployed again;
+`KubernetesComputeDriver.reconcilePluginRuntimeConfigMap` refuses any other
+difference.
 
 SSH Compute rejects nonempty plugin maps and Agent default plugin approver
 policies before host effects.
@@ -325,6 +331,8 @@ deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 00:30: Keep the earlier Codex `config.toml` of revisions prepared before an upgrade. (fix-982)
 
 - 2026-10-09 15:02: Preserve the configured Codex session approval policy during startup. (authoring-run/72c276e8-6db5-44e5-aac1-f9e3fdc34ff2 - 504bf89a0707b66e1612d26e3d67ed6f6b16232f)
 
