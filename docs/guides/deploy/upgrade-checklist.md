@@ -40,8 +40,9 @@ command; use this page as its migration inventory.
       older ones accepted. The image helper renders again and runs its startup
       preflight before stopping anything.
 - [ ] Decide whether this is a controller-only, runtime-only, or coordinated
-      release. A controller-only release does not request Agent deployments; a
-      worker restart can still interrupt repository-bound revisions. A runtime
+      release. A controller-only release does not request Agent deployments,
+      but the new worker can restart existing Agent Pods once and interrupt
+      repository-bound revisions. A runtime
       release creates new revisions from current Agent and Configuration drafts.
 - [ ] Check controller/runtime compatibility. Upgrade the controller first when
       it supports the deployed runtime. Use a release-specific sequence when the
@@ -156,7 +157,8 @@ Agent. Existing RWO-backed Agents need no recreation.
       contain the expected IDs, accounting for recorded legacy RWX deletions and
       newly created replacement Agents. IAM, Backend, service-account, deployment-work,
       and audit-record inventories also reconcile. The controller-only helper
-      requests no deployments; check for revisions affected by broker restart.
+      requests no deployments, but affected Agents' Pods can restart once on the
+      same image; check for revisions affected by broker restart.
 - [ ] Persisted Preset templates match the intended source definitions. Missing
       defaults were created, intended same-name copies were updated in place,
       and obsolete copies were handled deliberately.

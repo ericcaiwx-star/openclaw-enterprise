@@ -77,7 +77,10 @@ Revision read access must also cover the replacement revisions.
 Review saved Agent and Configuration drafts before a runtime upgrade. Each
 deployment snapshots the current draft, not the previous active revision.
 
-A controller-only release does not deploy Agents. Restarting the repository
+A controller-only release does not deploy Agents, but the new worker can
+restart their Pods once
+([details](breaking-changes.md#2026-10-10-controller-only-releases-can-restart-agent-pods-once)).
+Restarting the repository
 broker loses delivered sessions. Before a release,
 plan interruption and authorized replacement revisions for affected Agents;
 review their drafts and deploy grants. Stop if recovery cannot be performed
@@ -317,7 +320,8 @@ Keep the evidence directory private. For every release, inspect the before/live
 configuration, rendered chart, server dry run, Helm status, and final API and
 worker images.
 
-For a controller-only release, confirm unaffected gateways remain ready and
+For a controller-only release, confirm gateways are ready again (affected Agents
+restart once) and
 verify any repository-bound Agents that required replacement revisions. For a runtime release, inspect
 `deployments.jsonl`, `status/*.doctor.json`, and the before/after workload
 inventories. Then follow
