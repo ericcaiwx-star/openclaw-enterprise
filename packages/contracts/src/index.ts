@@ -1389,6 +1389,12 @@ export interface SandboxDriver extends Driver {
   readonly capability: "sandbox";
   /** One or more distinct containment facets implemented by this driver. */
   readonly facets: readonly SandboxFacet[];
+  /**
+   * Absolute HOME of the Harness user inside this provider's Sandbox. Compute places
+   * Harness-local paths it renders into the Agent Gateway configuration, such as the native
+   * hook credential directory, under it. Defaults to the Compute-owned Harness Pod's HOME.
+   */
+  readonly harnessHome?: string;
   configureAgent?(
     configuration: Readonly<OpenClawConfigurationDocument>,
     harness: Readonly<RevisionHarnessDescriptor>,

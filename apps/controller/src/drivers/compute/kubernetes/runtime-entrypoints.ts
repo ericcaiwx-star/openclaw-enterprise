@@ -34,6 +34,8 @@ export const SETUP_WRAPPER_COMMAND: readonly string[] = Object.freeze([
   "-e",
 ]);
 export const MANAGED_CONFIGURATION_DIRECTORY = "/etc/openclaw-managed";
+// Under the Harness HOME; Compute renders the same path into the Gateway's relay config.
+export const NATIVE_HOOK_CREDENTIAL_DIRECTORY = ".oce-native-hooks";
 
 export const PLUGIN_APP_SERVER_TOKEN_HMAC_DOMAIN = "openclaw-plugin-runtime/app-server-token/v1";
 export const RUNTIME_READINESS_PATH = "/readyz";
@@ -3743,15 +3745,19 @@ if (baseline.status !== 0) throw new Error("Workspace initialization failed.");
 const codexEnv = { ...process.env, PATH: harnessPath };
 // Per-run hook capabilities are delivered by the authenticated app-server connection.
 // Keep them outside the model workspace and the file-transfer plugin's roots.
-const hookDirectory = join(process.env.HOME, ".oce-native-hooks");
+const hookDirectory = join(process.env.HOME, ${JSON.stringify(NATIVE_HOOK_CREDENTIAL_DIRECTORY)});
 mkdirSync(hookDirectory, { recursive: true, mode: 0o700 });
 chmodSync(hookDirectory, 0o700);
-if (process.env.OPENCLAW_NODE_CA_PEM) {
+// Hook commands call the Gateway route; they trust the CA the node uses. A SandboxDriver
+// delivers that CA as a file (OPENCLAW_NODE_CA_PATH) instead of the PEM variable.
+const gatewayCa = process.env.OPENCLAW_NODE_CA_PEM ||
+  (process.env.OPENCLAW_NODE_CA_PATH ? readFileSync(process.env.OPENCLAW_NODE_CA_PATH, "utf8").trim() : "");
+if (gatewayCa) {
   const inheritedCa = process.env.NODE_EXTRA_CA_CERTS
     ? readFileSync(process.env.NODE_EXTRA_CA_CERTS, "utf8")
     : "";
   const caPath = join(hookDirectory, "gateway-ca.pem");
-  writeFileSync(caPath, [inheritedCa, process.env.OPENCLAW_NODE_CA_PEM].filter(Boolean).join("\n"), { mode: 0o600 });
+  writeFileSync(caPath, [inheritedCa, gatewayCa].filter(Boolean).join("\n"), { mode: 0o600 });
   codexEnv.NODE_EXTRA_CA_CERTS = caPath;
 }
 delete codexEnv.OPENCLAW_NODE_SETUP_CODE;
