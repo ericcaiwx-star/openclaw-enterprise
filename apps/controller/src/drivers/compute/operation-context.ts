@@ -50,14 +50,19 @@ export async function computeWorkWaiting(): Promise<boolean> {
 /**
  * Runs a stop whose workload termination waits may end early when other Work is
  * waiting: the caller retries the whole stop later (a refused candidate's stop).
- * A wait that ends leaves the stop's later steps, such as the runtime's deletion
- * after the Gateway drain and artifact cleanup, to that retry. Other stops keep
- * their full bounded wait.
+ * Such a stop deletes the runtime before it waits for the Gateway to drain, so a
+ * wait that ends leaves only later steps, such as artifact cleanup, to that retry.
+ * Other stops keep their order and their full bounded wait.
  */
 export async function withYieldingComputeStop<Result>(
   operation: () => Promise<Result>,
 ): Promise<Result> {
   return yieldingStops.run(true, operation);
+}
+
+/** Whether this operation is a yielding (refused-candidate) stop. */
+export function isYieldingComputeStop(): boolean {
+  return yieldingStops.getStore() === true;
 }
 
 /** Whether a stop's termination wait should end now because other Work is waiting. */

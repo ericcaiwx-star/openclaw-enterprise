@@ -136,6 +136,7 @@ import {
   computeStopShouldYield,
   computeWorkWaiting,
   currentComputeAbortSignal,
+  isYieldingComputeStop,
   withComputeAbortSignal,
 } from "../operation-context.ts";
 import { unsupportedNativeGatewayAuthFields } from "../../../gateway/auth-fields.ts";
@@ -6238,8 +6239,22 @@ export class KubernetesComputeDriver implements ComputeDriver {
     await this.lifecycle.beforeWorkloadStop(revision);
     // Stop removes the serving path first so no new traffic reaches a runtime while
     // its exact Harness is being shut down.
-    await this.removeStoppedGateway(revision, namespace);
-    await this.shutdownRevisionRuntime(revision, namespace);
+    if (isYieldingComputeStop()) {
+      // OCC refused this candidate and never published it, so its Gateway has nothing worth
+      // draining into the Harness. The runtime is deleted before the Gateway's Pods are awaited:
+      // a stop that yields during that wait no longer leaves the Harness running, holding its
+      // credentials, until the retry (finding 1025).
+      await this.removeStoppedGateway(revision, namespace, { drain: false });
+      await this.shutdownRevisionRuntime(revision, namespace);
+      await this.waitForRevisionPodsToTerminate(
+        revision,
+        this.gatewayNamespace(revision, namespace),
+        "gateway",
+      );
+    } else {
+      await this.removeStoppedGateway(revision, namespace);
+      await this.shutdownRevisionRuntime(revision, namespace);
+    }
     // Its Pods are gone, so drop the revision's credential copies and snapshots.
     // Preparing the revision again re-projects them from the canonical sources.
     await this.deleteRetiredRevisionArtifacts(revision, namespace);
@@ -6328,9 +6343,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
   }
 
+  /** Deletes the revision's Gateway and, unless `drain` is false, waits for its Pods to end. */
   private async removeStoppedGateway(
     revision: AgentRevision,
     namespace: KubernetesNamespaceAddress,
+    { drain = true }: { readonly drain?: boolean } = {},
   ): Promise<void> {
     namespace = this.gatewayNamespace(revision, namespace);
     const name = `gateway-${sha256Hex(revision.agentId, 12)}`;
@@ -6338,7 +6355,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
     await this.deleteGatewayUnauthenticatedRoutes(name, ownership, namespace, revision.id);
     await this.deleteGatewayRoute(name, ownership, namespace, revision.id);
     await this.deleteNamedRuntimeResources(name, ownership, namespace, revision.id);
-    await this.waitForRevisionPodsToTerminate(revision, namespace, "gateway");
+    if (drain) {
+      await this.waitForRevisionPodsToTerminate(revision, namespace, "gateway");
+    }
   }
 
   private async waitForRevisionPodsToTerminate(
