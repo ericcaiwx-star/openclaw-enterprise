@@ -105,9 +105,9 @@ The Gateway delivers each hook capability through its authenticated Codex
 app-server connection. The Harness stores it under `.oce-native-hooks` in its
 HOME (a SandboxDriver's `harnessHome`, else `/home/node`), outside the workspace
 and file-transfer roots. This directory is Harness runtime state (on OpenShell, the
-revision's runtime PVC subpath). Each Codex start rebuilds it unless it is a private
-directory, and the first start removes earlier credentials. It is not an isolation
-boundary against compromised Harness code running as the same user. Gateway checks bind each
+revision's runtime PVC subpath). Each Codex start replaces it with an empty private
+directory. It is not an isolation boundary against compromised Harness code running as
+the same user. Gateway checks bind each
 capability to this Agent's live provider/relay and exact generation; it grants
 neither another Agent's callbacks nor node or operator access. Native hooks use the installation's public CA bundle
 (the node's CA) with normal HTTPS certificate verification.

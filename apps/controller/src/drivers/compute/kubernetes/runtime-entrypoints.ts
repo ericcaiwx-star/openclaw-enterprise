@@ -3765,29 +3765,17 @@ if (gatewayCa) {
   codexEnv.NODE_EXTRA_CA_CERTS = join(hookDirectory, "gateway-ca.pem");
 }
 // Harness code runs as this user and can replace the directory, for example with a
-// symlink into the workspace, and on OpenShell HOME survives restarts. Before each Codex
-// start, anything but this user's own directory is removed and rebuilt at 0700, and the
-// CA copy is written without following a link. Credentials left by an earlier Harness
-// lifetime belong to retired relays, so the first start also removes them; a Codex
-// restart keeps an intact directory's credentials for the Gateway's live relays.
-let removeHookCredentials = true;
+// symlink into the workspace, and on OpenShell HOME survives restarts. Each Codex start
+// removes whatever is there (a link itself, never its target) and creates a fresh 0700
+// directory; the CA copy is created exclusively, so it never follows a link. Credentials
+// left there belong to the previous Codex process's relays; the Gateway writes a new one
+// for each new or resumed run.
 function prepareHookDirectory() {
-  const entry = lstatSync(hookDirectory, { throwIfNoEntry: false });
-  if (entry !== undefined && !(entry.isDirectory() && entry.uid === process.getuid())) {
-    rmSync(hookDirectory, { recursive: true, force: true });
-  }
-  mkdirSync(hookDirectory, { recursive: true, mode: 0o700 });
+  rmSync(hookDirectory, { recursive: true, force: true });
+  mkdirSync(hookDirectory, { mode: 0o700 });
   chmodSync(hookDirectory, 0o700);
-  if (removeHookCredentials) {
-    for (const name of readdirSync(hookDirectory)) {
-      rmSync(join(hookDirectory, name), { recursive: true, force: true });
-    }
-    removeHookCredentials = false;
-  }
   if (hookCa) {
-    const caPath = join(hookDirectory, "gateway-ca.pem");
-    rmSync(caPath, { recursive: true, force: true });
-    writeFileSync(caPath, hookCa, { mode: 0o600, flag: "wx" });
+    writeFileSync(join(hookDirectory, "gateway-ca.pem"), hookCa, { mode: 0o600, flag: "wx" });
   }
 }
 delete codexEnv.OPENCLAW_NODE_SETUP_CODE;
@@ -3915,9 +3903,11 @@ function start(slot) {
   }
   try {
     slot.prepare?.();
+    slot.prepareDelay = undefined;
   } catch (error) {
+    slot.prepareDelay = Math.min((slot.prepareDelay ?? 500) * 2, 30_000);
     console.error(slot.name + " start preparation failed: " + (error.code || "error"));
-    slot.timer = setTimeout(() => start(slot), 1_000);
+    slot.timer = setTimeout(() => start(slot), slot.prepareDelay);
     return;
   }
   const child = spawn(process.execPath, args, {

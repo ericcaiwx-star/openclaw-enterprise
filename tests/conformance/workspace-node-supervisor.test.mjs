@@ -340,7 +340,7 @@ test(
 // example with a symlink into the workspace. On OpenShell HOME survives restarts, so the
 // replacement would steer later relay credentials and the CA copy into the workspace.
 test(
-  "Codex starts rebuild a replaced hook directory and retire earlier credentials",
+  "each Codex start rebuilds the hook directory without following a planted link",
   {
     timeout: 15_000,
     skip: process.platform !== "linux" && "Run the container entrypoint test on Linux.",
@@ -381,6 +381,7 @@ test(
       const entry = await lstat(hooks);
       assert.equal(entry.isDirectory(), true);
       assert.equal(entry.mode & 0o777, 0o700);
+      assert.equal((await lstat(join(hooks, "gateway-ca.pem"))).isFile(), true);
       assert.equal(await readFile(join(hooks, "gateway-ca.pem"), "utf8"), "gateway-public-ca");
     };
     await assertPrivateHooks();
@@ -389,9 +390,8 @@ test(
 
     // Mid-run, Harness code links the CA copy into the workspace and then swaps the
     // whole directory for a link. A Codex restart rebuilds the directory without
-    // writing through either link.
-    const liveCredential = join(hooks, "relay.g1.json");
-    await writeFile(liveCredential, "live-relay-credential", { mode: 0o600 });
+    // writing through either link, and drops the previous process's credentials.
+    await writeFile(join(hooks, "relay.g1.json"), "previous-relay-credential", { mode: 0o600 });
     await rm(join(hooks, "gateway-ca.pem"));
     await symlink(join(leak, "linked-ca.pem"), join(hooks, "gateway-ca.pem"));
     process.kill(first[0].pid, "SIGKILL");
@@ -399,8 +399,7 @@ test(
       await waitFor("Codex restarted", (rows) => codexRows(rows).length === 2),
     );
     await assertPrivateHooks();
-    // A restart keeps an intact directory's credentials for the Gateway's live relays.
-    assert.equal(await readFile(liveCredential, "utf8"), "live-relay-credential");
+    assert.deepEqual(await readdir(hooks), ["gateway-ca.pem"]);
     assert.deepEqual(await readdir(leak), ["planted.json"]);
 
     await rm(hooks, { recursive: true });
@@ -414,7 +413,7 @@ test(
 );
 
 // An earlier Harness lifetime's credentials belong to retired relays. The first Codex
-// start removes them from an intact directory and replaces a linked CA copy.
+// start removes them from an intact directory, fixes its mode and replaces a linked CA copy.
 test(
   "the first Codex start removes credentials left by an earlier Harness lifetime",
   {
