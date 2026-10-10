@@ -1104,6 +1104,13 @@ const signInSecretDefaults = {
   google: "occ-google-login",
   oidc: "occ-oidc-login",
 };
+function validateGatewayApiKeySecret(values, diagnostics) {
+  if (chartSecretNames.includes(values.gatewayRouting.apiKeySecretName)) {
+    diagnostics.errors.push(
+      `controlPlane.gatewayApiKeySecretName must name a dedicated Secret; ${values.gatewayRouting.apiKeySecretName} holds other credentials.`,
+    );
+  }
+}
 function signInSecretsDedicated(values, diagnostics) {
   const repository = values.repositoryCredentials;
   const taken = [
@@ -1730,6 +1737,7 @@ function buildRendered(profile, parsed, diagnostics) {
     };
   }
 
+  validateGatewayApiKeySecret(values, diagnostics);
   signInSecretsDedicated(values, diagnostics);
   validateDatabaseCaMount(values, diagnostics);
 
