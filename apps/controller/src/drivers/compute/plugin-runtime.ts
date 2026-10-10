@@ -212,6 +212,8 @@ export function pluginRuntimeConfigMapData(
  * prepared before a controller upgrade keeps the files its Pods mounted until the Agent
  * is deployed again. Only Codex `config.toml` changed, both on 2026-10-09: #508 added
  * the `[plugins._default]` table and #1995 the native `approval_policy`.
+ * TODO: remove once no Codex revision prepared before #1995 can still be active; deploying
+ * the Agent again replaces it.
  */
 export function pluginRuntimeEarlierConfigMapData(
   runtime: PluginRuntimeSpec,

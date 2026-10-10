@@ -25,6 +25,7 @@ import {
   PLUGIN_RUNTIME_MANIFEST_ENVIRONMENT,
   PLUGIN_RUNTIME_READY_MARKER_ENVIRONMENT,
   pluginRuntimeConfigMapData,
+  pluginRuntimeEarlierConfigMapData,
   pluginRuntimeEnvironment,
   pluginRuntimeSpecForRevision,
 } from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
@@ -676,6 +677,41 @@ test("Codex startup preserves explicit session approval choices and native defau
     () => pluginRuntimeSpecForRevision(malformed),
     /session approval policy is invalid/,
   );
+});
+
+test("Kubernetes keeps only the exact earlier Codex config of a selected-plugin revision", () => {
+  const candidate = revision({ plugins: codexLinearPluginState() });
+  const runtime = pluginRuntimeSpecForRevision(candidate);
+  const current = pluginRuntimeConfigMapData(runtime);
+  // The config.toml earlier controllers rendered for a selected-plugin Codex runtime:
+  // before #508 without [plugins._default], before #1995 without approval_policy.
+  const beforePluginDefaults = `[features]
+apps = true
+plugins = true
+remote_plugin = true
+
+[apps._default]
+enabled = false
+`;
+  const beforeApprovalPolicy = `${beforePluginDefaults}
+[plugins._default]
+enabled = false
+`;
+  assert.equal(
+    current[PLUGIN_RUNTIME_CODEX_CONFIG],
+    `approval_policy = "on-request"\n\n${beforeApprovalPolicy}`,
+  );
+  // Only config.toml differs; the manifest that carries selections and approvers must match.
+  assert.deepEqual(pluginRuntimeEarlierConfigMapData(runtime), [
+    { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforeApprovalPolicy },
+    { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforePluginDefaults },
+  ]);
+  // OpenClaw plugin runtimes never had a Codex config, so nothing earlier is accepted.
+  const openClaw = revision({
+    harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
+    plugins: openClawPluginState(),
+  });
+  assert.deepEqual(pluginRuntimeEarlierConfigMapData(pluginRuntimeSpecForRevision(openClaw)), []);
 });
 
 test("Codex runtime helper installs a plugin with skills and applies write action approval without tool inventory", async () => {

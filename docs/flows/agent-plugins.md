@@ -138,10 +138,11 @@ before startup validation. Omission preserves native defaults; incompatible
 explicit policies remain subject to reviewer checks.
 
 The Kubernetes ConfigMap is immutable and per revision. A revision prepared
-before 2026-10-09 keeps its earlier `config.toml`, without
-`[plugins._default]` or `approval_policy`, until the Agent is deployed again;
-`KubernetesComputeDriver.reconcilePluginRuntimeConfigMap` refuses any other
-difference.
+before #1995 (2026-10-09) keeps its earlier `config.toml`, without
+`[plugins._default]` (#508) or `approval_policy`, until the Agent is deployed
+again; `KubernetesComputeDriver.reconcilePluginRuntimeConfigMap` refuses any
+other difference. OpenShell dedicated Codex has no such allowance and needs a
+new deployment after that upgrade.
 
 SSH Compute rejects nonempty plugin maps and Agent default plugin approver
 policies before host effects.
