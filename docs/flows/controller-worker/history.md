@@ -8,6 +8,8 @@ This record preserves the dated changes to the controller worker flow. See the [
 
 ## Changelog
 
+- 2026-10-10 14:10: Yield refused-candidate stops to due work; persist their backoff. (fix-1022-1019)
+
 - 2026-10-10 13:15: Defer a refused-candidate stop that a shutdown interrupts. (fix-1021)
 
 - 2026-10-10 13:00: Refund claims lost during a refused-candidate stop. (fix-1010)
