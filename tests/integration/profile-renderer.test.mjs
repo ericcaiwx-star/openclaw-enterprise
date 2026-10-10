@@ -1632,6 +1632,21 @@ test("profiles refuse database CA keys the chart refuses", () => {
   }
 });
 
+test("profiles refuse database CA Secret names that Kubernetes refuses", () => {
+  for (const secretName of ["Bad_Name", "-database-ca", "d".repeat(254)]) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({
+        controlPlane: {
+          ...baseInput().controlPlane,
+          databaseCa: { secretName },
+        },
+      }),
+      /controlPlane\.databaseCa\.secretName must be a Kubernetes resource name/,
+    );
+  }
+});
+
 test("profiles refuse ChatGPT credential lifetimes the API refuses", () => {
   const accounts = {
     workspaceId: "11111111-1111-4111-8111-111111111111",

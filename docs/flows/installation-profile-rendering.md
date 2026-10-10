@@ -152,9 +152,10 @@ follow their rule within 200 UTF-16 code units, as in the chart.
 
 `scripts/render-installation-profile.mjs:buildRendered`
 
-An optional `controlPlane.databaseCa.key` must be a simple basename. The chart
-refuses `.`, `..`, and any other key that is not letters, digits, `.`, `_`, or
-`-`. Omit the key to use `ca.pem`.
+`controlPlane.databaseCa.secretName` must be a Kubernetes resource name of at
+most 253 characters. An optional `controlPlane.databaseCa.key` must be a simple
+basename. The chart refuses `.`, `..`, and any other key that is not letters,
+digits, `.`, `_`, or `-`. Omit the key to use `ca.pem`.
 
 `validateDatabaseCaMount` checks the generated values against the chart's active
 database-client mounts. With a database CA Secret, `mountPath` cannot equal the
@@ -284,6 +285,8 @@ activation, and repository registry creation need separate evidence.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10: Refuse database CA Secret names that Kubernetes refuses.
 
 - 2026-10-10 02:33: Merge current main while retaining selector owners and Kubernetes DNS-subdomain parity. (authoring-run/c4350829-13f6-40e0-902f-9d96e622a27c - db4ccbdea96a752cd99a66cf4cf02c195f5fe3ba)
 

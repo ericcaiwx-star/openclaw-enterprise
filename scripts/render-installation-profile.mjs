@@ -1334,6 +1334,10 @@ function buildRendered(profile, parsed, diagnostics) {
               databaseCa,
               ["controlPlane", "databaseCa", "secretName"],
               diagnostics,
+              {
+                validate: isKubernetesResourceName,
+                description: "a Kubernetes resource name of at most 253 characters",
+              },
             ),
             caKey:
               optionalString(databaseCa, ["controlPlane", "databaseCa", "key"], diagnostics, {
