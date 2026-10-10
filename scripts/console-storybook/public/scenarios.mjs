@@ -2964,6 +2964,41 @@ export const scenarios = {
       "Check that the permission message is visible inside the Logs card and unavailable actions remain disabled.",
     ],
   },
+  runtimeLogsReaderDownload: {
+    group: "Pages/Agent detail",
+    name: "Runtime logs downloaded by a log reader",
+    path: `${candidateVersion}&tab=logs`,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/rev_00000000-0000-4000-8000-000000000007/runtime",
+        status: 403,
+        code: "FORBIDDEN",
+      },
+    ],
+    actions: [click("Download")],
+    description:
+      "A log reader without Agent operate has no runtime status or Pod picker. Log text still loads from the source's current Pod, and Download names the saved file after that Pod, as the status line does.",
+  },
+  runtimeLogsReaderNoPodDownload: {
+    group: "Pages/Agent detail",
+    name: "Log reader downloads after the Pod disappears",
+    path: `${candidateVersion}&tab=logs`,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    runtimeLogDownloadNoPod: true,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/rev_00000000-0000-4000-8000-000000000007/runtime",
+        status: 403,
+        code: "FORBIDDEN",
+      },
+    ],
+    actions: [click("Download")],
+    description:
+      "Simulated UI: the page retains the last Pod's log text, but the Pod disappears before Download. The fresh download has a valid no-Pod response header, so the saved filename ends in no-pod.log rather than naming the previous Pod.",
+  },
   runtimeLogsClusterRbac: {
     group: "Pages/Agent detail",
     name: "Runtime logs blocked by cluster RBAC",
