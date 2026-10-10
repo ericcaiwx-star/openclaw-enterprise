@@ -109,7 +109,9 @@ list_inventory_agents() {
   local limit=10
   local total namespace_id agent_id agent_name
   local listed_namespace='' namespace_name=''
-  local name='if (.name | type) == "string" then .name | tojson else empty end'
+  # tojson escapes C0 controls and DEL; C1 controls are replaced too, so a name
+  # cannot forge lines or terminal sequences.
+  local name='if (.name | type) == "string" then .name | tojson | gsub("[\u0080-\u009f]"; "?") else empty end'
   total=$(jq "[$filter] | length" "$inventory")
   while IFS=$'\t' read -r namespace_id agent_id; do
     if [[ "$namespace_id" != "$listed_namespace" ]]; then
@@ -526,7 +528,7 @@ if [[ -n "$runtime_image" ]]; then
   if jq -e "$unrevisioned_agents" "$inventory" >/dev/null; then
     die "the deployment inventory contains a running Agent without an active revision; resolve its initial deployment first. No cluster changes were made.
 $(list_inventory_agents "$inventory" "$unrevisioned_agents")
-Stop or delete each listed Agent (occ --namespace NAMESPACE_ID agent stop AGENT_ID), or deploy it until it succeeds (occ --namespace NAMESPACE_ID agent deploy AGENT_ID), then start again with a new evidence directory. See docs/guides/deploy/production-upgrade.md#upgrade-agent-runtimes."
+Stop or delete each running Agent without an active revision (occ --namespace NAMESPACE_ID agent stop AGENT_ID), or deploy it until it succeeds (occ --namespace NAMESPACE_ID agent deploy AGENT_ID), then start again with a new evidence directory. See docs/guides/deploy/production-upgrade.md#upgrade-agent-runtimes."
   fi
   if jq -e \
     '.namespaces[] | select(.status != "ready") | .agents[] | select(.status == "active" and .desiredRuntimeState == "running")' \

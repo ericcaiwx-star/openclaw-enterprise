@@ -1134,13 +1134,14 @@ test("a running Agent without an active revision is named with its remedy before
         agents: [
           agent("agt_healthy", { activeRevisionId: "rev_old" }),
           agent("agt_stopped", { desiredRuntimeState: "stopped" }),
-          ...stranded.slice(0, 2),
-        ].map((item) => (typeof item === "string" ? agent(item) : item)),
+          ...stranded.slice(0, 2).map((id) => agent(id)),
+        ],
       },
       { id: "ns_beta", status: "ready", agents: stranded.slice(2).map((id) => agent(id)) },
     ],
-    // agt_stranded_2 and ns_beta have no readable name.
-    names: { ns_alpha: "Team Alpha", agt_stranded_1: 'Mail "triage"\nbot' },
+    // agt_stranded_2 and ns_beta have no readable name; agt_stranded_1's name
+    // carries a quote, a newline, DEL, and a C1 control.
+    names: { ns_alpha: "Team Alpha", agt_stranded_1: 'Mail "triage"\nbot\u007f\u009b' },
   });
   const failure = await f.run().then(
     () => assert.fail("the upgrade must refuse"),
@@ -1149,13 +1150,13 @@ test("a running Agent without an active revision is named with its remedy before
   const lines = failure.stderr.trimEnd().split("\n");
   assert.deepEqual(lines, [
     "upgrade-production-images: the deployment inventory contains a running Agent without an active revision; resolve its initial deployment first. No cluster changes were made.",
-    '  - Agent agt_stranded_1 "Mail \\"triage\\"\\nbot" in Namespace ns_alpha "Team Alpha"',
+    '  - Agent agt_stranded_1 "Mail \\"triage\\"\\nbot\\u007f?" in Namespace ns_alpha "Team Alpha"',
     '  - Agent agt_stranded_2 (name unavailable) in Namespace ns_alpha "Team Alpha"',
     ...stranded
       .slice(2, 10)
       .map((id) => `  - Agent ${id} (name unavailable) in Namespace ns_beta (name unavailable)`),
     `  - and 2 more; see ${join(f.evidence, "inventory/deployment-inventory.json")}`,
-    "Stop or delete each listed Agent (occ --namespace NAMESPACE_ID agent stop AGENT_ID), or deploy it until it succeeds (occ --namespace NAMESPACE_ID agent deploy AGENT_ID), then start again with a new evidence directory. See docs/guides/deploy/production-upgrade.md#upgrade-agent-runtimes.",
+    "Stop or delete each running Agent without an active revision (occ --namespace NAMESPACE_ID agent stop AGENT_ID), or deploy it until it succeeds (occ --namespace NAMESPACE_ID agent deploy AGENT_ID), then start again with a new evidence directory. See docs/guides/deploy/production-upgrade.md#upgrade-agent-runtimes.",
   ]);
   // Only name reads: one per listed Agent and one per Namespace, nothing beyond the first ten.
   assert.deepEqual(await f.events(), [
