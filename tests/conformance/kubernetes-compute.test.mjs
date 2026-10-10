@@ -7271,6 +7271,13 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
   const pods = { agent: pod("agent"), gateway: pod("gateway") };
   const proxyReads = [];
   const podListReads = [];
+  // A healthy runtime reports no held startup failure on its status path.
+  let runtimeStatus = (role) => ({
+    revisionId: revision.id,
+    container: role,
+    podUid: pods[role].metadata.uid,
+  });
+  let diagnosticsServing = true;
   driver.apiClients = Promise.resolve({
     core: {
       async listNamespace({ labelSelector }) {
@@ -7303,10 +7310,16 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
       },
       async connectGetNamespacedPodProxyWithPath({ name, namespace, path }) {
         proxyReads.push({ name, namespace, path });
-        assert.equal(path, "openclaw/runtime/diagnostics");
         const role = name.startsWith("agent-") ? "agent" : "gateway";
         assert.equal(namespace, role === "gateway" ? gatewayNamespaceName : namespaceName);
         assert.equal(name, `${pods[role].metadata.name}:18791`);
+        if (path === "openclaw/runtime/status") {
+          return runtimeStatus(role);
+        }
+        assert.equal(path, "openclaw/runtime/diagnostics");
+        if (!diagnosticsServing) {
+          throw Object.assign(new Error("status port not serving"), { code: 503, headers: {} });
+        }
         return {
           revisionId: revision.id,
           container: role,
@@ -7341,20 +7354,96 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
     ],
   );
   assert.equal(diagnostics.checks.find((check) => check.component === "gateway")?.checkedAt, null);
-  assert.deepEqual(proxyReads, [
-    {
-      name: "agent-runtime-diagnostics-pod:18791",
-      namespace: namespaceName,
-      path: "openclaw/runtime/diagnostics",
-    },
-    {
-      name: "gateway-runtime-diagnostics-pod:18791",
-      namespace: gatewayNamespaceName,
-      path: "openclaw/runtime/diagnostics",
-    },
+  const reads = (path) =>
+    proxyReads
+      .filter((read) => read.path === path)
+      .sort((left, right) => left.name.localeCompare(right.name));
+  for (const path of ["openclaw/runtime/diagnostics", "openclaw/runtime/status"]) {
+    assert.deepEqual(reads(path), [
+      { name: "agent-runtime-diagnostics-pod:18791", namespace: namespaceName, path },
+      { name: "gateway-runtime-diagnostics-pod:18791", namespace: gatewayNamespaceName, path },
+    ]);
+  }
+  // Each private read lists the Pod before and after the proxy call.
+  assert.equal(podListReads.filter((role) => role === "agent").length, 4);
+  assert.equal(podListReads.filter((role) => role === "gateway").length, 4);
+
+  const binding = { namespace: tenant, agent, revision };
+  // A Gateway holding a startup failure still answers diagnostics, with channel
+  // checks it could not run. The failure it holds on the status path leads the
+  // observation (ahead of the 32-check cap) as a failed check named after the
+  // startup step.
+  const heldFailure = {
+    component: "gateway",
+    check: "peer-bridge-record",
+    checkedAt: "2026-09-19T11:59:00.000Z",
+    code: "UNAVAILABLE",
+  };
+  runtimeStatus = (role) => ({
+    revisionId: revision.id,
+    container: role,
+    podUid: pods[role].metadata.uid,
+    ...(role === "gateway" ? { runtimeFailure: heldFailure } : {}),
+  });
+  assert.deepEqual(
+    (await driver.diagnoseAgentDeployment(binding)).checks.map(
+      ({ component, check, state, code }) => ({ component, check, state, code }),
+    ),
+    [
+      { component: "gateway", check: "peer-bridge-record", state: "failed", code: "UNAVAILABLE" },
+      { component: "agent", check: "auth", state: "succeeded", code: undefined },
+      { component: "gateway", check: "socket", state: "unknown", code: undefined },
+    ],
+  );
+  // When the diagnostics endpoint does not answer, the held failure still says why.
+  diagnosticsServing = false;
+  const notServing = (component) => ({
+    component,
+    check: "runtime-status",
+    state: "unknown",
+    checkedAt: null,
+    code: "UNAVAILABLE",
+  });
+  assert.deepEqual((await driver.diagnoseAgentDeployment(binding)).checks, [
+    { ...heldFailure, state: "failed" },
+    notServing("agent"),
+    notServing("gateway"),
   ]);
-  assert.equal(podListReads.filter((role) => role === "agent").length, 2);
-  assert.equal(podListReads.filter((role) => role === "gateway").length, 2);
+  diagnosticsServing = true;
+
+  // A status read that is refused or returns another Pod's report adds nothing;
+  // the diagnostics read alone decides the observation.
+  const held = runtimeStatus;
+  for (const failingStatus of [
+    () => {
+      throw Object.assign(new Error("pods/proxy denied"), { code: 403, headers: {} });
+    },
+    (role) => ({ ...held(role), podUid: "replaced-pod-uid" }),
+    (role) => ({ ...held(role), runtimeFailure: { ...heldFailure, code: "not a code" } }),
+    // Parseable, but outside the timestamps OCC accepts.
+    (role) => ({
+      ...held(role),
+      runtimeFailure: { ...heldFailure, checkedAt: "+010000-01-01T00:00:00.000Z" },
+    }),
+  ]) {
+    runtimeStatus = failingStatus;
+    assert.deepEqual(
+      (await driver.diagnoseAgentDeployment(binding)).checks.map(({ check }) => check),
+      ["auth", "socket"],
+    );
+  }
+
+  // Tolerating a failed status read never swallows the caller's cancellation.
+  const owner = new AbortController();
+  const cancelled = new Error("diagnostics caller went away");
+  runtimeStatus = () => {
+    owner.abort(cancelled);
+    throw Object.assign(new Error("pods/proxy denied"), { code: 403, headers: {} });
+  };
+  await assert.rejects(
+    withComputeAbortSignal(owner.signal, () => driver.diagnoseAgentDeployment(binding)),
+    (error) => error === cancelled,
+  );
 });
 
 test("Kubernetes runtime diagnostics reject missing timestamps and raced Pod readbacks", async () => {

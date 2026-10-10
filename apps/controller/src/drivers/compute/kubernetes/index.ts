@@ -1050,6 +1050,8 @@ const CODEX_ACCESS_TOKEN = "CODEX_ACCESS_TOKEN";
 const MAX_RUNTIME_CREDENTIAL_BYTES = 65_536;
 const MAX_RUNTIME_STATUS_RESPONSE_BYTES = 65_536;
 const RUNTIME_STATUS_IDENTIFIER = /^[A-Za-z0-9._~:@-]{1,64}$/u;
+const RUNTIME_DIAGNOSTIC_TIMESTAMP =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$/u;
 const RUNTIME_STATE_VOLUME_SIZE = "1Gi";
 const GATEWAY_PRIVATE_STATE_VOLUME = "openclaw-gateway-state";
 const GATEWAY_PRIVATE_STATE_SIZE = "10Gi";
@@ -3443,9 +3445,13 @@ export class KubernetesComputeDriver implements ComputeDriver {
         );
         const reports = await Promise.all(
           this.runtimeStatusContainers(revision).map(async (container) => {
-            const checks = await this.runtimeDiagnosticChecks(revision, namespace, container);
-            if (checks === undefined) {
-              return [
+            const [checks, heldFailure] = await Promise.all([
+              this.runtimeDiagnosticChecks(revision, namespace, container),
+              this.heldRuntimeFailureCheck(revision, namespace, container),
+            ]);
+            return {
+              heldFailure,
+              checks: checks ?? [
                 {
                   component: container,
                   check: "runtime-status",
@@ -3453,15 +3459,20 @@ export class KubernetesComputeDriver implements ComputeDriver {
                   checkedAt: null,
                   code: "UNAVAILABLE",
                 } satisfies RuntimeDiagnosticCheck,
-              ];
-            }
-            return checks;
+              ],
+            };
           }),
         );
+        // Held startup failures lead, so the check cap never drops them.
         return {
           revisionId: revision.id,
           observedAt: new Date().toISOString(),
-          checks: reports.flat().slice(0, 32),
+          checks: [
+            ...reports.flatMap(({ heldFailure }) =>
+              heldFailure === undefined ? [] : [heldFailure],
+            ),
+            ...reports.flatMap(({ checks }) => checks),
+          ].slice(0, 32),
         };
       });
     } catch (error) {
@@ -8148,6 +8159,57 @@ export class KubernetesComputeDriver implements ComputeDriver {
       return undefined;
     }
     return this.validRuntimeDiagnosticChecks(readback.status, revision, container, readback.podUid);
+  }
+
+  // A runtime holding a startup failure (for example an unusable Gateway peer
+  // configuration record) still answers diagnostics, but only with channel
+  // checks it could not run. The held failure is on the status path, so it is
+  // reported first as a failed check named after the startup step. A status
+  // read that fails or returns invalid data adds nothing; the diagnostics read
+  // alone decides the rest of the observation.
+  private async heldRuntimeFailureCheck(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+    container: "agent" | "gateway",
+  ): Promise<RuntimeDiagnosticCheck | undefined> {
+    const ownerSignal = currentComputeAbortSignal();
+    try {
+      const readback = await this.privateStatusReadback(
+        revision,
+        namespace,
+        container,
+        RUNTIME_STATUS_PATH,
+      );
+      if (readback === undefined) {
+        return undefined;
+      }
+      const failure = this.cachedRuntimeFailureEvidence(
+        readback.status,
+        revision,
+        container,
+        readback.podUid,
+      );
+      if (failure === undefined) {
+        return undefined;
+      }
+      // OCC accepts only millisecond UTC timestamps; anything else adds nothing.
+      const checkedAt = new Date(failure.checkedAt).toISOString();
+      if (!RUNTIME_DIAGNOSTIC_TIMESTAMP.test(checkedAt)) {
+        return undefined;
+      }
+      return {
+        component: failure.component,
+        check: failure.check,
+        state: "failed",
+        checkedAt,
+        code: failure.code,
+      };
+    } catch {
+      if (ownerSignal?.aborted) {
+        throw ownerSignal.reason;
+      }
+      return undefined;
+    }
   }
 
   private async privateStatusReadback(
