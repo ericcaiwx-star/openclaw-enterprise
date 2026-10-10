@@ -423,9 +423,12 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
 // deployment it is the Agent's only runtime: on Kubernetes its embedded Gateway Pod kept its model
 // key, secret environment and private state until a later deployment, stop or delete. It is now
 // stopped before the refusal is published, waiting on a failed stop like an exclusive candidate.
-// Beside an active revision a refused candidate is left alone: the active revision keeps serving,
-// and an embedded Kubernetes candidate may own the Agent's shared Gateway route, which its stop
-// would delete. The next deployment retires it.
+// Beside an active revision a refused candidate is left alone: on Kubernetes the active revision
+// keeps serving, and an embedded candidate may own the Agent's shared Gateway route, which its stop
+// would delete. The next deployment retires it. (On Docker the candidate's preparation already
+// replaced the Agent's gateway container; that redeploy shape is tracked separately.) A refusal
+// decided before the work's first preparation leaves Compute untouched; see the Secret Driver and
+// ServiceAccount issuance refusals in postgres-worker-agent-revision.test.mjs.
 for (const { declares, shape, stopFailures = 0 } of [
   { declares: true, shape: "first" },
   { declares: true, shape: "first", stopFailures: 1 },
@@ -435,7 +438,7 @@ for (const { declares, shape, stopFailures = 0 } of [
 ]) {
   const compute = declares ? "embedded Kubernetes-style" : "undeclared (Docker or SSH)";
   test(
-    `a refused ${shape === "first" ? "first deployment" : "redeploy"} on ${compute} Compute ${shape === "first" ? "is stopped" : "leaves its predecessor serving"}${stopFailures === 0 ? "" : ` after ${stopFailures} failed stop`}`,
+    `a refused ${shape === "first" ? "first deployment" : "redeploy"} on ${compute} Compute ${shape === "first" ? "is stopped" : "is not stopped"}${stopFailures === 0 ? "" : ` after ${stopFailures} failed stop`}`,
     { ...requiresPostgres, timeout: 60_000 },
     async (context) => {
       const fixture = await setup(context);

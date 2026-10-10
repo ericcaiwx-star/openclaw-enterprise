@@ -297,10 +297,10 @@ attempts; permanent failure, exhaustion, deadline, or `AUTHENTICATION_FAILED`
 terminates work. See [outcomes](../reference/controller.md) and
 [timing controls](../reference/settings/operations.md#controller-worker-environment).
 
-Before publishing a permanent refusal of an inactive candidate, exclusive or
-without an active revision beside it (not a held runtime failure, the deadline
-or exhausted retries), `ControllerWorker.stopRefusedCandidate` stops it under
-the claim heartbeat, so a rejected deployment never serves. A stop failure publishes nothing: the work defers as
+Before publishing a permanent refusal of an inactive candidate that is exclusive,
+or prepared while its Agent has no active revision (not a held runtime failure,
+the deadline or exhausted retries), `ControllerWorker.stopRefusedCandidate`
+stops it under the claim heartbeat, so a rejected deployment never serves. A stop failure publishes nothing: the work defers as
 `REFUSED_CANDIDATE_STOP_PENDING` past the attempt budget and deadline until the
 stop succeeds, after the readiness cadence doubled per failed stop up to 5 minutes
 but at least four times the stop's duration (`refusedStopRecheckMs`, in memory),

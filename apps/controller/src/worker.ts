@@ -842,6 +842,8 @@ const MAX_AUDITED_PENDING_LIFECYCLE_RECORDS = 4_096;
 export class ControllerWorker {
   private readonly metrics: OccMetrics | undefined;
   private passOutcome: WorkOutcome = "error";
+  /** The revision this pass asked Compute to prepare, if any. */
+  private preparedThisPass: string | undefined;
   private readonly state: PostgresPlatformState;
   private readonly queue: PostgresWorkQueue;
   private readonly compute: ComputeDriver;
@@ -1126,6 +1128,7 @@ export class ControllerWorker {
         if (claim !== undefined) {
           const started = process.hrtime.bigint();
           this.passOutcome = "error";
+          this.preparedThisPass = undefined;
           try {
             await this.process(claim);
           } catch (error) {
@@ -1547,6 +1550,7 @@ export class ControllerWorker {
       this.repositoryCredentials.validate(revision);
     }
     await this.recheckRevokedCredentialSources(claim, revision);
+    this.preparedThisPass = revision.id;
     let observation = await this.withClaimHeartbeat(claim, () =>
       this.compute.prepareRevision(revision, prepared),
     );
@@ -4373,14 +4377,25 @@ export class ControllerWorker {
       revision.servicePrincipalId !== agent.servicePrincipalId ||
       revision.compute.id !== compute.id ||
       revision.compute.implementation !== compute.implementation ||
-      agent.activeRevisionId === revision.id ||
+      agent.activeRevisionId === revision.id
+    ) {
+      return;
+    }
+    if (compute.requiresStoppedPredecessors?.(revision) !== true) {
       // Beside a non-exclusive active revision the candidate is left alone: that revision still
       // serves, and an embedded Kubernetes candidate may own the Agent's shared Gateway route,
       // which stopping the candidate would delete. Its next deployment, stop or delete retires it.
-      (agent.activeRevisionId !== undefined &&
-        compute.requiresStoppedPredecessors?.(revision) !== true)
-    ) {
-      return;
+      if (agent.activeRevisionId !== undefined) {
+        return;
+      }
+      // Only a candidate Compute prepared can have a runtime. A refusal decided before this
+      // work's first preparation (no earlier pass recorded evidence) leaves Compute untouched.
+      if (
+        this.preparedThisPass !== revision.id &&
+        (await this.queue.findWorkAttempt(claim.idempotencyKey)) === undefined
+      ) {
+        return;
+      }
     }
     const started = Date.now();
     try {

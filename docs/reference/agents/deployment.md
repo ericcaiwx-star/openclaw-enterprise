@@ -246,8 +246,7 @@ or any first deployment, for example because its deploying actor lost `deploy`
 or a credential source was revoked, it stops the candidate's workload too, and
 records the refusal only after the stop succeeds; until then the deployment
 waits as [`REFUSED_CANDIDATE_STOP_PENDING`](#pending-deployment-progress). Other
-refused candidates stay beside the serving revision until a later successful
-deployment, stop or delete. A candidate whose runtime
+refused candidates stay until a later successful deployment, stop or delete. A candidate whose runtime
 failed by itself, such as `RUNTIME_MODEL_PROBE_FAILED` or
 `CONVERGENCE_DEADLINE_EXCEEDED`, keeps its Pods so its version's Logs tab can
 show the cause; the next deployment stops them.
