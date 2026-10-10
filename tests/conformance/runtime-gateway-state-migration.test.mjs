@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -189,22 +189,57 @@ test("Gateway state migration names the failure when Doctor leaves an older agen
   assert.equal(readVersion(databasePath(directory, "main")), CURRENT - 1);
 });
 
-test("Gateway state migration stops Doctor and exits on termination", async (t) => {
-  const directory = await stateDirectory(t, { main: CURRENT - 1 });
-  const killed = [];
-  const outcome = await migrate(directory, (child, { listeners }) => {
-    child.on("killed", (signal) => {
-      killed.push(signal);
-      child.emit("exit", null, signal);
+test("Gateway state migration leaves an agent database it cannot read to OpenClaw's own check", async (t) => {
+  const directory = await stateDirectory(t, { main: CURRENT });
+  await mkdir(join(directory, "agents", "broken", "agent"), { recursive: true });
+  await writeFile(databasePath(directory, "broken"), "not a SQLite database");
+  // An agent directory without a database is skipped too.
+  await mkdir(join(directory, "agents", "empty", "agent"), { recursive: true });
+  const outcome = await migrate(directory);
+  assert.equal(outcome.started, true);
+  assert.deepEqual(outcome.spawned, []);
+});
+
+test("Gateway state migration names a Doctor that could not start or was killed", async (t) => {
+  for (const [end, named] of [
+    [
+      (child) => child.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })),
+      "error-ENOENT",
+    ],
+    [(child) => child.emit("exit", null, "SIGKILL"), "SIGKILL"],
+  ]) {
+    const directory = await stateDirectory(t, { main: CURRENT - 1 });
+    const outcome = await migrate(directory, end);
+    assert.equal(outcome.started, false);
+    assert.deepEqual(outcome.failures, [{ check: "state-migration", code: "UNAVAILABLE" }]);
+    assert.deepEqual(outcome.exits, []);
+    assert.deepEqual(outcome.listeners, { SIGTERM: [], SIGINT: [] });
+    assert.ok(
+      outcome.errors
+        .at(-1)
+        .startsWith(`Gateway state migration failed: openclaw doctor --fix (${named}) left `),
+    );
+  }
+});
+
+test("Gateway state migration stops Doctor with the signal it got and exits", async (t) => {
+  for (const signal of ["SIGTERM", "SIGINT"]) {
+    const directory = await stateDirectory(t, { main: CURRENT - 1 });
+    const killed = [];
+    const outcome = await migrate(directory, (child, { listeners }) => {
+      child.on("killed", (received) => {
+        killed.push(received);
+        child.emit("exit", null, received);
+      });
+      for (const listener of listeners[signal]) {
+        listener();
+      }
     });
-    for (const listener of listeners.SIGTERM) {
-      listener();
-    }
-  });
-  assert.deepEqual(killed, ["SIGTERM"]);
-  assert.deepEqual(outcome.exits, [0]);
-  assert.deepEqual(outcome.failures, []);
-  assert.deepEqual(outcome.listeners, { SIGTERM: [], SIGINT: [] });
+    assert.deepEqual(killed, [signal]);
+    assert.deepEqual(outcome.exits, [0]);
+    assert.deepEqual(outcome.failures, []);
+    assert.deepEqual(outcome.listeners, { SIGTERM: [], SIGINT: [] });
+  }
 });
 
 test("Kubernetes and Docker Gateway programs share the migration step and stay down after a failure", () => {
@@ -217,14 +252,20 @@ test("Kubernetes and Docker Gateway programs share the migration step and stay d
   // Kubernetes holds the Pod unready with its status published instead of restarting.
   assert.ok(
     GATEWAY_RUNTIME_ENTRYPOINT.includes(
-      "!(await migrateGatewayState(outdatedDatabases))) {\n  setInterval(() => {}, 3600000);\n  return;\n}",
+      "if (outdatedDatabases.length > 0 && !(await migrateGatewayState(outdatedDatabases))) {\n" +
+        "  setInterval(() => {}, 3600000);\n  return;\n}",
     ),
   );
 });
 
 // Runs the whole Docker development Gateway program with its file writes and
-// child processes replaced; agent databases are read from `directory`.
-async function runDockerGateway(directory, doctor = () => assert.fail("Doctor must not run")) {
+// child processes replaced; agent databases are read from `directory`. `sqlite`
+// replaces the node:sqlite module each time the program loads it.
+async function runDockerGateway(
+  directory,
+  doctor = () => assert.fail("Doctor must not run"),
+  { sqlite = () => nodeRequire("node:sqlite") } = {},
+) {
   const spawned = [];
   const events = [];
   const errors = [];
@@ -275,7 +316,7 @@ async function runDockerGateway(directory, doctor = () => assert.fail("Doctor mu
           },
         };
       }
-      return nodeRequire(specifier);
+      return specifier === "node:sqlite" ? sqlite() : nodeRequire(specifier);
     },
   };
   vm.runInNewContext(DOCKER_GATEWAY_RUNTIME_ENTRYPOINT, context);
@@ -339,4 +380,25 @@ test("Docker development Gateway exits without starting OpenClaw when Doctor lea
   assert.match(message, /^Gateway state migration failed: openclaw doctor --fix \(exit-0\) left /);
   assert.match(message, /OpenClaw was not started\. .* then deploy the Agent again\.$/);
   assert.equal(readVersion(databasePath(directory, "main")), CURRENT - 1);
+});
+
+test("Docker development Gateway exits without starting OpenClaw on an unexpected migration error", async (t) => {
+  const directory = await stateDirectory(t, { main: CURRENT - 1 });
+  let loads = 0;
+  const outcome = await runDockerGateway(directory, (child) => child.emit("exit", 0, null), {
+    // The re-read after Doctor fails outside the per-database check.
+    sqlite: () => {
+      loads += 1;
+      if (loads > 1) {
+        throw new Error("node:sqlite is unavailable");
+      }
+      return nodeRequire("node:sqlite");
+    },
+  });
+  assert.deepEqual(
+    outcome.spawned.map(({ args }) => args[1]),
+    ["doctor"],
+  );
+  assert.deepEqual(outcome.exits, [1]);
+  assert.equal(outcome.errors.at(-1), "Gateway state migration failed: node:sqlite is unavailable");
 });
