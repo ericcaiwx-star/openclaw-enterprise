@@ -8,6 +8,10 @@ This record preserves the dated changes to the controller worker flow. See the [
 
 ## Changelog
 
+- 2026-10-10 13:15: Defer a refused-candidate stop that a shutdown interrupts. (fix-1021)
+
+- 2026-10-10 13:00: Refund claims lost during a refused-candidate stop. (fix-1010)
+
 - 2026-10-10 11:40: Stop a refused first deployment on any Compute. (fix-1016)
 
 - 2026-10-10 06:40: Back off and report a failing refused-candidate stop. (fix-1002-1004)

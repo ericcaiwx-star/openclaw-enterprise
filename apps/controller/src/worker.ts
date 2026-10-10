@@ -896,11 +896,6 @@ export class ControllerWorker {
     { readonly stoppedAt: number; readonly restopAfterMs: number }
   >();
   private readonly deployTimings = new Map<string, DeployTiming>();
-  /**
-   * Consecutive failed refused-candidate stops per deployment work item, which set its backoff.
-   * A restart forgets them, so the backoff starts again from the readiness cadence.
-   */
-  private readonly refusedStopFailures = new Map<string, number>();
   /** The last stuck-cleanup cause logged per repository cleanup work item. */
   private readonly repositoryCleanupCauses = new Map<string, string>();
   /**
@@ -4162,16 +4157,10 @@ export class ControllerWorker {
     if (resolved.outcome === "permanent" && heldFailureCode === undefined && !expired) {
       await this.stopRefusedCandidate(claim, resolved.code);
     }
-    let refusedStopRecheckMs: number | undefined;
-    if (resolved.refusedCandidate === undefined) {
-      this.refusedStopFailures.delete(claim.idempotencyKey);
-    } else {
-      refusedStopRecheckMs = this.refusedStopRecheckMs(
-        claim,
-        Date.now() - claim.createdAt.getTime(),
-        resolved.refusedStopMs ?? 0,
-      );
-    }
+    const refusedStopRecheckMs =
+      resolved.refusedCandidate === undefined
+        ? undefined
+        : await this.refusedStopRecheckMs(claim, resolved.refusedStopMs ?? 0);
     let activated: Readonly<AgentRevision> | undefined;
     let stoppedCandidate: Readonly<AgentRevision> | undefined;
     let committedOutcome: WorkOutcome =
@@ -4267,9 +4256,6 @@ export class ControllerWorker {
         });
       }
     }, this.queueOptions);
-    if (resolved.refusedCandidate !== undefined) {
-      this.recordRefusedStopFailure(claim);
-    }
     if (stoppedCandidate !== undefined) {
       await this.closeRevisionCredentials(claim, stoppedCandidate);
       await this.withClaimHeartbeat(claim, () => this.compute.stopRevision(stoppedCandidate!));
@@ -4412,8 +4398,10 @@ export class ControllerWorker {
         // A graceful shutdown aborts a slow stop (a Pod-termination wait) like a lost claim.
         // While the lease holds, the pass waits on the stop instead, so a restart during the
         // first stop, before any wait evidence, neither spends an attempt nor leaves the refusal
-        // unrecorded (finding 1021). The interrupted stop's duration does not lengthen the
-        // recheck. A lease that already ran out still loses the claim when the deferral commits.
+        // unrecorded (finding 1021). The interrupted stop's duration lengthens the recheck like a
+        // failed stop's, so the next controller does not repeat a blocking stop within seconds
+        // (finding 1022). A lease that already ran out still loses the claim when the deferral
+        // commits.
         if (!this.stopping) {
           throw error;
         }
@@ -4422,11 +4410,10 @@ export class ControllerWorker {
           cause: error,
         });
         stopping.name = "WorkerStopping";
-        throw new RefusedCandidateStopError(refusal, 0, stopping);
+        throw new RefusedCandidateStopError(refusal, Date.now() - started, stopping);
       }
       throw new RefusedCandidateStopError(refusal, Date.now() - started, error);
     }
-    this.refusedStopFailures.delete(claim.idempotencyKey);
     // Like a swept predecessor, the next deployment need not stop it again within a lease.
     this.stoppedPredecessors.delete(revision.id);
     this.stoppedPredecessors.set(revision.id, {
@@ -4444,32 +4431,20 @@ export class ControllerWorker {
   /**
    * The recheck after this work's next failed refused-candidate stop: the readiness cadence,
    * doubled for each earlier consecutive failure up to REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS, and
-   * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the failed stop took.
+   * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the failed stop took. The
+   * earlier failures are counted from the work's evidence, so a restart keeps the backoff
+   * (finding 1022); if that read fails, the backoff starts again.
    */
-  private refusedStopRecheckMs(claim: ClaimedWork, ageMs: number, stopMs: number): number {
-    const failures = (this.refusedStopFailures.get(claim.idempotencyKey) ?? 0) + 1;
+  private async refusedStopRecheckMs(claim: ClaimedWork, stopMs: number): Promise<number> {
+    const earlier = await this.queue.countRefusedStopWaits(claim.idempotencyKey).catch(() => 0);
     return Math.max(
       Math.min(
         REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS,
-        revisionReadinessRecheckMs(ageMs) * 2 ** Math.min(failures - 1, 20),
+        revisionReadinessRecheckMs(Date.now() - claim.createdAt.getTime()) *
+          2 ** Math.min(earlier, 20),
       ),
       Math.ceil(Math.max(0, stopMs) * REFUSED_CANDIDATE_STOP_DURATION_FACTOR),
     );
-  }
-
-  /** Counts a failed refused-candidate stop once its deferral committed. */
-  private recordRefusedStopFailure(claim: ClaimedWork): void {
-    const key = claim.idempotencyKey;
-    const failures = (this.refusedStopFailures.get(key) ?? 0) + 1;
-    this.refusedStopFailures.delete(key);
-    this.refusedStopFailures.set(key, failures);
-    if (this.refusedStopFailures.size > MAX_STOPPED_PREDECESSOR_RECORDS) {
-      // Forgetting a record only restarts that work's backoff.
-      const oldest = this.refusedStopFailures.keys().next().value;
-      if (oldest !== undefined) {
-        this.refusedStopFailures.delete(oldest);
-      }
-    }
   }
 
   private async completeStoppedRevisionWork(

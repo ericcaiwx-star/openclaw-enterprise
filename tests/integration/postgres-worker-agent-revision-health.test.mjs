@@ -543,7 +543,7 @@ for (const { declares, shape, stopFailures = 0, refusal = "revoked" } of [
  * Starts the refused-candidate scenario: an exclusive Agent whose first revision activated and
  * whose replacement's first pass started its runtime, after which `refuse` makes later passes
  * refuse it. `stopRevision(revision)` returns undefined to use the counting driver's stop or a
- * promise that replaces it, for example a failing stop.
+ * promise that replaces it, for example a failing stop. `compute` restarts the worker.
  */
 async function startRefusedCandidate(
   fixture,
@@ -575,23 +575,21 @@ async function startRefusedCandidate(
       }
     },
   });
-  await fixture.start(
-    {
-      ...driver.compute,
-      async stopRevision(revision) {
-        return (
-          (revision.id === candidateId ? stopRevision(revision) : undefined) ??
-          driver.compute.stopRevision(revision)
-        );
-      },
+  const compute = {
+    ...driver.compute,
+    async stopRevision(revision) {
+      return (
+        (revision.id === candidateId ? stopRevision(revision) : undefined) ??
+        driver.compute.stopRevision(revision)
+      );
     },
-    { emit },
-  );
+  };
+  await fixture.start(compute, { emit });
   const first = await fixture.revision(owner, 1);
   await fixture.work(first, "succeeded");
   const replacement = await fixture.revision(owner, 2);
   candidateId = replacement.id;
-  return { owner, first, replacement, driver };
+  return { owner, first, replacement, driver, compute };
 }
 
 /** Passes that could not stop the refused candidate: their log names the refusal. */
@@ -719,6 +717,103 @@ revisionTest(
     );
   },
   { timeout: 120_000 },
+);
+
+// Finding 1022: the failed-stop count that doubles the recheck lived in memory, so after a
+// restart the next failed stop was rechecked on the readiness cadence again (0.5 s here). It is
+// now counted from the work's REFUSED_CANDIDATE_STOP_PENDING evidence.
+revisionTest(
+  "a failing refused stop keeps its doubled recheck across a controller restart",
+  async (fixture) => {
+    const events = [];
+    const failedStops = [];
+    let stopping = false;
+    const { replacement, driver, compute } = await startRefusedCandidate(
+      fixture,
+      "refused-restart-backoff",
+      {
+        emit: (event) => events.push(event),
+        stopRevision: () => {
+          if (stopping) {
+            return undefined;
+          }
+          failedStops.push(Date.now());
+          return Promise.reject(new Error("Kubernetes API temporarily unavailable"));
+        },
+      },
+    );
+    // Three failed stops wait 0.5, 1 and 2 s; the restart falls in the 2 s wait.
+    await waitFor(
+      "three failed refused stops",
+      async () => (refusedStopWaits(events, replacement).length >= 3 ? true : undefined),
+      20_000,
+    );
+    await fixture.stop();
+    await fixture.start(compute, { emit: (event) => events.push(event) });
+    await waitFor(
+      "two failed refused stops after the restart",
+      async () => (failedStops.length >= 5 ? true : undefined),
+      30_000,
+    );
+    // The fourth failure waits 4 s; a forgotten count waited 0.5 s.
+    const gap = failedStops[4] - failedStops[3];
+    assert.ok(gap >= 3_900, `the stops after the restart started ${gap} ms apart`);
+    stopping = true;
+    await fixture.work(replacement, "failed_permanent", 30_000);
+    assert.deepEqual([...driver.running], [], "the refused candidate was stopped");
+  },
+  { timeout: 90_000 },
+);
+
+// Finding 1022: a shutdown during a slow refused stop deferred the work without the stop's
+// duration, so the next controller repeated the blocking stop on the readiness cadence. The
+// interrupted stop now lengthens the recheck like a failed one: four times as long as it ran.
+revisionTest(
+  "a refused stop that a shutdown interrupts keeps its duration in the recheck",
+  async (fixture) => {
+    const stopCalls = [];
+    let release;
+    let stopping = false;
+    const { replacement, driver, compute } = await startRefusedCandidate(
+      fixture,
+      "refused-shutdown-backoff",
+      {
+        stopRevision: () => {
+          if (stopping) {
+            return undefined;
+          }
+          stopCalls.push(Date.now());
+          if (stopCalls.length > 1) {
+            return Promise.reject(new Error("Kubernetes API temporarily unavailable"));
+          }
+          // A Pod-termination wait that outlasts the controller's shutdown.
+          return new Promise((resolve, reject) => {
+            release = () =>
+              reject(new Error("Pods did not terminate before the controller stopped"));
+          });
+        },
+      },
+    );
+    await waitFor("the refused stop to block", async () => release, 20_000);
+    await delay(1_500);
+    const stopped = fixture.stop();
+    release();
+    await stopped;
+    const interruptedAt = Date.now();
+    await fixture.start(compute);
+    await waitFor(
+      "the stop after the restart",
+      async () => (stopCalls.length >= 2 ? true : undefined),
+      30_000,
+    );
+    // The stop ran at least 1.5 s, so its recheck is at least 6 s; without it, 0.5 s.
+    const gap = stopCalls[1] - interruptedAt;
+    assert.ok(gap >= 4_000, `the interrupted stop was repeated ${gap} ms after the shutdown`);
+    stopping = true;
+    await fixture.work(replacement, "failed_permanent", 30_000);
+    assert.deepEqual([...driver.running], [], "the refused candidate was stopped");
+  },
+  { timeout: 90_000 },
 );
 
 // Finding 1004: a refusal decided after the check for a newer revision (here a Sandbox that
