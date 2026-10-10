@@ -3,7 +3,8 @@
 Use these checks when verifying Agent-owned plugin selections, PluginDriver
 translation, and native runtime behavior. Run commands from the repository root.
 The [Agent plugin reference](../reference/agent-plugins.md) owns supported API
-behavior; this page owns contributor setup, fixture inputs, and proof notes.
+behavior; this page owns contributor setup and fixture inputs, and
+[Agent plugin proof notes](plugins-proof-notes.md) own proof notes.
 
 ## Local and integration suites
 
@@ -237,6 +238,7 @@ historical port evidence.
 ## Related
 
 - [Agent plugins](../reference/agent-plugins.md)
+- [Agent plugin proof notes](plugins-proof-notes.md)
 - [PluginDriver](../reference/drivers/plugin.md)
 - [Kubernetes testing](kubernetes.md)
 - [PostgreSQL testing](postgresql.md)
