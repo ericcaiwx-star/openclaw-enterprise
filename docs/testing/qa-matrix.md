@@ -200,7 +200,7 @@ attempt owned cleanup and remove temporary credential files.
 selection and protected `integration-qa` approval. The `all` dispatch and `full`
 group exclude this lane. Its job runs after the focused Slack job to avoid
 competing Socket Mode consumers. Both workflows materialize only selected
-credentials and upload outcome JSON, not private state or raw command logs.
+credentials and upload outcome JSON, not private state or raw command logs. Failed commands include bounded, redacted stderr for diagnosis.
 `scripts/ci/test-suites/qa-matrix.json` owns lane registration.
 
 Replay through the credentialed runner with the same environment:

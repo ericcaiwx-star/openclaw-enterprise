@@ -10,7 +10,12 @@ import { renderPresetTemplate } from "../../packages/contracts/src/index.ts";
 import { createNativePluginAssertions } from "./plugin-driver-real.mjs";
 import { prepareHybridInstallation } from "./qa-hybrid.mjs";
 import { loadYaml, dumpYaml, unusedPort, waitFor } from "./qa-utils.mjs";
-import { protectedText, registerQaSecret, grantQaSecret } from "./qa-secrets.mjs";
+import {
+  protectedText,
+  registerQaSecret,
+  grantQaSecret,
+  qaCommandFailureDetail,
+} from "./qa-secrets.mjs";
 import { createResourceScope } from "../fixtures/repository-credentials/resources.mjs";
 
 function execute(command, args, options) {
@@ -163,9 +168,13 @@ export async function createQaInstallation(
           `${error.stdout ?? ""}\n${error.stderr ?? ""}`,
           { mode: 0o600 },
         );
+        if (f.credentials?.password) {
+          registerQaSecret(f.credentials.password);
+        }
+        const detail = qaCommandFailureDetail(error.stderr, options.env ?? env);
         // execFile errors embed argv and output, potentially containing tokens.
-        // Keep only the program and exit classification in public test output.
-        error.message = `${command.split("/").at(-1)} failed (exit ${error.code ?? "unknown"}, signal ${error.signal ?? "none"}); private state: ${stateDirectory}`;
+        // Keep arguments/stdout private; include only redacted stderr for diagnosis.
+        error.message = `${command.split("/").at(-1)} failed (exit ${error.code ?? "unknown"}, signal ${error.signal ?? "none"}); private state: ${stateDirectory}${detail ? `; stderr: ${detail}` : ""}`;
         delete error.cmd;
         delete error.stdout;
         delete error.stderr;

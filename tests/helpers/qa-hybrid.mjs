@@ -4,6 +4,7 @@ import { readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { gatewayRoutingPins } from "../../scripts/ci/routing.mjs";
 import { loadYaml, dumpYaml, waitFor, yamlDocuments } from "./qa-utils.mjs";
+import { registerQaSecret } from "./qa-secrets.mjs";
 
 export async function verifyNetworkPolicy(f) {
   const namespace = `qa-policy-${f.suffix}`;
@@ -208,6 +209,7 @@ export async function prepareHybridInstallation(f) {
     spec: { controllerName: "gateway.envoyproxy.io/gatewayclass-controller" },
   });
   const key = randomBytes(32).toString("hex");
+  registerQaSecret(key);
   await f.apply({
     apiVersion: "v1",
     kind: "Secret",

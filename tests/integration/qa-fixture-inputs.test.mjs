@@ -191,3 +191,19 @@ test("hosted QA materializes only selected credentials and rejects missing selec
   assert.match(missing.stderr, /CALENDAR_TOOL_NAME is required/);
   await assert.rejects(readFile(githubEnv), { code: "ENOENT" });
 });
+
+test("QA command diagnostics retain the error while hiding generated and environment secrets", async () => {
+  const { qaCommandFailureDetail, registerQaSecret } = await import("../helpers/qa-secrets.mjs");
+  registerQaSecret("generated-private-value");
+  const output = qaCommandFailureDetail(
+    "earlier detail\n".repeat(12) +
+      "Docker service could not start: generated-private-value and process-private-value\nAuthorization: Bearer example-private-value\n",
+    { PRIVATE_INPUT: "process-private-value" },
+  );
+  assert.match(output, /Docker service could not start/);
+  assert.ok(output.split("\n").length <= 8);
+  assert.doesNotMatch(
+    output,
+    /generated-private-value|process-private-value|example-private-value/,
+  );
+});
