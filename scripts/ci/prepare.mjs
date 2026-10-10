@@ -1928,7 +1928,7 @@ async function waitForK3dContainerd(lane, cluster) {
 }
 
 const containerdSocketUnavailable =
-  /containerd\.sock: connect: (?:connection refused|no such file or directory)/;
+  /\/run\/k3s\/containerd\/containerd\.sock: connect: (?:connection refused|no such file or directory)/;
 
 // k3d tools-node mode can exit successfully after a per-node import failure, so
 // stream the export into each owned node's containerd directly and propagate
@@ -2071,7 +2071,7 @@ async function registerImageInK3d(statePath, state, cluster, image, envName) {
         cluster,
         lane: state.lane,
         statePath,
-        failure: `${envName} image import into k3d nodes failed`,
+        failure: `${envName} image import into k3d nodes failed: ${error.message.slice(0, 300)}`,
       }).catch(() => progress(state.lane, "k3d diagnostics unavailable"));
     }
     throw error;

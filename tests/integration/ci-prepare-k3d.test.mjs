@@ -497,12 +497,15 @@ test("fixture preparation names the node whose containerd never answers and impo
   assert.equal(state.env, undefined);
   // The failure keeps node diagnostics for the outage.
   const evidence = JSON.parse(await readFile(`${commands.statePath}.diagnostics.json`, "utf8"));
-  assert.match(evidence.failure, /image import into k3d nodes failed$/);
+  assert.match(
+    evidence.failure,
+    /image import into k3d nodes failed: containerd on k3d-\S+-agent-0 did not answer/,
+  );
   const cleanup = commands.cleanup();
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("fixture preparation does not retry a hung containerd probe", async (t) => {
+test("fixture preparation fails on a hung containerd probe without polling again", async (t) => {
   const commands = await fixtureImageCommands(t, "hung-containerd-probe", undefined, {
     OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000",
   });
@@ -536,6 +539,8 @@ test("fixture preparation imports once more after containerd refuses an import",
     ({ args }) => args[0] === "exec" && args[1] === "-i" && args[2].endsWith("-agent-0"),
   );
   assert.equal(imports.length, 2);
+  // A recovered import writes no failure diagnostics.
+  await assert.rejects(() => stat(`${commands.statePath}.diagnostics.json`), { code: "ENOENT" });
   const cleanup = commands.cleanup();
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
