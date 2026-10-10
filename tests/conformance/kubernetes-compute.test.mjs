@@ -14341,6 +14341,52 @@ for (const embedded of [true, false]) {
   });
 }
 
+for (const embedded of [true, false]) {
+  test(`Kubernetes ${embedded ? "embedded" : "dedicated"} initializer failure preserves SDK Date evidence and missing-time fallback`, async () => {
+    for (const scenario of [
+      { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: false },
+      { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: true },
+      { finishedAt: new Date(Number.NaN) },
+      { finishedAt: null },
+      { finishedAt: undefined },
+      { finishedAt: "not-a-time" },
+    ]) {
+      const fixture = workspaceSetupFixture(embedded);
+      fixture.state.failedInitializer = true;
+      const clients = await fixture.driver.apiClients;
+      const list = clients.core.listNamespacedPod;
+      // The shipped SDK decodes the API's finishedAt into Date. A waiting
+      // restart keeps the last failed instance's time; absent times use now.
+      clients.core.listNamespacedPod = async (request) => {
+        const response = await list(request);
+        for (const pod of response.items) {
+          for (const status of pod.status?.initContainerStatuses ?? []) {
+            if (status.name === "initialize-workspace") {
+              status.state.terminated.finishedAt = scenario.finishedAt;
+              if (scenario.waiting) {
+                status.lastState = status.state;
+                status.state = { waiting: { reason: "CrashLoopBackOff" } };
+              }
+            }
+          }
+        }
+        return response;
+      };
+      const before = Date.now();
+      const result = await fixture.driver.prepareRevision(fixture.revision, fixture.context);
+      const after = Date.now();
+      assert.equal(result.ready, false);
+      assert.equal(result.runtimeFailure.code, "WORKSPACE_SETUP_FAILED");
+      const checkedAt = Date.parse(result.runtimeFailure.checkedAt);
+      if (scenario.finishedAt instanceof Date && !Number.isNaN(scenario.finishedAt.getTime())) {
+        assert.equal(checkedAt, scenario.finishedAt.getTime());
+      } else {
+        assert.ok(checkedAt >= before && checkedAt <= after);
+      }
+    }
+  });
+}
+
 for (const method of ["api_key", "codex_pat"]) {
   test(`dedicated ${method} preparation shares the tenant namespace while separating Gateway state and credentials`, async () => {
     const fixture = workspaceSetupFixture(false);

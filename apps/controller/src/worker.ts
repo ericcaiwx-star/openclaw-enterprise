@@ -244,6 +244,41 @@ function revisionFailureLogFields(error: unknown): {
 }
 
 /**
+ * Stopping a refused exclusive candidate failed. The pass retries like any dependency failure,
+ * and its log keeps the refusal code the stop was for.
+ */
+class RefusedCandidateStopError extends Error {
+  readonly refusal: string;
+
+  constructor(refusal: string, cause: unknown) {
+    super("The refused AgentRevision candidate could not be stopped.", { cause });
+    this.name = "RefusedCandidateStopError";
+    this.refusal = refusal;
+  }
+
+  /**
+   * The refusal stands, but it is not published while its candidate may still serve: the work
+   * waits on the stop's own dependency and the next pass repeats the refusal and the stop.
+   */
+  pending(): {
+    readonly result: RevisionDispatchResult;
+    readonly logFields: Readonly<Record<string, string | number>>;
+  } {
+    const cause = this.cause;
+    return {
+      result: {
+        outcome: "pending",
+        ...(cause instanceof TransientDependencyError
+          ? { code: cause.code, dependencyFailure: cause }
+          : { code: "DEPENDENCY_UNAVAILABLE" }),
+        refusedCandidate: this.refusal,
+      },
+      logFields: { ...revisionFailureLogFields(cause), refusal: this.refusal },
+    };
+  }
+}
+
+/**
  * The pending result of an activation pass that did not finish: a dependency
  * that is converging and a known activation wait keep their own codes (D330);
  * anything else stays REVISION_FINALIZATION_INCOMPLETE.
@@ -290,6 +325,12 @@ interface DispatchResult {
 interface RevisionDispatchResult extends DispatchResult {
   /** A transient dependency failure, retried until the convergence deadline. */
   readonly dependencyFailure?: TransientDependencyError;
+  /**
+   * A refusal whose exclusive candidate could not be stopped yet. Its pending passes outlast
+   * the attempt budget and the convergence deadline: ending the work would leave the refused
+   * candidate serving with nothing left to stop it.
+   */
+  readonly refusedCandidate?: string;
   readonly data?: Readonly<Record<string, unknown>>;
   readonly resultData?: Readonly<Record<string, unknown>>;
   readonly revision?: Readonly<AgentRevision>;
@@ -3418,24 +3459,37 @@ export class ControllerWorker {
       if (error instanceof WorkClaimLostError) {
         throw error;
       }
-      if (
-        error instanceof RepositoryCredentialAuthorityError ||
-        error instanceof SandboxRevisionUnsupportedError ||
-        error instanceof CredentialSourceRevisionError ||
-        error instanceof ActivationFailedError
-      ) {
-        result = { outcome: "permanent", code: error.code };
-      } else if (error instanceof TransientDependencyError) {
-        // A dependency that recovers by itself must not spend the attempt budget:
-        // five quick retries end long before a Gateway route or an API server
-        // that is converging under load comes back (D28).
-        result = { outcome: "pending", code: error.code, dependencyFailure: error };
+      if (error instanceof RefusedCandidateStopError) {
+        ({ result, logFields: failureLogFields } = error.pending());
       } else {
-        result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+        if (
+          error instanceof RepositoryCredentialAuthorityError ||
+          error instanceof SandboxRevisionUnsupportedError ||
+          error instanceof CredentialSourceRevisionError ||
+          error instanceof ActivationFailedError
+        ) {
+          result = { outcome: "permanent", code: error.code };
+        } else if (error instanceof TransientDependencyError) {
+          // A dependency that recovers by itself must not spend the attempt budget:
+          // five quick retries end long before a Gateway route or an API server
+          // that is converging under load comes back (D28).
+          result = { outcome: "pending", code: error.code, dependencyFailure: error };
+        } else {
+          result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+        }
+        failureLogFields = revisionFailureLogFields(error);
       }
-      failureLogFields = revisionFailureLogFields(error);
     }
-    await this.finalizeRevision(claim, result, failureLogFields);
+    try {
+      await this.finalizeRevision(claim, result, failureLogFields);
+    } catch (error) {
+      // A refusal caught above (for example lost repository authority) stops its candidate here.
+      if (!(error instanceof RefusedCandidateStopError)) {
+        throw error;
+      }
+      const pending = error.pending();
+      await this.finalizeRevision(claim, pending.result, pending.logFields);
+    }
   }
 
   private async authorizeRevision(
@@ -4010,6 +4064,7 @@ export class ControllerWorker {
         : undefined;
     const expired =
       result.outcome === "pending" &&
+      result.refusedCandidate === undefined &&
       Date.now() - claim.createdAt.getTime() >= this.convergenceTimeoutMs;
     // Runtime entrypoints publish a runtime failure only after their own retries
     // end, and then hold the container unready until an explicit restart that
@@ -4059,6 +4114,14 @@ export class ControllerWorker {
       (await this.continueExhaustedActiveRevision(claim, resolved.code))
     ) {
       return;
+    }
+    // OCC refused this candidate (its authority, credentials or configuration), so its runtime
+    // must not keep serving. A runtime that failed by itself (a held startup failure, the
+    // convergence deadline, exhausted retries) stays for diagnosis on its version's Logs tab.
+    // ActivationFailedError also lands here, but no bundled Driver activates before commit, so
+    // it only reaches a published (active) revision, which the stop skips.
+    if (resolved.outcome === "permanent" && heldFailureCode === undefined && !expired) {
+      await this.stopRefusedExclusiveCandidate(claim, resolved.code);
     }
     let activated: Readonly<AgentRevision> | undefined;
     let stoppedCandidate: Readonly<AgentRevision> | undefined;
@@ -4132,7 +4195,9 @@ export class ControllerWorker {
           { code: resolved.code },
           // A transient dependency failure is rechecked on the readiness cadence:
           // like an unready runtime, it waits for convergence, not for a fix.
-          resolved.dependencyFailure !== undefined || REVISION_READINESS_CODES.has(resolved.code)
+          resolved.dependencyFailure !== undefined ||
+            resolved.refusedCandidate !== undefined ||
+            REVISION_READINESS_CODES.has(resolved.code)
             ? { delayMs: revisionReadinessRecheckMs(ageMs) }
             : {},
         );
@@ -4209,6 +4274,80 @@ export class ControllerWorker {
       ...failureLogFields,
       ...this.deployTimingFields(claim),
     });
+  }
+
+  /**
+   * Exclusive replacement stops every predecessor before a candidate's first pass, so a
+   * candidate that a later pass refuses (for example after its actor lost `deploy`) would be
+   * the only runtime left, serving a deployment OCC rejected while the recorded active revision
+   * has no workload (finding 990). Stop it under the live claim before the failure is published,
+   * so the Agent is unavailable until a new revision activates. A refused active revision is
+   * left alone: its workload is the one recorded, and active maintenance owns it.
+   */
+  private async stopRefusedExclusiveCandidate(claim: ClaimedWork, refusal: string): Promise<void> {
+    const compute = this.compute;
+    // Only the deployment's own work can leave a candidate serving: maintenance exists only for
+    // revisions that activated, and their retirement already stopped them.
+    if (
+      claim.agentId === undefined ||
+      claim.revisionId === undefined ||
+      claim.namespaceTarget !== undefined ||
+      claim.agentTarget !== undefined ||
+      claim.idempotencyKey !== `agent_revision:${claim.revisionId}:reconcile` ||
+      compute.requiresStoppedPredecessors === undefined
+    ) {
+      return;
+    }
+    const { namespace, agent, revision } = await this.state.read(async (view) => ({
+      namespace: await view.namespaces.findNamespace(claim.namespaceId),
+      agent: await view.agents.findAgent(claim.namespaceId, claim.agentId!),
+      revision: await view.revisions.findRevision(
+        claim.namespaceId,
+        claim.agentId!,
+        claim.revisionId!,
+      ),
+    }));
+    if (
+      namespace === undefined ||
+      agent === undefined ||
+      revision === undefined ||
+      namespace.status !== "ready" ||
+      revision.namespaceId !== namespace.id ||
+      revision.agentId !== agent.id ||
+      revision.servicePrincipalId !== agent.servicePrincipalId ||
+      revision.compute.id !== compute.id ||
+      revision.compute.implementation !== compute.implementation ||
+      agent.activeRevisionId === revision.id ||
+      compute.requiresStoppedPredecessors(revision) !== true
+    ) {
+      return;
+    }
+    try {
+      if (compute.bindAgent !== undefined) {
+        await this.withClaimHeartbeat(claim, async () => {
+          await compute.bindAgent!({ namespace, agent });
+        });
+      }
+      await this.closeRevisionCredentials(claim, revision);
+      await this.withClaimHeartbeat(claim, () => compute.stopRevision(revision));
+    } catch (error) {
+      if (error instanceof WorkClaimLostError) {
+        throw error;
+      }
+      throw new RefusedCandidateStopError(refusal, error);
+    }
+    // Like a swept predecessor, the next deployment need not stop it again within a lease.
+    this.stoppedPredecessors.delete(revision.id);
+    this.stoppedPredecessors.set(revision.id, {
+      stoppedAt: Date.now(),
+      restopAfterMs: this.leaseDurationMs,
+    });
+    if (this.stoppedPredecessors.size > MAX_STOPPED_PREDECESSOR_RECORDS) {
+      const oldest = this.stoppedPredecessors.keys().next().value;
+      if (oldest !== undefined) {
+        this.stoppedPredecessors.delete(oldest);
+      }
+    }
   }
 
   private async completeStoppedRevisionWork(
