@@ -20,7 +20,7 @@ jobs:
     steps:
       - id: check
         env:
-          TRUSTED: ${{ (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]' }}
+          TRUSTED: ${{ (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]' && github.event.pull_request.user.login != 'dependabot[bot]' }}
         run: |
           echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"
           if [[ "$TRUSTED" != true ]]; then
