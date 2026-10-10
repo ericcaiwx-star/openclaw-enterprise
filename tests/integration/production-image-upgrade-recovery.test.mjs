@@ -217,7 +217,13 @@ if (tool === 'helm') {
   }
 } else if (tool === 'occ') {
   if (args.includes('deployment-inventory')) {
-    out({installationId: 'ins_test', namespaces: [{id: 'ns_test', status: 'ready', agents: state.agent ? [{id: 'agt_test', status: 'active', desiredRuntimeState: 'running', executionMode: 'embedded', activeRevisionId: 'rev_old', deploymentInProgress: false}] : []}]});
+    out({installationId: 'ins_test', namespaces: state.inventoryNamespaces ?? [{id: 'ns_test', status: 'ready', agents: state.agent ? [{id: 'agt_test', status: 'active', desiredRuntimeState: 'running', executionMode: 'embedded', activeRevisionId: 'rev_old', deploymentInProgress: false}] : []}]});
+  } else if (state.names && args.includes('get') && (args.includes('agent') || args.includes('namespace'))) {
+    // Reads a scripted resource name; an unlisted ID stands for a denied read.
+    log('read ' + args.at(-1));
+    const name = state.names[args.at(-1)];
+    if (name === undefined) { process.stderr.write('permission denied\\n'); process.exit(1); }
+    out({id: args.at(-1), name});
   } else if (args.includes('deploy')) {
     state.dispatches += 1; state.activeRevision = 'rev_new'; save(); log('agent-deploy');
     if (take('lost-agent-response')) process.exit(9);
@@ -413,6 +419,8 @@ async function fixture(
     kubernetesDenied = false,
     executionCluster = null,
     installationName = "Production",
+    inventoryNamespaces = null,
+    names = null,
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "occ-upgrade-recovery-"));
@@ -573,6 +581,8 @@ if (args[0] === 'scripts/upgrade-repository-image-probe.mjs') {
     kubeconfig: api?.kubeconfig ?? null,
     preflightResults,
     installationName,
+    inventoryNamespaces,
+    names,
     version: 1,
     helmStatus: "deployed",
     api: 1,
@@ -1104,6 +1114,58 @@ test("an unchecked repository image pair cannot start an upgrade", async (t) => 
   // Selecting digests alone does not establish their admission compatibility.
   await assert.rejects(f.run("--broker-image", broker), /failed compatibility qualification/);
   assert.deepEqual(await f.events(), []);
+});
+
+test("a running Agent without an active revision is named with its remedy before mutation", async (t) => {
+  const agent = (id, fields = {}) => ({
+    id,
+    status: "active",
+    desiredRuntimeState: "running",
+    executionMode: "dedicated",
+    deploymentInProgress: false,
+    ...fields,
+  });
+  const stranded = Array.from({ length: 12 }, (_, index) => `agt_stranded_${index + 1}`);
+  const f = await fixture(t, {
+    inventoryNamespaces: [
+      {
+        id: "ns_alpha",
+        status: "ready",
+        agents: [
+          agent("agt_healthy", { activeRevisionId: "rev_old" }),
+          agent("agt_stopped", { desiredRuntimeState: "stopped" }),
+          ...stranded.slice(0, 2),
+        ].map((item) => (typeof item === "string" ? agent(item) : item)),
+      },
+      { id: "ns_beta", status: "ready", agents: stranded.slice(2).map((id) => agent(id)) },
+    ],
+    // agt_stranded_2 and ns_beta have no readable name.
+    names: { ns_alpha: "Team Alpha", agt_stranded_1: 'Mail "triage"\nbot' },
+  });
+  const failure = await f.run().then(
+    () => assert.fail("the upgrade must refuse"),
+    (error) => error,
+  );
+  const lines = failure.stderr.trimEnd().split("\n");
+  assert.deepEqual(lines, [
+    "upgrade-production-images: the deployment inventory contains a running Agent without an active revision; resolve its initial deployment first. No cluster changes were made.",
+    '  - Agent agt_stranded_1 "Mail \\"triage\\"\\nbot" in Namespace ns_alpha "Team Alpha"',
+    '  - Agent agt_stranded_2 (name unavailable) in Namespace ns_alpha "Team Alpha"',
+    ...stranded
+      .slice(2, 10)
+      .map((id) => `  - Agent ${id} (name unavailable) in Namespace ns_beta (name unavailable)`),
+    `  - and 2 more; see ${join(f.evidence, "inventory/deployment-inventory.json")}`,
+    "Stop or delete each listed Agent (occ --namespace NAMESPACE_ID agent stop AGENT_ID), or deploy it until it succeeds (occ --namespace NAMESPACE_ID agent deploy AGENT_ID), then start again with a new evidence directory. See docs/guides/deploy/production-upgrade.md#upgrade-agent-runtimes.",
+  ]);
+  // Only name reads: one per listed Agent and one per Namespace, nothing beyond the first ten.
+  assert.deepEqual(await f.events(), [
+    "read ns_alpha",
+    "read agt_stranded_1",
+    "read agt_stranded_2",
+    "read ns_beta",
+    ...stranded.slice(2, 10).map((id) => `read ${id}`),
+  ]);
+  assert.equal((await f.state()).dispatches, 0);
 });
 
 test("a changed eligible node stops the upgrade before mutation", async (t) => {
