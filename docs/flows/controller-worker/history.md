@@ -8,6 +8,8 @@ This record preserves the dated changes to the controller worker flow. See the [
 
 ## Changelog
 
+- 2026-10-10 11:40: Stop a refused first deployment on any Compute. (fix-1016)
+
 - 2026-10-10 06:40: Back off and report a failing refused-candidate stop. (fix-1002-1004)
 
 - 2026-10-10 03:10: Stop an exclusive candidate the worker refuses before publishing its failure. (fix-990-991)
