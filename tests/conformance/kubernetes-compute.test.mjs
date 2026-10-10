@@ -14678,6 +14678,105 @@ test("dedicated Harness deactivation still closes pre-upgrade Service selectors"
   });
 });
 
+// Codex config.toml as earlier controllers rendered it for a plugin-free Agent.
+const CODEX_CONFIG_BEFORE_PLUGIN_DEFAULTS = `[features]
+apps = false
+plugins = false
+remote_plugin = false
+
+[apps._default]
+enabled = false
+`;
+const CODEX_CONFIG_BEFORE_APPROVAL_POLICY = `${CODEX_CONFIG_BEFORE_PLUGIN_DEFAULTS}
+[plugins._default]
+enabled = false
+`;
+
+test("an upgraded controller keeps an active Codex revision's earlier plugin-runtime ConfigMap", async () => {
+  for (const policy of ["on-request", "never", undefined]) {
+    const { driver, revision, namespace, objects, records, state, context } =
+      workspaceSetupFixture(false);
+    revision.configuration = structuredClone(revision.configuration);
+    revision.configuration.plugins = {
+      entries: { codex: { config: { appServer: { approvalPolicy: policy } } } },
+    };
+    state.ready = true;
+    assert.equal((await driver.prepareRevision(revision, context)).ready, true);
+    const runtimeKey = [...objects.keys()].find((key) =>
+      key.startsWith(`ConfigMap:${namespace}:plugin-runtime-`),
+    );
+    const current = structuredClone(objects.get(runtimeKey));
+    assert.equal(current.immutable, true);
+    assert.equal(
+      current.data["config.toml"].startsWith("approval_policy = "),
+      policy !== undefined,
+    );
+    const earlier = [CODEX_CONFIG_BEFORE_PLUGIN_DEFAULTS, CODEX_CONFIG_BEFORE_APPROVAL_POLICY];
+    // Kubernetes refuses edits to an immutable ConfigMap, so a revision prepared before
+    // the upgrade keeps the file its Pods mounted. Re-preparing the active revision must
+    // finish instead of refusing it until the Agent is deployed again.
+    for (const config of earlier) {
+      if (config === current.data["config.toml"]) {
+        continue;
+      }
+      objects.set(runtimeKey, {
+        ...structuredClone(current),
+        data: { ...current.data, "config.toml": config },
+      });
+      const writes = records.length;
+      assert.equal((await driver.prepareRevision(revision, context)).ready, true);
+      assert.equal(
+        records.slice(writes).some(({ kind }) => kind === "ConfigMap"),
+        false,
+        "an earlier rendering is kept, never rewritten",
+      );
+      assert.equal(objects.get(runtimeKey).data["config.toml"], config);
+    }
+    // Content no controller rendered for this revision is still refused.
+    for (const tamper of [
+      (configMap) => {
+        configMap.data["config.toml"] =
+          `approval_policy = "untrusted"\n\n${CODEX_CONFIG_BEFORE_APPROVAL_POLICY}`;
+      },
+      (configMap) => {
+        configMap.data["config.toml"] = CODEX_CONFIG_BEFORE_PLUGIN_DEFAULTS.replace(
+          "apps = false",
+          "apps = true",
+        );
+      },
+      (configMap) => {
+        configMap.data["config.toml"] = CODEX_CONFIG_BEFORE_APPROVAL_POLICY;
+        configMap.data["runtime.json"] = JSON.stringify({
+          kind: "codex",
+          selections: {},
+          extra: 1,
+        });
+      },
+      (configMap) => {
+        configMap.data["config.toml"] = CODEX_CONFIG_BEFORE_PLUGIN_DEFAULTS;
+        configMap.immutable = false;
+      },
+      (configMap) => {
+        configMap.data["config.toml"] = CODEX_CONFIG_BEFORE_PLUGIN_DEFAULTS;
+        configMap.data["extra.toml"] = "";
+      },
+    ]) {
+      const configMap = structuredClone(current);
+      tamper(configMap);
+      objects.set(runtimeKey, configMap);
+      const writes = records.length;
+      await assert.rejects(
+        driver.prepareRevision(revision, context),
+        /Refusing invalid immutable Kubernetes ConfigMap plugin-runtime-/,
+      );
+      assert.equal(
+        records.slice(writes).some(({ kind }) => kind === "ConfigMap"),
+        false,
+      );
+    }
+  }
+});
+
 test("dedicated Gateway references canonical CP channel Secrets and rejects a replaced source", async () => {
   const { driver, revision, namespace, objects, records } = workspaceSetupFixture(false);
   const target = kubernetesNamespaceName(tenant.id);
