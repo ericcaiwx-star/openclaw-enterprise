@@ -4325,9 +4325,10 @@ test("Kubernetes keeps a revision's gateway document rendered before the lan bin
     const current = structuredClone(objects.get(documentKey));
     const rendered = JSON.parse(current.data["openclaw.json"]);
     assert.equal(rendered.gateway.bind, "lan");
-    // Earlier controllers wrote an omitted or auto bind as submitted. Kubernetes refuses
-    // edits to an immutable ConfigMap, so re-preparing a revision prepared then (as
-    // maintenance and recovery do) must keep that document instead of failing.
+    // Earlier controllers wrote an omitted or auto bind as submitted; that rendering differed
+    // from the current one only in this key. Kubernetes refuses edits to an immutable
+    // ConfigMap, so re-preparing a revision prepared then (as maintenance and recovery do)
+    // must keep that document instead of failing.
     const earlier = structuredClone(rendered);
     if (bind === "auto") {
       earlier.gateway.bind = bind;
