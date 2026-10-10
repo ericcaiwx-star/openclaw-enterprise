@@ -1209,7 +1209,7 @@ test("each writer is compared with its own recorded images, and a rollback lets 
     /openclaw-enterprise-worker runs other images than apply recorded/,
   );
   assert.equal(worker().spec.replicas, 1);
-  // Rolled back to the images recorded at apply, the API and worker images still differ.
+  // After a rollback to the recorded images (API and worker still differ), apply continues.
   worker().spec.template.spec.containers[0].image = "worker@sha256:released";
   await applyAdoption(kubectl, { archive, namespaceIds: [other], ...fast });
   const journal = JSON.parse(

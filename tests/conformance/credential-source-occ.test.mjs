@@ -435,7 +435,7 @@ test("a refresh source is ready only after its first mint, and its material is n
     refresh: { state: "ready", lastRefreshAt: "2026-09-27T12:00:00.000000000Z" },
   });
   // The gateway registers the source first; refresh material goes only to the refresh role,
-  // which then mints the first token. Each step carries a UUID request ID for replay.
+  // which then mints the first token. Each step carries a name-based request ID for replay.
   const calls = context.gateway.calls.filter(({ sourceId }) => sourceId === source.id);
   assert.deepEqual(
     calls.map(({ operation }) => operation),
@@ -475,6 +475,7 @@ test("a refresh type needs a selected Credential Refresh Driver before any gatew
     [],
   );
   // A refresh Driver missing any operation is not a Credential Refresh Driver.
+  context.controller.registerDriver({ ...context.refresh, id: "credential-refresh-complete" });
   for (const operation of ["configureRefresh", "rotate", "refreshStatus", "removeRefresh"]) {
     assert.throws(
       () =>
@@ -891,7 +892,7 @@ test("a refresh update or rotation that fails after reaching the gateway records
     ),
     ResourceConflictError,
   );
-  // So does an update the gateway can no longer apply: it lost the source.
+  // An update refused at the gateway status check, before any write, records no failure either.
   const copy = context.gateway.stored.get(source.id);
   context.gateway.stored.delete(source.id);
   const calls = context.gateway.calls.length;
@@ -962,14 +963,12 @@ test("reading a refresh source reports its refresh status, and deletion removes 
   await context.controller.deleteCredentialSource(administrator, context.namespace.id, tool.id);
   await context.controller.deleteCredentialSource(administrator, context.namespace.id, source.id);
   assert.deepEqual(
-    context.gateway.calls.slice(before).map(({ operation }) => operation),
-    ["removeSource", "removeRefresh", "removeSource"],
-  );
-  assert.equal(
-    context.gateway.calls.some(
-      ({ operation, sourceId }) => operation === "refreshStatus" && sourceId === tool.id,
-    ),
-    false,
+    context.gateway.calls.slice(before).map(({ operation, sourceId }) => [operation, sourceId]),
+    [
+      ["removeSource", tool.id],
+      ["removeRefresh", source.id],
+      ["removeSource", source.id],
+    ],
   );
 });
 
@@ -2607,10 +2606,14 @@ test("a deletion that wins against a refresh registration also removes the refre
   await context.makeReady();
   const { controller, gateway, namespace } = context;
   const register = gateway.registerSource.bind(gateway);
+  let deletion;
   gateway.registerSource = async (call, input) => {
-    await controller
+    deletion = await controller
       .deleteCredentialSource(administrator, namespace.id, call.source.id)
-      .catch(() => {});
+      .then(
+        () => "deleted",
+        (error) => error,
+      );
     return register(call, input);
   };
   await assert.rejects(
@@ -2619,6 +2622,8 @@ test("a deletion that wins against a refresh registration also removes the refre
       error instanceof ResourceConflictError &&
       error.message === "The credential source changed during registration.",
   );
+  // The deletion found no copy yet and stays retryable inside the registration fence.
+  assert.ok(deletion instanceof DependencyUnavailableError, String(deletion));
   // The first mint configured refresh state after the deletion; cleanup removes it with the copy.
   assert.equal(context.refresh.configured.size, 0);
   assert.equal(gateway.stored.size, 0);
