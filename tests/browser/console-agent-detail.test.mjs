@@ -987,6 +987,10 @@ test("Agent detail saves plugin changes for the next revision without changing a
     if (upstream.hostname !== "chatgpt.com") {
       return originalFetch(input, options);
     }
+    if (upstream.pathname.endsWith("/plugins/search")) {
+      assert.equal(upstream.searchParams.get("q"), "calendar");
+      return Response.json({ plugins: [hostedCalendar], pagination: { next_page_token: null } });
+    }
     if (upstream.pathname.endsWith("/plugins/list")) {
       return Response.json({ plugins: [hostedCalendar], pagination: { next_page_token: null } });
     }
@@ -1099,6 +1103,11 @@ test("Agent detail saves plugin changes for the next revision without changing a
   await dialog.getByRole("searchbox", { name: "Search plugins" }).fill("calendar");
   assert.equal((await searched).status(), 200);
   await dialog.getByRole("button", { name: "Calendar", exact: true }).click();
+  // The saved override can render before the new detail response. Wait for a
+  // catalog-only tool before switching tabs, which cancels pending discovery.
+  await dialog
+    .locator('details.plugin-tool-row[data-tool="app_calendar/events%2Fcreate"]')
+    .waitFor();
   await dialog
     .locator('details.plugin-tool-row[data-tool="app_calendar/events%2Flist"] summary')
     .click();
