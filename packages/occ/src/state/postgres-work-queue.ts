@@ -392,6 +392,43 @@ const RECOVERING_ACTIVATIONS_SQL = `
         )
     ),`;
 
+// A deployment that waits to stop its refused candidate (REFUSED_CANDIDATE_STOP_PENDING) has no
+// deadline or attempt limit, since the candidate may still serve. A claim lost during that wait,
+// typically a controller restart while the stop blocks, refunds its attempt like the wait's own
+// deferrals, so restarts cannot end the work LEASE_EXPIRED with the candidate running and the
+// refusal unrecorded (finding 1010). The recovery evidence keeps the refusal, so later losses
+// still match. An active revision is excluded: its refused stop never runs.
+// Requires RECOVERING_ACTIVATIONS_SQL; the lookup matches audit_events_work_attempt_idx.
+const RECOVERING_REFUSED_STOPS_SQL = `
+    recovering_refused_stops AS MATERIALIZED (
+      SELECT work.idempotency_key, latest.refusal
+      FROM occ.controller_work AS work
+      JOIN candidates AS candidate ON candidate.idempotency_key = work.idempotency_key
+      CROSS JOIN LATERAL (
+        SELECT prior.details->>'reasonCode' AS reason_code, prior.details->>'refusal' AS refusal
+        FROM occ.audit_events AS prior
+        WHERE prior.kind = 'mutation' AND prior.action = 'reconcile'
+          AND prior.resource_kind = 'agent_revision'
+          AND prior.details->>'workId' = work.idempotency_key
+          AND prior.namespace_id = work.namespace_id
+          AND prior.actor_id = work.actor_id
+          AND prior.occurred_at >= work.created_at
+        ORDER BY prior.occurred_at DESC, prior.id DESC
+        LIMIT 1
+      ) AS latest
+      WHERE work.namespace_target IS NULL AND work.agent_target IS NULL
+        AND work.agent_id IS NOT NULL AND work.revision_id IS NOT NULL
+        AND work.idempotency_key = 'agent_revision:' || work.revision_id || ':reconcile'
+        AND latest.reason_code IN ('REFUSED_CANDIDATE_STOP_PENDING', 'LEASE_EXPIRED')
+        AND latest.refusal IS NOT NULL
+        AND work.idempotency_key NOT IN (SELECT idempotency_key FROM recovering_activations)
+        AND NOT EXISTS (
+          SELECT 1 FROM occ.agents AS agent
+          WHERE agent.namespace_id = work.namespace_id AND agent.id = work.agent_id
+            AND agent.active_revision_id = work.revision_id
+        )
+    ),`;
+
 export class WorkClaimLostError extends Error {
   constructor() {
     super("The controller work claim is missing, expired, or owned by another worker.");
@@ -1261,7 +1298,9 @@ export class PostgresWorkQueue {
     }
     const recovering =
       "work.idempotency_key IN (SELECT idempotency_key FROM recovering_activations)";
-    const exhaustedClaim = `(work.attempt_count >= $2::integer AND NOT ${repositoryCleanupSql("work")} AND NOT ${recovering})`;
+    const refusedStop =
+      "work.idempotency_key IN (SELECT idempotency_key FROM recovering_refused_stops)";
+    const exhaustedClaim = `(work.attempt_count >= $2::integer AND NOT ${repositoryCleanupSql("work")} AND NOT ${recovering} AND NOT ${refusedStop})`;
     const stale = await this.client.query(
       `WITH candidates AS (
          SELECT idempotency_key
@@ -1272,7 +1311,8 @@ export class PostgresWorkQueue {
          ORDER BY lease_expires_at, idempotency_key
          FOR UPDATE SKIP LOCKED
          LIMIT $1::integer
-       ), ${continuingMaintenanceSql("candidates")} ${RECOVERING_ACTIVATIONS_SQL} transitioned AS (
+       ), ${continuingMaintenanceSql("candidates")} ${RECOVERING_ACTIVATIONS_SQL}
+       ${RECOVERING_REFUSED_STOPS_SQL} transitioned AS (
          UPDATE occ.controller_work AS work
          SET state = CASE
                WHEN ${exhaustedClaim} THEN 'failed_permanent'
@@ -1280,6 +1320,7 @@ export class PostgresWorkQueue {
              END,
              attempt_count = CASE
                WHEN ${recovering} THEN GREATEST($2::integer - 1, 0)
+               WHEN ${refusedStop} THEN GREATEST(work.attempt_count - 1, 0)
                ELSE work.attempt_count
              END,
              available_at = CASE
@@ -1315,6 +1356,9 @@ export class PostgresWorkQueue {
          "",
          `CASE WHEN transitioned.idempotency_key IN (SELECT idempotency_key FROM recovering_activations)
             THEN '${ACTIVE_REVISION_RECOVERY}' ELSE $4::text END`,
+         `COALESCE((SELECT jsonb_build_object('refusal', stop.refusal)
+            FROM recovering_refused_stops AS stop
+            WHERE stop.idempotency_key = transitioned.idempotency_key), '{}'::jsonb)`,
        )}
        SELECT transitioned.* FROM transitioned`,
       [
