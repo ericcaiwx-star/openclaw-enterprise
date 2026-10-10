@@ -461,6 +461,7 @@ test("fixture preparation waits for a late worker and its containerd before impo
   const index = (predicate) => calls.findIndex(predicate);
   const lastIndex = (predicate) => calls.findLastIndex(predicate);
   const listings = calls.filter(({ args }) => args.slice(-4).join(" ") === "get nodes -o name");
+  // A refused listing, the server alone, then both nodes.
   assert.equal(listings.length, 3);
   // The Ready wait starts only once the worker is registered.
   assert.ok(
@@ -516,12 +517,14 @@ test("fixture preparation fails on a hung containerd probe without polling again
     /containerd on k3d-\S+-agent-0 did not answer within 3000 ms \(ctr -n k8s\.io version\)\./,
   );
   const calls = await commands.commands();
-  assert.equal(
+  const probes = (suffix) =>
     calls.filter(
-      ({ args }) => args[0] === "exec" && args[1].endsWith("-agent-0") && args.at(-1) === "version",
-    ).length,
-    1,
-  );
+      ({ args }) => args[0] === "exec" && args[1].endsWith(suffix) && args.at(-1) === "version",
+    ).length;
+  assert.equal(probes("-agent-0"), 1);
+  // The refusing server stops polling once the hang fails the wait, well before its own
+  // 60 s deadline (about 30 probes).
+  assert.ok(probes("-server-0") <= 10, `${probes("-server-0")} server probes`);
   assert.equal(
     calls.some(({ args }) => args[0] === "exec" && args[1] === "-i"),
     false,
@@ -530,17 +533,57 @@ test("fixture preparation fails on a hung containerd probe without polling again
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("fixture preparation imports once more after containerd refuses an import", async (t) => {
-  const commands = await fixtureImageCommands(t, "containerd-restart");
-  const result = commands.prepare();
-  assert.equal(result.status, 0, result.stderr);
-  assertStderrMatch(result.stderr, /containerd refused the image import; waiting for it/);
-  const imports = (await commands.commands()).filter(
-    ({ args }) => args[0] === "exec" && args[1] === "-i" && args[2].endsWith("-agent-0"),
-  );
-  assert.equal(imports.length, 2);
-  // A recovered import writes no failure diagnostics.
-  await assert.rejects(() => stat(`${commands.statePath}.diagnostics.json`), { code: "ENOENT" });
-  const cleanup = commands.cleanup();
-  assert.equal(cleanup.status, 0, cleanup.stderr);
-});
+// Only the node's own containerd socket (refused or missing) gets the one retry.
+for (const { scenario, retried, imported, error } of [
+  { scenario: "containerd-restart", retried: true, imported: true },
+  { scenario: "containerd-socket-missing", retried: true, imported: true },
+  {
+    scenario: "containerd-refuses-imports",
+    retried: true,
+    error: /containerd\.sock: connect: connection refused/,
+  },
+  {
+    scenario: "other-socket-refused",
+    retried: false,
+    error: /\/run\/other\.sock: connect: connection refused/,
+  },
+]) {
+  test(`fixture preparation retries an import once only for the node socket: ${scenario}`, async (t) => {
+    const commands = await fixtureImageCommands(t, scenario);
+    const result = commands.prepare();
+    assert.equal(result.status, imported ? 0 : 1, result.stderr);
+    assert.equal(
+      /containerd refused the image import; waiting for it/.test(result.stderr),
+      retried,
+    );
+    const calls = await commands.commands();
+    const agentImports = calls.flatMap(({ args }, index) =>
+      args[0] === "exec" && args[1] === "-i" && args[2].endsWith("-agent-0") ? [index] : [],
+    );
+    assert.equal(agentImports.length, retried ? 2 : 1);
+    if (retried) {
+      // The retry waits for the worker's containerd to answer again.
+      assert.ok(
+        calls
+          .slice(agentImports[0], agentImports[1])
+          .some(
+            ({ args }) =>
+              args[0] === "exec" && args[1].endsWith("-agent-0") && args.at(-1) === "version",
+          ),
+        "a containerd probe precedes the second import",
+      );
+    }
+    if (imported) {
+      // A recovered import writes no failure diagnostics.
+      await assert.rejects(() => stat(`${commands.statePath}.diagnostics.json`), {
+        code: "ENOENT",
+      });
+    } else {
+      assertStderrMatch(result.stderr, error);
+      const evidence = JSON.parse(await readFile(`${commands.statePath}.diagnostics.json`, "utf8"));
+      assert.match(evidence.failure, /image import into k3d nodes failed/);
+    }
+    const cleanup = commands.cleanup();
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  });
+}

@@ -288,7 +288,13 @@ revisionTest(
 // probe) keeps its Pods for diagnosis on its version's Logs tab. Either way the pointer still
 // names the stopped predecessor: OCC never rolls back, and recovery is a new revision.
 // "unsupported" is a refusal thrown by the pass itself rather than decided by its observation.
+// A candidate that missed the convergence deadline or exhausted its retries failed by itself too.
 const refusals = { revoked: "AUTHORIZATION_DENIED", unsupported: "SANDBOX_HARNESS_UNSUPPORTED" };
+const selfFailures = {
+  held: "RUNTIME_MODEL_PROBE_FAILED",
+  late: "CONVERGENCE_DEADLINE_EXCEEDED",
+  retried: "DEPENDENCY_UNAVAILABLE",
+};
 for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
   { failure: "revoked" },
   // A failed stop must not publish the refusal with the candidate still running: the work
@@ -299,8 +305,10 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
   // work then would leave the refused candidate serving with nothing left to stop it.
   { failure: "revoked", stopFailures: 3, convergenceTimeoutMs: 2_000, maxAttempts: 2 },
   { failure: "held" },
+  { failure: "late", convergenceTimeoutMs: 2_000 },
+  { failure: "retried", maxAttempts: 2 },
 ]) {
-  const refused = failure !== "held";
+  const refused = failure in refusals;
   test(
     `a ${failure} exclusive candidate ${refused ? "is stopped" : "stays for diagnosis"} when its deployment fails${stopFailures === 0 ? "" : ` after ${stopFailures} failed stops`}`,
     { ...requiresPostgres, timeout: 60_000 },
@@ -342,6 +350,9 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
           if (failure === "unsupported" && candidatePasses > 1) {
             throw new SandboxRevisionUnsupportedError("SANDBOX_HARNESS_UNSUPPORTED", "test");
           }
+          if (failure === "retried" && candidatePasses > 1) {
+            throw new Error("Kubernetes API temporarily unavailable");
+          }
         },
       });
       const events = [];
@@ -370,12 +381,12 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
       await fixture.work(replacement, "failed_permanent", 30_000);
       assert.equal(failedStops, stopFailures);
       if (convergenceTimeoutMs !== undefined) {
-        assert.ok(Date.now() - deployed > convergenceTimeoutMs, "the stop outlasted the deadline");
+        assert.ok(Date.now() - deployed > convergenceTimeoutMs, "the work outlasted the deadline");
       }
       const result = await fixture.workResult(replacement);
-      assert.equal(result.rows[0].reason_code, refusals[failure] ?? "RUNTIME_MODEL_PROBE_FAILED");
+      assert.equal(result.rows[0].reason_code, refusals[failure] ?? selfFailures[failure]);
       // A thrown pass forgets the sweep record, so the retry repeats the idempotent stop.
-      const predecessorStops = failure === "unsupported" ? 2 : 1;
+      const predecessorStops = ["unsupported", "retried"].includes(failure) ? 2 : 1;
       assert.equal(driver.count(first), predecessorStops, "replacement stopped the predecessor");
       if (refused) {
         assert.equal(driver.count(replacement), 1, "the refused candidate is stopped once");
@@ -396,6 +407,13 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
       }
       const active = await fixture.activePointer(owner);
       assert.equal(active.rows[0].active_revision_id, first.id);
+      if (failure === "unsupported") {
+        // The refused stop counts as a sweep: the next deployment does not repeat it within the
+        // lease (30 s here). Only this refusal leaves the Agent deployable; revoked keeps its deny.
+        const recovery = await fixture.revision(owner, 3);
+        await fixture.work(recovery, "succeeded");
+        assert.equal(driver.count(replacement), 1, "the next sweep skips the stopped candidate");
+      }
     },
   );
 }
@@ -474,11 +492,17 @@ revisionTest(
   "a refused candidate whose stop keeps failing shows the refusal in deployment status",
   async (fixture) => {
     const events = [];
+    const failedStops = [];
     let stopping = false;
     const { owner, replacement, driver } = await startRefusedCandidate(fixture, "refused-status", {
       emit: (event) => events.push(event),
-      stopRevision: () =>
-        stopping ? undefined : Promise.reject(new Error("Kubernetes API temporarily unavailable")),
+      stopRevision: () => {
+        if (stopping) {
+          return undefined;
+        }
+        failedStops.push(Date.now());
+        return Promise.reject(new Error("Kubernetes API temporarily unavailable"));
+      },
     });
     await waitFor("the refused stop to fail", async () =>
       refusedStopWaits(events, replacement).length > 0 ? true : undefined,
@@ -501,6 +525,17 @@ revisionTest(
     assert.ok(
       Date.parse(later.progress.lastAttempt.at) > Date.parse(waiting.progress.lastAttempt.at),
       "the last attempt time moves while the stop is retried",
+    );
+    // A fast failing stop waits on the readiness cadence (0.5 s here), doubled per failure.
+    await waitFor(
+      "four failed refused stops",
+      async () => (failedStops.length >= 4 ? true : undefined),
+      20_000,
+    );
+    const gaps = failedStops.slice(1, 4).map((at, index) => at - failedStops[index]);
+    assert.ok(
+      gaps[1] >= 950 && gaps[2] >= 1_950,
+      `failed stops started ${gaps.join(", ")} ms apart`,
     );
     stopping = true;
     await fixture.work(replacement, "failed_permanent", 30_000);
@@ -626,6 +661,37 @@ test(
     // Its sweep retried on the queue's growing backoff while the stop failed.
     await fixture.work(newer, "succeeded", 75_000);
   },
+);
+
+// A superseded pass skips the refused stop when this process stopped the candidate within the
+// last lease, here the newer revision's sweep.
+revisionTest(
+  "a superseded refused candidate that the newer sweep stopped is not stopped again",
+  async (fixture) => {
+    const events = [];
+    let stopping = false;
+    const { owner, replacement, driver } = await startRefusedCandidate(fixture, "refused-swept", {
+      refuse: "unsupported",
+      emit: (event) => events.push(event),
+      stopRevision: () =>
+        stopping ? undefined : Promise.reject(new Error("Kubernetes API temporarily unavailable")),
+    });
+    // After three failed stops the candidate's next pass is at least 2 s away, so the newer
+    // revision's first pass usually sweeps it first. Stops succeed only once the newer revision
+    // exists: an earlier candidate pass would publish its refusal instead of superseding.
+    await waitFor("three failed refused stops", async () =>
+      refusedStopWaits(events, replacement).length >= 3 ? true : undefined,
+    );
+    const newer = await fixture.revision(owner, 3);
+    stopping = true;
+    await fixture.work(newer, "succeeded");
+    assert.equal(driver.count(replacement), 1, "the newer sweep stopped the candidate");
+    await fixture.work(replacement, "succeeded", 30_000);
+    const result = await fixture.workResult(replacement);
+    assert.equal(result.rows[0].reason_code, "REVISION_SUPERSEDED");
+    assert.equal(driver.count(replacement), 1, "the superseded pass did not repeat the stop");
+  },
+  { timeout: 60_000 },
 );
 
 test(
