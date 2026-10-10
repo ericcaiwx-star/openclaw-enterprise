@@ -723,6 +723,19 @@ test("production native examples satisfy the current Helm, Installation, and PVC
     }),
     /drivers\.compute\.configuration does not match its Driver configuration schema at \/resources\/gateway\/limits\/cpu: must be string/,
   );
+  // Trusted Installation startup must reject a validly spelled request that
+  // Kubernetes refuses against its smaller limit, before any cluster operation.
+  const impossible = loadYaml(example.replace("<actual-proxy-source-cidr>", "192.0.2.10/32"));
+  impossible.drivers.compute.configuration.resources.gateway.requests.cpu = "5";
+  const impossiblePath = join(directory, "request-over-limit.yaml");
+  await writeFile(impossiblePath, JSON.stringify(impossible));
+  await assert.rejects(
+    loadInstallationConfiguration({
+      mode: "production",
+      environment: { OCC_CONFIG_PATH: impossiblePath },
+    }),
+    /Gateway CPU request \(resources\.gateway\.requests\.cpu\) cannot exceed its limit/,
+  );
   const values = loadYaml(await readFile(new URL("values.yaml", productionExamples), "utf8"));
   assert.equal(values.gatewayRouting.enabled, true);
   assert.equal(compute.gatewayRouting.gatewayName, "oce-agent-gateways");
