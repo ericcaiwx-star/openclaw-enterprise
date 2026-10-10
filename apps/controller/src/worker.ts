@@ -4388,8 +4388,9 @@ export class ControllerWorker {
       if (agent.activeRevisionId !== undefined) {
         return;
       }
-      // Only a candidate Compute prepared can have a runtime. A refusal decided before this
-      // work's first preparation (no earlier pass recorded evidence) leaves Compute untouched.
+      // Only a candidate Compute prepared can have a runtime: this pass prepared it, or an
+      // earlier pass that recorded evidence may have (stopping an unprepared one is idempotent).
+      // A refusal decided before the work's first preparation leaves Compute untouched.
       if (
         this.preparedThisPass !== revision.id &&
         (await this.queue.findWorkAttempt(claim.idempotencyKey)) === undefined
