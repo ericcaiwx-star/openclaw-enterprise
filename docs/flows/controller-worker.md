@@ -300,10 +300,10 @@ terminates work. See [outcomes](../reference/controller.md) and
 Before publishing a permanent refusal of an inactive candidate that is exclusive,
 or prepared while its Agent has no active revision (not a held runtime failure,
 the deadline or exhausted retries), `ControllerWorker.stopRefusedCandidate`
-stops it under the claim heartbeat, so a rejected deployment never serves. Its Pod-termination wait
-ends once other work is due (`withYieldingComputeStop`). A failed or ended stop publishes nothing: the work defers as
+stops it under the claim heartbeat, so a rejected deployment never serves. Its Pod waits
+yield to due work (`withYieldingComputeStop`); retries finish the deletions. A failed or ended stop publishes nothing: the work defers as
 `REFUSED_CANDIDATE_STOP_PENDING` past the attempt budget, deadline, in-lease shutdowns and,
-once recorded, lost claims until the stop succeeds, after the readiness cadence doubled per failure (counted from evidence) up to 5 minutes
+once recorded, lost claims until the stop succeeds, after the readiness cadence, doubled per deferral counted from evidence, up to 5 minutes
 but at least four times the stop's duration. Each deferral records evidence with the refusal
 (`repeatEvidence`) for deployment status and `worker.completed`'s `refusal`. A pass
 superseded by a newer exclusive revision first retries a stop its work waited on.

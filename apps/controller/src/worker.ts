@@ -4393,8 +4393,8 @@ export class ControllerWorker {
         });
       }
       await this.closeRevisionCredentials(claim, revision);
-      // Its Pod-termination wait ends when other Work is waiting; the stop then waits like a
-      // failed one, for as long as it ran (finding 1022).
+      // Its Pod-termination waits end when other Work is waiting; the stop then waits like a
+      // failed one, for as long as it ran, and the next pass repeats it (finding 1022).
       await this.withClaimHeartbeat(claim, () =>
         withYieldingComputeStop(() => compute.stopRevision(revision)),
       );
@@ -4415,7 +4415,15 @@ export class ControllerWorker {
           cause: error,
         });
         stopping.name = "WorkerStopping";
-        throw new RefusedCandidateStopError(refusal, Date.now() - started, stopping);
+        // Capped so a rollout during a long Gateway drain rechecks within the backoff's maximum.
+        throw new RefusedCandidateStopError(
+          refusal,
+          Math.min(
+            Date.now() - started,
+            REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS / REFUSED_CANDIDATE_STOP_DURATION_FACTOR,
+          ),
+          stopping,
+        );
       }
       throw new RefusedCandidateStopError(refusal, Date.now() - started, error);
     }

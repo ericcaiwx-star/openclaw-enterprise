@@ -800,16 +800,15 @@ revisionTest(
     const stopped = fixture.stop();
     release();
     await stopped;
-    const interruptedAt = Date.now();
     await fixture.start(compute);
     await waitFor(
       "the stop after the restart",
       async () => (stopCalls.length >= 2 ? true : undefined),
       30_000,
     );
-    // The stop ran at least 1.5 s, so its recheck is at least 6 s; without it, 0.5 s.
-    const gap = stopCalls[1] - interruptedAt;
-    assert.ok(gap >= 4_000, `the interrupted stop was repeated ${gap} ms after the shutdown`);
+    // The stop ran at least 1.5 s, so its recheck is at least 6 s more; without it, 0.5 s.
+    const gap = stopCalls[1] - stopCalls[0];
+    assert.ok(gap >= 7_000, `the interrupted stop was repeated ${gap} ms after it started`);
     stopping = true;
     await fixture.work(replacement, "failed_permanent", 30_000);
     assert.deepEqual([...driver.running], [], "the refused candidate was stopped");
@@ -824,13 +823,21 @@ revisionTest(
   "a refused candidate's stop may yield to another Agent's due work",
   async (fixture) => {
     const events = [];
+    // The order of the candidate's stops and the other Agent's passes.
+    const order = [];
     let other;
     let yielded = false;
     let stopping = false;
     const { replacement, driver } = await startRefusedCandidate(fixture, "refused-yield", {
-      emit: (event) => events.push(event),
-      stopRevision: () =>
-        stopping
+      emit: (event) => {
+        events.push(event);
+        if (event.event === "worker.completed" && event.workId === other?.idempotencyKey) {
+          order.push("other");
+        }
+      },
+      stopRevision: () => {
+        order.push("stop");
+        return stopping
           ? undefined
           : (async () => {
               const owner = await fixture.agent("refused-yield-other", {
@@ -842,7 +849,8 @@ revisionTest(
               );
               stopping = true;
               throw new Error("The workload Pods are still terminating; other work is waiting.");
-            })(),
+            })();
+      },
     });
     await fixture.work(replacement, "failed_permanent", 30_000);
     assert.equal(yielded, true);
@@ -855,6 +863,12 @@ revisionTest(
       [],
     );
     await fixture.work(other, "succeeded", 30_000);
+    // The other Agent's first pass ran before the candidate's stop was repeated.
+    const repeated = order.indexOf("stop", 1);
+    assert.ok(
+      repeated > 0 && order.indexOf("other") > 0 && order.indexOf("other") < repeated,
+      order.join(", "),
+    );
   },
   { timeout: 90_000 },
 );
