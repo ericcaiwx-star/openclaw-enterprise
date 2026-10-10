@@ -658,6 +658,21 @@ test("preflight refuses GatewayClass names that Kubernetes refuses", () => {
   }
 });
 
+test("preflight refuses gateway API key Secret names that Kubernetes refuses", () => {
+  for (const gatewayApiKeySecretName of ["Bad_Name", "-gateway-key", "g".repeat(254)]) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({
+        controlPlane: {
+          ...baseInput().controlPlane,
+          gatewayApiKeySecretName,
+        },
+      }),
+      /controlPlane\.gatewayApiKeySecretName must be a Kubernetes resource name/,
+    );
+  }
+});
+
 test("label values that YAML 1.1 would retype stay strings", () => {
   const labels = {
     spot: "no",
