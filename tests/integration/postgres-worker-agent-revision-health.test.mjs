@@ -181,7 +181,9 @@ revisionTest(
     await fixture.work(maintenance, "succeeded");
     assert.equal(prepared.filter((id) => id === first.id).length, firstPreparations);
     await fixture.work(replacement, "failed_permanent");
-    assert.deepEqual([...running], [replacement.id]);
+    // The failed candidate never became active, so it must not keep running in place of the
+    // stopped predecessor (finding 990).
+    assert.deepEqual([...running], []);
     const recovery = await fixture.revision(owner, 3);
     await fixture.work(recovery, "succeeded");
     assert.deepEqual([...running], [recovery.id]);
@@ -191,7 +193,7 @@ revisionTest(
   { timeout: 30_000 },
 );
 
-function countingExclusiveCompute(fixture, { ready, onPrepare } = {}) {
+function countingExclusiveCompute(fixture, { ready, onPrepare, runtimeFailure } = {}) {
   const running = new Set();
   const prepared = [];
   const stops = new Map();
@@ -205,9 +207,11 @@ function countingExclusiveCompute(fixture, { ready, onPrepare } = {}) {
       await onPrepare?.(revision, overlap);
       // The candidate cannot become ready while any predecessor still runs.
       const exclusive = [...running].every((id) => id === revision.id);
+      const failure = runtimeFailure?.(revision);
       return {
         ...(await fixture.compute.prepareRevision(revision)),
-        ready: exclusive && (ready?.(revision) ?? true),
+        ready: exclusive && failure === undefined && (ready?.(revision) ?? true),
+        ...(failure === undefined ? {} : { runtimeFailure: failure }),
       };
     },
     async stopRevision(revision) {
@@ -272,6 +276,74 @@ revisionTest(
   },
   { timeout: 60_000 },
 );
+
+// Finding 990: exclusive replacement stops the active revision before its candidate's first
+// pass. On Kubernetes the candidate then took over the Agent's Gateway, so when a later pass
+// failed it (its actor lost `deploy`, or the runtime held a failed model probe) its Pods kept
+// answering chat with a deployment OCC had rejected, while the recorded active revision had
+// no workload. A failed candidate is stopped before its failure is published; the pointer
+// still names the predecessor, which stays stopped until a new revision activates.
+for (const failure of ["revoked", "held"]) {
+  revisionTest(
+    `a ${failure} exclusive candidate is stopped instead of serving without being active`,
+    async (fixture) => {
+      const owner = await fixture.agent(`exclusive-failed-${failure}`, {
+        executionMode: "dedicated",
+      });
+      let candidateId;
+      let candidatePasses = 0;
+      const driver = countingExclusiveCompute(fixture, {
+        // The candidate's first pass starts its runtime but is not ready yet.
+        ready: (revision) => revision.id !== candidateId,
+        runtimeFailure: (revision) =>
+          failure === "held" && revision.id === candidateId && candidatePasses > 1
+            ? {
+                component: "agent",
+                check: "model-probe",
+                checkedAt: "2026-10-10T02:24:00.000Z",
+                code: "MODEL_PROBE_FAILED",
+                cause: { kind: "PROBE_STATUS", detail: "format" },
+              }
+            : undefined,
+        async onPrepare(revision) {
+          if (revision.id !== candidateId) {
+            return;
+          }
+          candidatePasses += 1;
+          if (failure === "revoked" && candidatePasses === 1) {
+            // Revoke deploy authority after the runtime started, as removing the actor's grants
+            // did on oce-dogfood-b; the worker's recheck on the next pass denies it.
+            await fixture.observerPool.query(
+              `INSERT INTO occ.iam_restrictions
+                 (id, namespace_id, action, resource_kind, resource_id, effect)
+               VALUES ($1, $2, 'deploy', 'agent', $3, 'deny')`,
+              [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
+            );
+          }
+        },
+      });
+      await fixture.start(driver.compute);
+      const first = await fixture.revision(owner, 1);
+      await fixture.work(first, "succeeded");
+      const replacement = await fixture.revision(owner, 2);
+      candidateId = replacement.id;
+      await fixture.work(replacement, "failed_permanent", 30_000);
+      const result = await fixture.workResult(replacement);
+      assert.equal(
+        result.rows[0].reason_code,
+        failure === "revoked" ? "AUTHORIZATION_DENIED" : "RUNTIME_MODEL_PROBE_FAILED",
+      );
+      assert.equal(driver.count(first), 1, "replacement stopped the predecessor");
+      assert.equal(driver.count(replacement), 1, "the failed candidate is stopped once");
+      assert.deepEqual([...driver.running], [], "nothing serves the Agent");
+      // The pointer still names the stopped predecessor: OCC never rolls back, and recovery
+      // is a new revision (covered by the exclusive replacement test above).
+      const active = await fixture.activePointer(owner);
+      assert.equal(active.rows[0].active_revision_id, first.id);
+    },
+    { timeout: 60_000 },
+  );
+}
 
 test(
   "a predecessor that comes back after the sweep is stopped again",

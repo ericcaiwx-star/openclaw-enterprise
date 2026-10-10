@@ -4060,6 +4060,12 @@ export class ControllerWorker {
     ) {
       return;
     }
+    if (
+      resolved.outcome === "permanent" ||
+      (resolved.outcome === "retry" && claim.attemptCount >= this.maxAttempts)
+    ) {
+      await this.stopFailedExclusiveCandidate(claim);
+    }
     let activated: Readonly<AgentRevision> | undefined;
     let stoppedCandidate: Readonly<AgentRevision> | undefined;
     let committedOutcome: WorkOutcome =
@@ -4209,6 +4215,58 @@ export class ControllerWorker {
       ...failureLogFields,
       ...this.deployTimingFields(claim),
     });
+  }
+
+  /**
+   * Exclusive replacement stopped every predecessor before this candidate's first pass, so a
+   * candidate that ends without becoming active would otherwise be the only runtime left: it
+   * keeps serving its rejected configuration (for example after its actor lost `deploy`) while
+   * the recorded active revision has no workload (finding 990). Stop it under the live claim
+   * before the failure is published, so the Agent is plainly unavailable until a new revision
+   * activates. A failed active revision is left alone: its workload is the only one recorded.
+   */
+  private async stopFailedExclusiveCandidate(claim: ClaimedWork): Promise<void> {
+    const compute = this.compute;
+    if (
+      claim.agentId === undefined ||
+      claim.revisionId === undefined ||
+      claim.namespaceTarget !== undefined ||
+      claim.agentTarget !== undefined ||
+      compute.requiresStoppedPredecessors === undefined
+    ) {
+      return;
+    }
+    const { namespace, agent, revision } = await this.state.read(async (view) => ({
+      namespace: await view.namespaces.findNamespace(claim.namespaceId),
+      agent: await view.agents.findAgent(claim.namespaceId, claim.agentId!),
+      revision: await view.revisions.findRevision(
+        claim.namespaceId,
+        claim.agentId!,
+        claim.revisionId!,
+      ),
+    }));
+    if (
+      namespace === undefined ||
+      agent === undefined ||
+      revision === undefined ||
+      namespace.status !== "ready" ||
+      revision.namespaceId !== namespace.id ||
+      revision.agentId !== agent.id ||
+      revision.servicePrincipalId !== agent.servicePrincipalId ||
+      revision.compute.id !== compute.id ||
+      revision.compute.implementation !== compute.implementation ||
+      agent.activeRevisionId === revision.id ||
+      compute.requiresStoppedPredecessors(revision) !== true
+    ) {
+      return;
+    }
+    if (compute.bindAgent !== undefined) {
+      await this.withClaimHeartbeat(claim, async () => {
+        await compute.bindAgent!({ namespace, agent });
+      });
+    }
+    await this.closeRevisionCredentials(claim, revision);
+    await this.withClaimHeartbeat(claim, () => compute.stopRevision(revision));
   }
 
   private async completeStoppedRevisionWork(
