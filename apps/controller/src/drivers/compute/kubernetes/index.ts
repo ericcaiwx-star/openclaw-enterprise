@@ -10232,6 +10232,27 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       throw new GatewaySettingFailure("gateway", "must be an object");
     }
     const gateway = (gatewayRecord ?? {}) as Record<string, OpenClawConfigurationValue>;
+    // Services and private routes target the Pod IP. A loopback-only native
+    // listener can pass the wrapper's local readiness gate without serving them.
+    if (gateway.bind === "loopback" || gateway.bind === "tailnet") {
+      throw new GatewaySettingFailure(
+        "gateway.bind",
+        "must listen on the Pod-facing interface: use auto, lan, or omit the setting",
+      );
+    }
+    const customBindHost =
+      typeof gateway.customBindHost === "string" ? gateway.customBindHost.trim() : undefined;
+    if (
+      gateway.bind === "custom" &&
+      customBindHost !== undefined &&
+      isIP(customBindHost) === 4 &&
+      customBindHost.startsWith("127.")
+    ) {
+      throw new GatewaySettingFailure(
+        "gateway.customBindHost",
+        "must not be a loopback address: Kubernetes gateway traffic targets the Pod IP",
+      );
+    }
     const authRecord = asRecord(gateway.auth);
     if (gateway.auth !== undefined && authRecord === undefined) {
       throw new GatewaySettingFailure("gateway.auth", "must be an object");
