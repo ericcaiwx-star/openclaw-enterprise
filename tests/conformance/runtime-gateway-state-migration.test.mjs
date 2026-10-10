@@ -252,14 +252,20 @@ test("Kubernetes and Docker Gateway programs share the migration step and stay d
   // Kubernetes holds the Pod unready with its status published instead of restarting.
   assert.ok(
     GATEWAY_RUNTIME_ENTRYPOINT.includes(
-      "!(await migrateGatewayState(outdatedDatabases))) {\n  setInterval(() => {}, 3600000);\n  return;\n}",
+      "if (outdatedDatabases.length > 0 && !(await migrateGatewayState(outdatedDatabases))) {\n" +
+        "  setInterval(() => {}, 3600000);\n  return;\n}",
     ),
   );
 });
 
 // Runs the whole Docker development Gateway program with its file writes and
-// child processes replaced; agent databases are read from `directory`.
-async function runDockerGateway(directory, doctor = () => assert.fail("Doctor must not run")) {
+// child processes replaced; agent databases are read from `directory`. `sqlite`
+// replaces the node:sqlite module each time the program loads it.
+async function runDockerGateway(
+  directory,
+  doctor = () => assert.fail("Doctor must not run"),
+  { sqlite = () => nodeRequire("node:sqlite") } = {},
+) {
   const spawned = [];
   const events = [];
   const errors = [];
@@ -310,7 +316,7 @@ async function runDockerGateway(directory, doctor = () => assert.fail("Doctor mu
           },
         };
       }
-      return nodeRequire(specifier);
+      return specifier === "node:sqlite" ? sqlite() : nodeRequire(specifier);
     },
   };
   vm.runInNewContext(DOCKER_GATEWAY_RUNTIME_ENTRYPOINT, context);
@@ -374,4 +380,25 @@ test("Docker development Gateway exits without starting OpenClaw when Doctor lea
   assert.match(message, /^Gateway state migration failed: openclaw doctor --fix \(exit-0\) left /);
   assert.match(message, /OpenClaw was not started\. .* then deploy the Agent again\.$/);
   assert.equal(readVersion(databasePath(directory, "main")), CURRENT - 1);
+});
+
+test("Docker development Gateway exits without starting OpenClaw on an unexpected migration error", async (t) => {
+  const directory = await stateDirectory(t, { main: CURRENT - 1 });
+  let loads = 0;
+  const outcome = await runDockerGateway(directory, (child) => child.emit("exit", 0, null), {
+    // The re-read after Doctor fails outside the per-database check.
+    sqlite: () => {
+      loads += 1;
+      if (loads > 1) {
+        throw new Error("node:sqlite is unavailable");
+      }
+      return nodeRequire("node:sqlite");
+    },
+  });
+  assert.deepEqual(
+    outcome.spawned.map(({ args }) => args[1]),
+    ["doctor"],
+  );
+  assert.deepEqual(outcome.exits, [1]);
+  assert.equal(outcome.errors.at(-1), "Gateway state migration failed: node:sqlite is unavailable");
 });
