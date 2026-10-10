@@ -178,8 +178,8 @@ fixture with `QA_ISOLATED_REPOSITORY_OBSERVER_TOKEN`,
 `QA_ISOLATED_REPOSITORY_APP_KEY`, plus the repository variable
 `QA_ISOLATED_REPOSITORY_FULL_NAME`. That variable must name the one approved
 isolated fixture repository as lowercase `owner/repository`. The isolated path
-validates the registry before materializing credential files: the registry must
-contain exactly one repository, that repository must match
+checks the registry's repository target before materializing credential files:
+the registry must contain exactly one repository, that repository must match
 `QA_ISOLATED_REPOSITORY_FULL_NAME`, and it must not be the workflow repository.
 The isolated path still shares the approved model, Codex, Slack, Calendar, and
 upstream CIDR settings from `integration-qa`. If any isolated repository secret
