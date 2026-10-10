@@ -119,7 +119,10 @@ import {
   workspaceSetupVerifier,
 } from "../workspace-setup-runtime.ts";
 import { ComputeLifecycleDispatcher } from "../lifecycle-hooks.ts";
-import { validatePlaintextNativeGateway } from "../native-gateway-transport.ts";
+import {
+  validatePlaintextNativeGateway,
+  validateRoutableNativeListener,
+} from "../native-gateway-transport.ts";
 import { validateCodexApprovalPolicySetting } from "../../../gateway/codex-approval-policy.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import { discoverHarnessModels } from "../model-discovery.ts";
@@ -10232,27 +10235,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       throw new GatewaySettingFailure("gateway", "must be an object");
     }
     const gateway = (gatewayRecord ?? {}) as Record<string, OpenClawConfigurationValue>;
-    // Services and private routes target the Pod IP. A loopback-only native
-    // listener can pass the wrapper's local readiness gate without serving them.
-    if (gateway.bind === "loopback" || gateway.bind === "tailnet") {
-      throw new GatewaySettingFailure(
-        "gateway.bind",
-        "must listen on the Pod-facing interface: use auto, lan, or omit the setting",
-      );
-    }
-    const customBindHost =
-      typeof gateway.customBindHost === "string" ? gateway.customBindHost.trim() : undefined;
-    if (
-      gateway.bind === "custom" &&
-      customBindHost !== undefined &&
-      isIP(customBindHost) === 4 &&
-      customBindHost.startsWith("127.")
-    ) {
-      throw new GatewaySettingFailure(
-        "gateway.customBindHost",
-        "must not be a loopback address: Kubernetes gateway traffic targets the Pod IP",
-      );
-    }
+    validateRoutableNativeListener(
+      configuration,
+      (setting, requirement) => new GatewaySettingFailure(setting, requirement),
+    );
     const authRecord = asRecord(gateway.auth);
     if (gateway.auth !== undefined && authRecord === undefined) {
       throw new GatewaySettingFailure("gateway.auth", "must be an object");
@@ -10362,6 +10348,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       ...configuration,
       gateway: {
         ...gateway,
+        // Omitted and auto resolve to loopback unless OpenClaw detects a container,
+        // and containerd on cgroup v2 leaves no marker it recognizes (finding 996).
+        bind: gateway.bind === "custom" ? "custom" : "lan",
         trustedProxies: [...this.options.network.gatewayTrustedProxyCidrs],
         allowRealIpFallback: true,
         auth: {

@@ -16,8 +16,7 @@ routing, also configure the namespace and Pod selectors in
 
 `podLabels` use [Kubernetes label syntax](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set), checked before provisioning.
 Values may be empty; key names and values allow 63 characters, DNS prefixes 253. This covers
-DNS, gateway clients, repository credentials, Provider Harness, and managed channel
-proxy peers.
+every peer selector setting.
 
 Each tenant starts with default-deny ingress and egress. Explicit policies allow
 DNS (UDP/TCP ports `53` and `5353` through `allow-dns`), approved gateway clients,
@@ -57,8 +56,8 @@ access to the native gateway port for this mode.
 
 ### Gateway authentication
 
-Kubernetes Compute supports only trusted-proxy authentication for embedded and
-dedicated Agents, with or without private routing. It renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
+Kubernetes Compute supports only trusted-proxy authentication, for every Agent
+and routing mode. It renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
 `gateway.auth.mode: trusted-proxy`, `userHeader: x-occ-identity`, the allowed
 identity `occ-workspace-files` with `operator.admin`, and
 `gateway.allowRealIpFallback: true`. Configuration and Console starters
@@ -72,13 +71,13 @@ worker's `worker.compute-prepare-failed` line. `trustedProxy.allowLoopback` must
 loopback access uses the separate password, not proxy identity headers. Native
 required-header and device auto-approval settings retain their separate purposes.
 
-`gateway.bind` must serve Pod-IP traffic. Deployment/provisioning refuse
-`loopback`, `tailnet`, and `custom` with loopback IPv4 `gateway.customBindHost`;
-omitted/auto/lan/nonloopback custom retain native semantics. SSH's local
-listener is separate.
+Compute renders `gateway.bind: lan` when it is omitted or `auto`, as native
+container detection misses containerd on cgroup v2. Deployment/provisioning
+refuse any other bind, `custom` unless `customBindHost` is `0.0.0.0`, and any
+`gateway.tailscale.mode` but `off`.
 
 An optional [loopback password](storage-and-credentials.md#runtime-credentials)
-supports operator verification without changing authentication mode.
+supports operator verification.
 Kubernetes private status-port `GET /readyz` returns empty `200`/`503`, retaining
 readiness gates; Gateway probes HTTP. `gateway.tls.enabled: true` is refused
 before revision creation; omit/false is valid. Envoy terminates TLS. Docker/SSH

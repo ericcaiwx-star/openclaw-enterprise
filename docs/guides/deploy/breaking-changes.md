@@ -10,6 +10,19 @@ you run now, then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-10: Gateway listener settings are checked before deployment
+
+**What breaks.** Provisioning and deployment answer `409` for a `gateway.bind`
+other than `auto`, `lan` or `custom`, `custom` unless `customBindHost` is
+`0.0.0.0`, or a `gateway.tailscale.mode` other than `off`. Native startup
+refused these or listened only on loopback.
+
+**Who is affected.** Such Configurations on Kubernetes or Docker Compute.
+
+**How to tell.** The `409` names the setting.
+
+**Steps.** Use `lan` or omit `gateway.bind`, then deploy again.
+
 ## 2026-10-10: Agent saves check the automatic plugin reviewer
 
 **What breaks.** Creating or updating an Agent answers `400` when an enabled
@@ -75,12 +88,11 @@ policy omitted keeps its current session policy until it is deployed again.
 **What breaks.** Since #2016, `PATCH` on an `oauth2-refresh-token` credential
 source answers `409` when it keeps the recorded `refresh_token` Secret. That
 includes `{}` and `occ credential-source update ID` without `--file`, which the
-docs used to suggest after a failed update. The issuer may have replaced the
-token, so the recorded one can be stale, and re-sending it could make the
-issuer revoke the sign-in.
+docs used to suggest after a failed update. The issuer may have rotated the
+token, and re-sending a stale one can revoke the sign-in.
 
-**Who is affected.** Operators and scripts that update such a source in place,
-by changing its Secret's value and then re-sending it. Other source types,
+**Who is affected.** Operators and scripts that change such a source's Secret
+value in place and re-send it. Other source types,
 including `oauth2-client-credentials`, still accept `{}`.
 
 **How to tell.** The `409` says the gateway may already hold a newer
@@ -100,7 +112,6 @@ state in an OpenClaw agent database at schema 23. Runtimes since #587
 Gateway exits and restarts into the same refusal. Since #1986 the Gateway runs
 that migration itself before OpenClaw starts; see
 [Gateway storage](../../reference/drivers/kubernetes-compute/storage-and-credentials.md#gateway-storage).
-The Docker development gateway does the same since #2009.
 
 **Who is affected.** Installations upgraded from the 2026-09-28 release whose
 Agents are deployed again by a controller before #1986 (#2009 for the Docker
@@ -155,8 +166,8 @@ and deploy the Agent again. _untested_
 topology, such as an `agents.list`, an entry's `default`, or more than one
 `agents.entries` entry without `agents.ownership: "explicit"`. The
 [Configuration reference](../../reference/configuration.md#create-read-update-and-delete)
-lists every rule. The message is the one deployment gives, naming the setting and
-the rule. Such a write used to save and fail only at deploy.
+lists every rule. Such a write used to save and fail only at deploy, with the
+same message.
 
 **Who is affected.** Clients and scripts that save such a roster, including the
 split-layout `import` below, which re-creates each exported Configuration.
@@ -166,9 +177,8 @@ SSH Compute deployment does not check rosters, so there the save is the first
 refusal. Rules that depend on the topology, such as dedicated OpenClaw serving
 the `main` Agent, still apply only at deployment.
 
-**How to tell.** On Kubernetes Compute, deploying an Agent that uses such a
-Configuration already fails with a `400` naming an `agents` setting. A save now
-fails with the same message.
+**How to tell.** A save, like a Kubernetes deployment, fails with a `400`
+naming an `agents` setting.
 
 **Steps.** Fix the roster as the message says and save again. For a split-layout
 bundle, fix that Configuration's `values` in the bundle file and run `import`
@@ -219,7 +229,7 @@ dependencies, rebuild the image and upgrade.
 63 characters.` (or the same message for a gateway client, the repository
 credential gateway, the provider Harness gateway or the managed channel proxy)
 when that peer's namespace is not a DNS label (lowercase letters, digits and
-inner hyphens, at most 63 characters). The observability demo chart refuses such
+inner hyphens). The observability demo chart refuses such
 an `occ.namespace`, `dns.namespace` or `grafana.clients[N].namespace`.
 
 **Who is affected.** Only a hand-written `installation.yaml` or demo chart
