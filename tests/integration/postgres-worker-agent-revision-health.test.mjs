@@ -4,7 +4,10 @@ import { createControlledClock } from "../fixtures/repository-credentials/clock.
 import test, { after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { SandboxRevisionUnsupportedError } from "../../packages/occ/src/index.ts";
-import { computeStopShouldYield } from "../../apps/controller/src/drivers/compute/operation-context.ts";
+import {
+  ComputeStopYieldedError,
+  computeStopShouldYield,
+} from "../../apps/controller/src/drivers/compute/operation-context.ts";
 import { requiresPostgres } from "../helpers/postgres-backend-state.mjs";
 import { waitFor } from "../helpers/wait-for.mjs";
 import { createWorkerRevisionFixtures } from "../helpers/postgres-worker-revision-fixture.mjs";
@@ -884,6 +887,53 @@ revisionTest(
     );
   },
   { timeout: 90_000 },
+);
+
+// Finding 1025: every deferral of a refused stop doubled its recheck, so under a constantly busy
+// queue each yield to other Work doubled it too, and publishing the refusal took about twice as
+// long. A yield is now recorded as `stopYielded` and only failed stops double the recheck.
+revisionTest(
+  "a refused stop's yields do not double its recheck",
+  async (fixture) => {
+    const stopCalls = [];
+    const { replacement, driver } = await startRefusedCandidate(fixture, "refused-yield-backoff", {
+      stopRevision: () => {
+        stopCalls.push(Date.now());
+        if (stopCalls.length <= 4) {
+          return Promise.reject(
+            new ComputeStopYieldedError(
+              "The workload Pods are still terminating; other work is waiting.",
+            ),
+          );
+        }
+        if (stopCalls.length <= 6) {
+          return Promise.reject(new Error("Kubernetes API temporarily unavailable"));
+        }
+        return undefined;
+      },
+    });
+    await fixture.work(replacement, "failed_permanent", 30_000);
+    assert.equal(stopCalls.length, 7);
+    assert.deepEqual([...driver.running], [], "the refused candidate was stopped");
+    const gaps = stopCalls.slice(1).map((at, index) => at - stopCalls[index]);
+    // Four yields recheck on the readiness cadence (0.5 s here); doubled, the fourth waited 4 s.
+    // The first failed stop after them is not doubled either; the next failure doubles it.
+    assert.ok(
+      gaps.slice(0, 5).every((gap) => gap < 1_500) && gaps[5] >= 950,
+      `refused stops started ${gaps.join(", ")} ms apart`,
+    );
+    const evidence = await fixture.observerPool.query(
+      `SELECT details->>'stopYielded' AS stop_yielded FROM occ.audit_events
+        WHERE details->>'workId' = $1 AND details->>'reasonCode' = 'REFUSED_CANDIDATE_STOP_PENDING'
+        ORDER BY occurred_at, id`,
+      [replacement.idempotencyKey],
+    );
+    assert.deepEqual(
+      evidence.rows.map(({ stop_yielded: yielded }) => yielded),
+      ["true", "true", "true", "true", null, null],
+    );
+  },
+  { timeout: 60_000 },
 );
 
 // Finding 1004: a refusal decided after the check for a newer revision (here a Sandbox that

@@ -231,6 +231,8 @@ export interface RetryableFailure {
 export interface DeferredWork extends RetryableFailure {
   /** A refusal waiting on its candidate's stop; recorded in the deferral's evidence. */
   readonly refusal?: string;
+  /** That stop yielded to other Work rather than failing; recorded as `stopYielded: true`. */
+  readonly stopYielded?: boolean;
 }
 
 export interface PermanentFailure {

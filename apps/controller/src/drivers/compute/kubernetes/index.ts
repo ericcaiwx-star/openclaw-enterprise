@@ -133,9 +133,11 @@ import {
   OAUTH_VOLUME_ANNOTATION,
 } from "../../kubernetes/oauth-seal.ts";
 import {
+  ComputeStopYieldedError,
   computeStopShouldYield,
   computeWorkWaiting,
   currentComputeAbortSignal,
+  isYieldingComputeStop,
   withComputeAbortSignal,
 } from "../operation-context.ts";
 import { unsupportedNativeGatewayAuthFields } from "../../../gateway/auth-fields.ts";
@@ -6238,8 +6240,18 @@ export class KubernetesComputeDriver implements ComputeDriver {
     await this.lifecycle.beforeWorkloadStop(revision);
     // Stop removes the serving path first so no new traffic reaches a runtime while
     // its exact Harness is being shut down.
-    await this.removeStoppedGateway(revision, namespace);
-    await this.shutdownRevisionRuntime(revision, namespace);
+    if (isYieldingComputeStop()) {
+      // OCC refused this candidate, so it must stop serving now: requests it may already serve
+      // are cut rather than drained into the Harness. The Harness is deleted before the Gateway's
+      // Pods are awaited, so a stop that yields during that wait no longer leaves it running,
+      // holding its credentials, until the retry (finding 1025).
+      await this.removeStoppedGateway(revision, namespace, { waitForPods: false });
+      await this.shutdownRevisionRuntime(revision, namespace);
+      await this.waitForRevisionPodsToTerminate(revision, gatewayNamespace, "gateway");
+    } else {
+      await this.removeStoppedGateway(revision, namespace);
+      await this.shutdownRevisionRuntime(revision, namespace);
+    }
     // Its Pods are gone, so drop the revision's credential copies and snapshots.
     // Preparing the revision again re-projects them from the canonical sources.
     await this.deleteRetiredRevisionArtifacts(revision, namespace);
@@ -6305,11 +6317,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
     if (revision.harness.mode === "embedded") {
       return;
     }
+    const sandboxDriver = this.sandboxDriverForRevision(revision);
+    const computeOwnsWorkload = sandboxDriver?.provisionHarness === undefined;
+    if (computeOwnsWorkload && isYieldingComputeStop()) {
+      // A refused candidate's Harness goes before the OAuth bootstrap's wait, which may yield.
+      await this.deleteRevisionAgentDeployment(revision, namespace);
+    }
     if (revision.harnessAuth.method === "oauth") {
       await this.removeOAuthBootstrap(revision, namespace);
     }
-    const sandboxDriver = this.sandboxDriverForRevision(revision);
-    const computeOwnsWorkload = sandboxDriver?.provisionHarness === undefined;
     if (computeOwnsWorkload) {
       await this.deleteRevisionAgentDeployment(revision, namespace);
       await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
@@ -6328,9 +6344,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
   }
 
+  /** Deletes the revision's Gateway and, unless `waitForPods` is false, waits for its Pods. */
   private async removeStoppedGateway(
     revision: AgentRevision,
     namespace: KubernetesNamespaceAddress,
+    { waitForPods = true }: { readonly waitForPods?: boolean } = {},
   ): Promise<void> {
     namespace = this.gatewayNamespace(revision, namespace);
     const name = `gateway-${sha256Hex(revision.agentId, 12)}`;
@@ -6338,7 +6356,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
     await this.deleteGatewayUnauthenticatedRoutes(name, ownership, namespace, revision.id);
     await this.deleteGatewayRoute(name, ownership, namespace, revision.id);
     await this.deleteNamedRuntimeResources(name, ownership, namespace, revision.id);
-    await this.waitForRevisionPodsToTerminate(revision, namespace, "gateway");
+    if (waitForPods) {
+      await this.waitForRevisionPodsToTerminate(revision, namespace, "gateway");
+    }
   }
 
   private async waitForRevisionPodsToTerminate(
@@ -6421,7 +6441,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       ) {
         yieldCheckedAt = Date.now();
         if (await computeStopShouldYield()) {
-          throw new DependencyUnavailableError(
+          throw new ComputeStopYieldedError(
             "The AgentRevision workload Pods are still terminating; other work is waiting.",
           );
         }

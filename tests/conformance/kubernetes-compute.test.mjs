@@ -50,6 +50,7 @@ import {
   ServiceAccountCredentialSecretExistsError,
 } from "../../packages/occ/src/index.ts";
 import {
+  ComputeStopYieldedError,
   currentComputeAbortSignal,
   withComputeAbortSignal,
   withComputeWorkWaiting,
@@ -12157,6 +12158,147 @@ test("stopping a containment-only Kubernetes revision removes its workload befor
   }
 });
 
+test("a refused candidate's stop deletes its Harness before the Gateway drains", async () => {
+  // Finding 1025: a yielding (refused-candidate) stop deletes the Agent Deployment before it
+  // waits for the Gateway's Pods, so a yield there leaves no Harness running until the retry.
+  // Any other stop drains the Gateway into the running Harness first.
+  const driver = new KubernetesComputeDriver(options());
+  const revision = routedRevision(driver, { id: "revision-refused-stop-order" });
+  const namespace = kubernetesNamespaceName(revision.namespaceId);
+  const namespaceResource = {
+    apiVersion: "v1",
+    kind: "Namespace",
+    metadata: {
+      name: namespace,
+      labels: {
+        "app.kubernetes.io/managed-by": "openclaw-enterprise",
+        "openclaw.dev/namespace": revision.namespaceId,
+      },
+      annotations: { "openclaw.dev/namespace-id": revision.namespaceId },
+    },
+  };
+  const deploymentName = `agent-${digest(revision.agentId)}-rev-${digest(revision.id)}`;
+  const deployment = driver.deployment(
+    deploymentName,
+    {
+      namespaceId: revision.namespaceId,
+      agentId: revision.agentId,
+      servicePrincipalId: revision.servicePrincipalId,
+      revisionId: revision.id,
+    },
+    { name: namespace, plane: "execution" },
+    "agent:local",
+    `agent-${digest(revision.agentId)}`,
+    "agent",
+    {},
+    "info",
+    undefined,
+    undefined,
+    undefined,
+    preparedAuth(driver, namespace, false),
+  );
+  deployment.metadata.uid = "refused-stop-order-agent-uid";
+  const gatewayPod = {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: {
+      name: "refused-stop-order-gateway-pod",
+      namespace,
+      labels: {
+        "openclaw.dev/namespace": revision.namespaceId,
+        "openclaw.dev/agent": revision.agentId,
+        "openclaw.dev/revision": revision.id,
+        "openclaw.dev/workload-role": "gateway",
+      },
+    },
+  };
+  let events = [];
+  let deploymentPresent = true;
+  let gatewayPodsLeft = 0;
+  const notFound = () => Object.assign(new Error("Not found"), { code: 404 });
+  driver.apiClients = Promise.resolve({
+    core: {
+      async readNamespacedConfigMap() {
+        throw notFound();
+      },
+      async readNamespacedSecret() {
+        throw notFound();
+      },
+      async readNamespacedService() {
+        throw notFound();
+      },
+      async readNamespacedServiceAccount() {
+        throw notFound();
+      },
+      async listNamespace() {
+        return { apiVersion: "v1", kind: "NamespaceList", items: [namespaceResource] };
+      },
+      async readNamespace({ name }) {
+        if (name === kubernetesNamespaceName(tenant.id)) {
+          return {
+            ...driver.gatewayNamespaceManifest({ namespaceId: tenant.id }),
+            status: { phase: "Active" },
+          };
+        }
+        return structuredClone(namespaceResource);
+      },
+      async listNamespacedPod(request) {
+        const role = Object.fromEntries(
+          request.labelSelector.split(",").map((entry) => entry.split("=")),
+        )["openclaw.dev/workload-role"];
+        events.push(`list ${role} Pods`);
+        if (role === "gateway" && gatewayPodsLeft > 0) {
+          gatewayPodsLeft -= 1;
+          return { apiVersion: "v1", kind: "PodList", items: [structuredClone(gatewayPod)] };
+        }
+        return { apiVersion: "v1", kind: "PodList", items: [] };
+      },
+    },
+    apps: {
+      async readNamespacedDeployment({ name }) {
+        if (name === deploymentName && deploymentPresent) {
+          return structuredClone(deployment);
+        }
+        throw notFound();
+      },
+      async deleteNamespacedDeployment({ name }) {
+        assert.equal(name, deploymentName);
+        events.push("delete Agent Deployment");
+        deploymentPresent = false;
+      },
+    },
+    objects: {},
+  });
+
+  // Other Work is waiting, so the refused candidate's stop yields at the Gateway wait, after
+  // the Harness's deletion was issued.
+  gatewayPodsLeft = 1;
+  await assert.rejects(
+    withComputeWorkWaiting(
+      async () => true,
+      () => withYieldingComputeStop(() => driver.stopRevision(revision)),
+    ),
+    (error) => error instanceof ComputeStopYieldedError && /still terminating/u.test(error.message),
+  );
+  assert.deepEqual(events, ["delete Agent Deployment", "list agent Pods", "list gateway Pods"]);
+  assert.equal(deploymentPresent, false);
+
+  // Any other stop drains the Gateway before it deletes the Harness, and does not yield.
+  events = [];
+  deploymentPresent = true;
+  gatewayPodsLeft = 1;
+  await withComputeWorkWaiting(
+    async () => true,
+    () => driver.stopRevision(revision),
+  );
+  assert.deepEqual(events, [
+    "list gateway Pods",
+    "list gateway Pods",
+    "delete Agent Deployment",
+    "list agent Pods",
+  ]);
+});
+
 test("stopping a provider-owned Kubernetes revision waits for Sandbox workload termination", async () => {
   let cleanupComplete = false;
   let podObservations = 0;
@@ -12267,8 +12409,7 @@ test("stopping a provider-owned Kubernetes revision waits for Sandbox workload t
     withComputeWorkWaiting(waiting, () =>
       withYieldingComputeStop(() => driver.stopRevision(revision)),
     ),
-    (error) =>
-      error instanceof DependencyUnavailableError && /still terminating/u.test(error.message),
+    (error) => error instanceof ComputeStopYieldedError && /still terminating/u.test(error.message),
   );
   assert.equal(podObservations, 1);
   podObservations = 0;
