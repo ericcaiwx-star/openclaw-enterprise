@@ -109,7 +109,11 @@ export function deploymentProgressForWork(
       break;
     case "LEASE_EXPIRED":
       code = attempt.code;
-      message = "The previous worker claim expired. Reconciliation will resume.";
+      // A claim lost while stopping a refused candidate keeps that refusal (finding 1021).
+      message =
+        attempt.refusal !== undefined && FAILURE_CODE.test(attempt.refusal)
+          ? `Deployment refused (${attempt.refusal}); the previous worker claim expired while stopping the refused version. The controller will retry.`
+          : "The previous worker claim expired. Reconciliation will resume.";
       break;
     case "ACTIVE_REVISION_RECOVERY":
       code = attempt.code;

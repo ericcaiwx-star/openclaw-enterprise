@@ -4409,7 +4409,15 @@ export class ControllerWorker {
       await this.withClaimHeartbeat(claim, () => compute.stopRevision(revision));
     } catch (error) {
       if (error instanceof WorkClaimLostError) {
-        throw error;
+        // A graceful shutdown aborts a slow stop (a Pod-termination wait) like a lost claim.
+        // While the lease holds, the pass waits on the stop instead, so a restart during the
+        // first stop, before any wait evidence, neither spends an attempt nor leaves the refusal
+        // unrecorded (finding 1021). The interrupted stop's duration does not lengthen the
+        // recheck. A lease that already ran out still loses the claim when the deferral commits.
+        if (!this.stopping) {
+          throw error;
+        }
+        throw new RefusedCandidateStopError(refusal, 0, error);
       }
       throw new RefusedCandidateStopError(refusal, Date.now() - started, error);
     }
