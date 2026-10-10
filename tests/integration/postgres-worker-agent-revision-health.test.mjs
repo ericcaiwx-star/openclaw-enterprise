@@ -816,111 +816,174 @@ revisionTest(
 );
 
 // Finding 1010: the refused-stop wait has no attempt limit, but a claim lost during it spent one.
-// A controller restart while the stop blocks (a Pod-termination wait) aborts the pass as a lost
-// claim, so a few rollouts ended the work LEASE_EXPIRED with the refused candidate still running
-// and its refusal unrecorded. Recovery now refunds that attempt and keeps the refusal. Exclusive
-// replacement and a shared first deployment reach the stop the same way.
+// A restart whose lease runs out while the stop blocks (a Pod-termination wait; also a crash)
+// loses the claim, so a few rollouts ended the work LEASE_EXPIRED with the refused candidate
+// still running and its refusal unrecorded. Recovery now refunds that attempt and keeps the
+// refusal, which deployment status names. Finding 1021: a graceful restart during the FIRST stop,
+// before any wait evidence, still spent an attempt; the shutdown now defers the work as
+// REFUSED_CANDIDATE_STOP_PENDING while its lease holds. Exclusive replacement and a shared first
+// deployment reach the stop the same way.
 for (const shape of ["exclusive", "shared"]) {
-  test(
-    `a refused ${shape === "exclusive" ? "exclusive candidate" : "first deployment on shared Compute"} keeps waiting on its stop across controller restarts`,
-    { ...requiresPostgres, timeout: 120_000 },
-    async (context) => {
-      // On main the second restart exhausted these two attempts.
-      const restarts = 3;
-      const fixture = await setup(context, { maxAttempts: 2 });
-      const owner = await fixture.agent(
-        `refused-restart-${shape}`,
-        shape === "exclusive" ? { executionMode: "dedicated" } : {},
-      );
-      let candidateId;
-      let candidatePasses = 0;
-      let stopCalls = 0;
-      let release;
-      const compute = {
-        ...fixture.compute,
-        ...(shape === "exclusive" ? { requiresStoppedPredecessors: () => true } : {}),
-        async prepareRevision(revision) {
-          const observed = await fixture.compute.prepareRevision(revision);
-          if (revision.id !== candidateId) {
-            return observed;
-          }
-          candidatePasses += 1;
-          if (candidatePasses === 1) {
-            // The actor loses deploy authority after the runtime started; the next pass refuses.
-            await fixture.observerPool.query(
-              `INSERT INTO occ.iam_restrictions
-                 (id, namespace_id, action, resource_kind, resource_id, effect)
-               VALUES ($1, $2, 'deploy', 'agent', $3, 'deny')`,
-              [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
-            );
-          }
-          return { ...observed, ready: false };
-        },
-        async stopRevision(revision) {
-          if (revision.id === candidateId) {
-            stopCalls += 1;
-            if (stopCalls === 1) {
-              // The first stop fails, so the work waits as REFUSED_CANDIDATE_STOP_PENDING.
-              throw new Error("Kubernetes API temporarily unavailable");
-            }
-            if (stopCalls <= 1 + restarts) {
-              // A Pod-termination wait that outlasts the controller's shutdown.
-              await new Promise((resolve) => {
-                release = resolve;
-              });
-              throw new Error("Pods did not terminate before the controller stopped");
-            }
-          }
-        },
-        async retireRevision() {},
-      };
-      await fixture.start(compute);
-      if (shape === "exclusive") {
-        await fixture.work(await fixture.revision(owner, 1), "succeeded");
+  for (const restart of ["lost", "graceful"]) {
+    const label =
+      shape === "exclusive" ? "exclusive candidate" : "first deployment on shared Compute";
+    test(
+      restart === "lost"
+        ? `a refused ${label} keeps waiting on its stop across lost claims`
+        : `a refused ${label} keeps waiting on its first stop across graceful restarts`,
+      { ...requiresPostgres, timeout: 120_000 },
+      async (context) => {
+        await refusedStopRestarts(context, shape, restart);
+      },
+    );
+  }
+}
+
+async function refusedStopRestarts(context, shape, restart) {
+  // On main the second restart exhausted these two attempts.
+  const restarts = 3;
+  const fixture = await setup(context, { maxAttempts: 2 });
+  const owner = await fixture.agent(
+    `refused-${restart}-${shape}`,
+    shape === "exclusive" ? { executionMode: "dedicated" } : {},
+  );
+  // A lost-claim run first fails one stop, so its recovered claims follow wait evidence; a
+  // graceful run blocks from the first stop on.
+  const failedStops = restart === "lost" ? 1 : 0;
+  let candidateId;
+  let candidatePasses = 0;
+  let stopCalls = 0;
+  let release;
+  const events = [];
+  const compute = {
+    ...fixture.compute,
+    ...(shape === "exclusive" ? { requiresStoppedPredecessors: () => true } : {}),
+    async prepareRevision(revision) {
+      const observed = await fixture.compute.prepareRevision(revision);
+      if (revision.id !== candidateId) {
+        return observed;
       }
-      const candidate = await fixture.revision(owner, shape === "exclusive" ? 2 : 1);
-      candidateId = candidate.id;
-      for (let restart = 1; restart <= restarts; restart += 1) {
-        const ended = await waitFor(
-          `refused stop ${restart + 1} to block, or the work to end`,
-          async () => {
-            if (release !== undefined) {
-              return { blocked: true };
-            }
-            const { rows } = await fixture.workResult(candidate);
-            return rows[0] !== undefined && rows[0].reason_code !== null ? rows[0] : undefined;
-          },
-          30_000,
-        );
-        assert.deepEqual(ended, { blocked: true }, `the work ended before restart ${restart}`);
-        // A graceful restart: shutdown aborts the pass, which loses its claim once the stop ends.
-        const stopped = fixture.stop();
-        release();
-        release = undefined;
-        await stopped;
-        // The next controller recovers the claim once its lease has expired.
+      candidatePasses += 1;
+      if (candidatePasses === 1) {
+        // The actor loses deploy authority after the runtime started; the next pass refuses.
         await fixture.observerPool.query(
-          `UPDATE occ.controller_work SET lease_expires_at = clock_timestamp() - interval '1 second'
-           WHERE idempotency_key = $1 AND state = 'claimed'`,
-          [candidate.idempotencyKey],
+          `INSERT INTO occ.iam_restrictions
+             (id, namespace_id, action, resource_kind, resource_id, effect)
+           VALUES ($1, $2, 'deploy', 'agent', $3, 'deny')`,
+          [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
         );
-        await fixture.start(compute);
       }
-      await fixture.work(candidate, "failed_permanent", 30_000);
-      const result = await fixture.workResult(candidate);
-      assert.equal(result.rows[0].reason_code, "AUTHORIZATION_DENIED");
-      assert.equal(stopCalls, restarts + 2, "the refusal was recorded after the stop succeeded");
-      const recoveries = await fixture.observerPool.query(
-        `SELECT details->>'refusal' AS refusal FROM occ.audit_events
-         WHERE details->>'workId' = $1 AND details->>'reasonCode' = 'LEASE_EXPIRED'`,
+      return { ...observed, ready: false };
+    },
+    async stopRevision(revision) {
+      if (revision.id === candidateId) {
+        stopCalls += 1;
+        if (stopCalls <= failedStops) {
+          // The work waits as REFUSED_CANDIDATE_STOP_PENDING.
+          throw new Error("Kubernetes API temporarily unavailable");
+        }
+        if (stopCalls <= failedStops + restarts) {
+          // A Pod-termination wait that outlasts the controller's shutdown.
+          await new Promise((resolve) => {
+            release = resolve;
+          });
+          throw new Error("Pods did not terminate before the controller stopped");
+        }
+      }
+    },
+    async retireRevision() {},
+  };
+  await fixture.start(compute, { emit: (event) => events.push(event) });
+  if (shape === "exclusive") {
+    await fixture.work(await fixture.revision(owner, 1), "succeeded");
+  }
+  const candidate = await fixture.revision(owner, shape === "exclusive" ? 2 : 1);
+  candidateId = candidate.id;
+  const expireLease = () =>
+    fixture.observerPool.query(
+      `UPDATE occ.controller_work SET lease_expires_at = clock_timestamp() - interval '1 second'
+       WHERE idempotency_key = $1 AND state = 'claimed'`,
+      [candidate.idempotencyKey],
+    );
+  for (let count = 1; count <= restarts; count += 1) {
+    const ended = await waitFor(
+      `refused stop ${count + failedStops} to block, or the work to end`,
+      async () => {
+        if (release !== undefined) {
+          return { blocked: true };
+        }
+        const { rows } = await fixture.workResult(candidate);
+        return rows[0] !== undefined && rows[0].reason_code !== null ? rows[0] : undefined;
+      },
+      30_000,
+    );
+    assert.deepEqual(ended, { blocked: true }, `the work ended before restart ${count}`);
+    if (restart === "lost") {
+      // The lease runs out before the shutdown ends the stop, so the pass loses its claim.
+      await expireLease();
+    }
+    const stopped = fixture.stop();
+    release();
+    release = undefined;
+    await stopped;
+    if (restart === "lost") {
+      // The next controller's recovery, run here so status shows it before the next claim.
+      const recovery = new fixture.PostgresWorkQueue(fixture.observerPool, { maxAttempts: 2 });
+      assert.equal((await recovery.recoverStale()).recovered, 1);
+      const status = await fixture.deploymentStatus(owner, candidate);
+      assert.equal(status.progress.lastAttempt.code, "LEASE_EXPIRED");
+      assert.equal(
+        status.progress.lastAttempt.message,
+        "Deployment refused (AUTHORIZATION_DENIED); the previous worker claim expired before the refused version was stopped. The controller will retry.",
+      );
+    } else {
+      // The shutdown released the claim with its refusal; on main it stayed claimed.
+      const { rows } = await fixture.observerPool.query(
+        "SELECT state, attempt_count FROM occ.controller_work WHERE idempotency_key = $1",
         [candidate.idempotencyKey],
       );
-      assert.deepEqual(
-        recoveries.rows.map(({ refusal }) => refusal),
-        Array.from({ length: restarts }, () => "AUTHORIZATION_DENIED"),
-        "each recovered claim keeps the refusal it waits to publish",
+      assert.deepEqual(rows[0], { state: "queued", attempt_count: 0 });
+      const status = await fixture.deploymentStatus(owner, candidate);
+      assert.equal(status.progress.lastAttempt.code, "REFUSED_CANDIDATE_STOP_PENDING");
+      assert.match(
+        status.progress.lastAttempt.message,
+        /^Deployment refused \(AUTHORIZATION_DENIED\)/u,
       );
-    },
+      // A claim that main left behind is recovered like a lost one.
+      await expireLease();
+    }
+    await fixture.start(compute, { emit: (event) => events.push(event) });
+  }
+  await fixture.work(candidate, "failed_permanent", 30_000);
+  const result = await fixture.workResult(candidate);
+  assert.equal(result.rows[0].reason_code, "AUTHORIZATION_DENIED");
+  assert.equal(
+    stopCalls,
+    failedStops + restarts + 1,
+    "the refusal was recorded after the stop succeeded",
+  );
+  // A shutdown's deferral logs why the stop ended, not a lost claim.
+  assert.deepEqual(
+    refusedStopWaits(events, candidate).map(({ cause }) => cause),
+    restart === "lost" ? ["Error"] : Array.from({ length: restarts }, () => "WorkerStopping"),
+  );
+  const evidence = await fixture.observerPool.query(
+    `SELECT details->>'reasonCode' AS code, details->>'refusal' AS refusal FROM occ.audit_events
+     WHERE details->>'workId' = $1 AND details->>'reasonCode' IN ('LEASE_EXPIRED',
+       'REFUSED_CANDIDATE_STOP_PENDING')
+     ORDER BY occurred_at, id`,
+    [candidate.idempotencyKey],
+  );
+  assert.deepEqual(
+    evidence.rows,
+    Array.from({ length: failedStops + restarts }, (_, index) => ({
+      code:
+        index < failedStops || restart === "graceful"
+          ? "REFUSED_CANDIDATE_STOP_PENDING"
+          : "LEASE_EXPIRED",
+      refusal: "AUTHORIZATION_DENIED",
+    })),
+    "each interrupted stop keeps the refusal it waits to publish",
   );
 }
 
