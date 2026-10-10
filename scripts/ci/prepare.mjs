@@ -1331,7 +1331,9 @@ const k3dLoadBalancerWorkerConnections = 8192;
 const k3dNodeRegistrationTimeoutMs = 120_000;
 
 // Wait until every node this cluster owns is registered, so the Ready wait
-// cannot pass on the server alone while the worker is still joining.
+// cannot pass on the server alone while a worker is still joining. This is
+// hardening: in finding 1006 the worker was registered, and its containerd
+// stopped answering later.
 async function waitForK3dNodesRegistered(kubectl, kubectlArgs, nodes) {
   const deadline = performance.now() + k3dNodeRegistrationTimeoutMs;
   for (;;) {
@@ -1351,8 +1353,9 @@ async function waitForK3dNodesRegistered(kubectl, kubectlArgs, nodes) {
     }
     if (performance.now() >= deadline) {
       throw new Error(
-        `k3d node ${missing.join(", ")} did not register within ${k3dNodeRegistrationTimeoutMs} ms` +
-          (lastError ? `: ${lastError.message}` : "."),
+        lastError
+          ? `Unable to list k3d nodes within ${k3dNodeRegistrationTimeoutMs} ms: ${lastError.message}`
+          : `k3d node ${missing.join(", ")} did not register within ${k3dNodeRegistrationTimeoutMs} ms.`,
         { cause: lastError },
       );
     }
@@ -1910,6 +1913,9 @@ async function waitForK3dContainerd(lane, cluster) {
                   { cause: error },
                 );
           }
+          if (failed) {
+            return;
+          }
           progress(
             lane,
             `containerd on ${node} is not answering yet (attempt ${attempt}); retrying.`,
@@ -1919,6 +1925,30 @@ async function waitForK3dContainerd(lane, cluster) {
       }
     }),
   );
+}
+
+const containerdSocketUnavailable =
+  /containerd\.sock: connect: (?:connection refused|no such file or directory)/;
+
+// k3d tools-node mode can exit successfully after a per-node import failure, so
+// stream the export into each owned node's containerd directly and propagate
+// both export and node-local containerd errors. A containerd that stops
+// answering during the import gets one more wait and import; ctr import is
+// idempotent, so nodes that already imported the image are unaffected.
+async function importImageIntoK3dNodes(lane, cluster, saveArgs) {
+  for (let attempt = 1; ; attempt += 1) {
+    await waitForK3dContainerd(lane, cluster);
+    try {
+      return await timedPreparation(lane, "image-stream-import", () =>
+        streamImageIntoK3dNodes(cluster, saveArgs),
+      );
+    } catch (error) {
+      if (attempt > 1 || !containerdSocketUnavailable.test(error.stderr ?? "")) {
+        throw error;
+      }
+      progress(lane, "A node's containerd refused the image import; waiting for it to retry once.");
+    }
+  }
 }
 
 // Stream one image export into every owned node's containerd at once. No
@@ -2026,18 +2056,26 @@ async function registerImageInK3d(statePath, state, cluster, image, envName) {
   // k3d can exit successfully after containerd rejects missing index content.
   // Export only the platform pulled locally, then verify the imported reference.
   const containerEngine = process.env.OCC_DOCKER_BIN ?? "docker";
-  await waitForK3dContainerd(state.lane, cluster);
-  await timedPreparation(state.lane, "image-stream-import", () =>
-    // k3d tools-node mode can exit successfully after a per-node import
-    // failure, so stream the export into each owned node's containerd directly
-    // and propagate both export and node-local containerd errors.
-    streamImageIntoK3dNodes(cluster, [
+  try {
+    await importImageIntoK3dNodes(state.lane, cluster, [
       "image",
       "save",
       ...(basename(containerEngine) === "podman" ? [] : ["--platform", platform]),
       importReference,
-    ]),
-  );
+    ]);
+  } catch (error) {
+    // Keep node state and logs, so a containerd outage shows its cause (finding 1006).
+    if (fixtureLanes.has(state.lane)) {
+      await captureK3dDiagnostics({
+        execFile,
+        cluster,
+        lane: state.lane,
+        statePath,
+        failure: `${envName} image import into k3d nodes failed`,
+      }).catch(() => progress(state.lane, "k3d diagnostics unavailable"));
+    }
+    throw error;
+  }
 
   const listed = await k3dNodeImageCheck(
     `k3d-${cluster.name}-server-0`,

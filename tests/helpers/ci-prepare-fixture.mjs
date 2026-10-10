@@ -368,6 +368,15 @@ if (command === "docker" || command === "podman") {
       args[2] === "k3d-" + state.cluster + "-" + suffix)) {
     const node = args[2];
     assert.deepEqual(args.slice(3), ["ctr", "-n", "k8s.io", "images", "import", "--all-platforms", "-"]);
+    // The worker's containerd stops answering during its first import (finding 1006).
+    const imports = (state["imports:" + node] ?? 0) + 1;
+    state["imports:" + node] = imports;
+    if (scenario === "containerd-restart" && node.endsWith("-agent-0") && imports === 1) {
+      commitState();
+      process.stderr.write('ctr: connection error: desc = "transport: Error while dialing: dial unix ' +
+        '/run/k3s/containerd/containerd.sock: connect: connection refused"\n');
+      process.exit(1);
+    }
     // The worker fails before reading, which stops the export early.
     if (scenario === "nonzero-worker-import" && node.endsWith("-agent-0")) {
       process.stderr.write("synthetic import command failure\n");
@@ -406,10 +415,11 @@ if (command === "docker" || command === "podman") {
     }
     if (equals(args.slice(2), ["ctr", "-n", "k8s.io", "version"])) {
       // A Ready worker whose containerd refuses connections for a while (finding 1006).
-      state.containerdProbes ??= {};
-      state.containerdProbes[node] = (state.containerdProbes[node] ?? 0) + 1;
+      const probes = (state["containerdProbes:" + node] ?? 0) + 1;
+      state["containerdProbes:" + node] = probes;
+      if (scenario === "hung-containerd-probe" && node.endsWith("-agent-0")) await hang();
       if (node.endsWith("-agent-0") && (scenario === "containerd-down" ||
-          (scenario === "late-worker" && state.containerdProbes[node] <= 2))) {
+          (scenario === "late-worker" && probes <= 2))) {
         commitState();
         process.stderr.write('ctr: connection error: desc = "transport: Error while dialing: dial unix ' +
           '/run/k3s/containerd/containerd.sock: connect: connection refused"\n');

@@ -10,7 +10,9 @@ k3d node (`image-stream-import`): k3d `tools-node` can hide per-node failures wh
 exiting successfully. Before each import, preparation polls `ctr version` on every
 node until its containerd answers, because a Ready node's containerd can still refuse
 connections; after 60 seconds (`OPENCLAW_CI_K3D_CONTAINERD_WAIT_MS` overrides it) it
-fails and names the node. Imports are serialized per cluster, then preparation verifies
+fails and names the node. An import that containerd refuses is retried once after the
+same wait; for the k3d fixture lanes, a failed import writes the cluster diagnostics.
+Imports are serialized per cluster, then preparation verifies
 digest and CRI references. Each node check and tag, and each host engine image
 inspect and tag before the import, times out after 30 seconds
 (`OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS` overrides it; it also bounds source image
@@ -34,8 +36,7 @@ minute, node image pull included; `OPENCLAW_CI_K3D_CREATE_TIMEOUT_MS` overrides
 it). The timeout stops k3d's whole process group. Preparation then writes the
 lane's cluster diagnostics, deletes the partial cluster and retries once; a second
 timeout fails preparation and leaves the cluster to lane cleanup. The node Ready wait
-starts only after every owned node has registered (up to two minutes), so it cannot
-pass on the server alone while a worker is still joining.
+starts only after every owned node has registered (up to two minutes).
 
 Preparation reuses a supplied immutable workload image in the local Docker daemon
 only when `docker image inspect` records the requested digest in `RepoDigests`;

@@ -495,6 +495,47 @@ test("fixture preparation names the node whose containerd never answers and impo
   );
   const state = JSON.parse(await readFile(commands.statePath, "utf8"));
   assert.equal(state.env, undefined);
+  // The failure keeps node diagnostics for the outage.
+  const evidence = JSON.parse(await readFile(`${commands.statePath}.diagnostics.json`, "utf8"));
+  assert.match(evidence.failure, /image import into k3d nodes failed$/);
+  const cleanup = commands.cleanup();
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("fixture preparation does not retry a hung containerd probe", async (t) => {
+  const commands = await fixtureImageCommands(t, "hung-containerd-probe", undefined, {
+    OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000",
+  });
+  const result = commands.prepare();
+  assert.equal(result.status, 1);
+  assertStderrMatch(
+    result.stderr,
+    /containerd on k3d-\S+-agent-0 did not answer within 3000 ms \(ctr -n k8s\.io version\)\./,
+  );
+  const calls = await commands.commands();
+  assert.equal(
+    calls.filter(
+      ({ args }) => args[0] === "exec" && args[1].endsWith("-agent-0") && args.at(-1) === "version",
+    ).length,
+    1,
+  );
+  assert.equal(
+    calls.some(({ args }) => args[0] === "exec" && args[1] === "-i"),
+    false,
+  );
+  const cleanup = commands.cleanup();
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("fixture preparation imports once more after containerd refuses an import", async (t) => {
+  const commands = await fixtureImageCommands(t, "containerd-restart");
+  const result = commands.prepare();
+  assert.equal(result.status, 0, result.stderr);
+  assertStderrMatch(result.stderr, /containerd refused the image import; waiting for it/);
+  const imports = (await commands.commands()).filter(
+    ({ args }) => args[0] === "exec" && args[1] === "-i" && args[2].endsWith("-agent-0"),
+  );
+  assert.equal(imports.length, 2);
   const cleanup = commands.cleanup();
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
