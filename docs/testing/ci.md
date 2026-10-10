@@ -21,7 +21,7 @@ present values, including empty strings. Lane `env` and prepared values override
 
 The non-required [First Agent smoke](first-agent-smoke.md) installs Local Setup and deploys two Agents against a stand-in model provider on every run.
 
-Stop observation defaults to 17 minutes for the two serially processed Agents; explicit deadlines and the 40-minute CI job limit remain authoritative. Success still requires the active revision to clear and all Agent Pods to terminate.
+Stops default to 17 minutes, subject to explicit deadlines and the 40-minute job.
 
 The non-required [`keycloak-oidc` lane](keycloak.md) runs in full-mode PR CI and on main. It belongs to the `full` suite group.
 
