@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/8a9638ae-99ab-4dca-9759-92fe81e8d280
+last_updated_session: authoring-run/46f029c3-e915-4829-949b-638e0b2be118
 ---
 
 # Agent runtime logs flow
@@ -167,13 +167,14 @@ batches them, and filters `since_time` by that stamp, so a resume sends a time
 `SANDBOX_LOG_OVERLAP_MS` (5 s) behind the newest delivered line; the cursor
 keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
-Signed cut checkpoints retain the raw-prefix digest/count, query floor and pre-cut
-baseline. Container keeps its two-second overlap and saved floor. A changed timed
-window with the same tail resumes from the outer delivered frontier; changed tails
-and ambiguous single-time replacements take fresh snapshots. Sandbox pins short
-windows, untimed rows and unfinished timestamp groups. Full timed windows use normal
-overlap when every undelivered time is later than the newest delivery and remains
-inside its floor. Sandbox checkpoints reuse outer baseline time/hashes. All-untimed Driver byte cuts retain progress;
+Signed cut checkpoints retain prefix digest/count, query floor and pre-cut baseline.
+Container retains two-second overlap. Changed timed windows resume
+from delivered progress; changed tails and ambiguous single-time replacements take
+fresh snapshots. Sandbox pins short windows, untimed rows and overflowing groups.
+Full timed windows use counted overlap for partial groups whose remaining times
+fit its floor. Full single-time windows retain their ambiguity gap. Container
+recovery keeps unknown-time gaps without duplicate loss notices.
+All-untimed Driver byte cuts retain progress;
 mixed cuts advance through time with an explicit reset that may replay untimed rows.
 Matching checkpoints retain positional proof across growth. Stable windows drain,
 including over-capacity timestamp groups. UID/restarts reset progress; PEM recovery
@@ -240,6 +241,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 13:17: Resume partial groups; deduplicate gaps. (authoring-run/46f029c3-e915-4829-949b-638e0b2be118 - 59b9c9eec562e50df8e3cbe9669a2e6f697ba37d)
 
 - 2026-10-10 09:27: Follow moving full byte-cut windows through delivered time. (authoring-run/8a9638ae-99ab-4dca-9759-92fe81e8d280 - 8741e9f5e2a915ac5c2dcb076479cc9e23d8c5cb)
 

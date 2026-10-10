@@ -2903,3 +2903,68 @@ test("container follows a growing full wire-cut tail without replaying its deliv
     [],
   );
 });
+
+test("container checkpoint recovery does not duplicate an observed window-loss gap", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("wire-cut-burst-gap");
+  const start = Date.now() - 120_000;
+  const row = (index) => ({
+    time: new Date(start + index * 1000).toISOString(),
+    raw: JSON.stringify({
+      level: "info",
+      subsystem: "gateway",
+      message: `row=${index}; ${"ordinary diagnostic ".repeat(350)}`,
+    }),
+  });
+  fixture.computeDriver.state.lines = Array.from({ length: 100 }, (_, index) => row(index));
+  const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=100"));
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  // The burst replaces the whole tail before the byte-cut snapshot drains.
+  // Actual missing rows still require one window gap, not a second gap for the
+  // discarded checkpoint alongside that same observed loss.
+  fixture.computeDriver.state.lines.push(
+    ...Array.from({ length: 100 }, (_, index) => row(100 + index)),
+  );
+  const second = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=100&cursor=${first.data.cursor}`),
+  );
+  assert.equal(second.status, 200);
+  assert.ok(Buffer.byteLength(second.text) <= 512 * 1024);
+  assert.equal(
+    second.data.records.filter(({ type, reason }) => type === "gap" && reason === "window_exceeded")
+      .length,
+    1,
+  );
+});
+
+test("container checkpoint recovery keeps an unknown-time reset visible", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("wire-cut-unknown-reset");
+  const start = Date.now() - 120_000;
+  fixture.computeDriver.state.lines = Array.from({ length: 80 }, (_, index) => ({
+    time: index === 0 ? null : new Date(start + index * 1000).toISOString(),
+    raw: JSON.stringify({
+      level: "info",
+      subsystem: "gateway",
+      message: `row=${index}; ${"ordinary diagnostic ".repeat(350)}`,
+    }),
+  }));
+  const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=100"));
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  // The timed frontier cannot locate an unknown row in a changed snapshot.
+  // Recovering timed rows must keep that reset visible, even on a short tail.
+  fixture.computeDriver.state.lines[0] = { time: null, raw: "changed unknown-time diagnostic" };
+  const second = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=100&cursor=${first.data.cursor}`),
+  );
+  assert.equal(second.status, 200);
+  assert.ok(
+    second.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+  );
+});

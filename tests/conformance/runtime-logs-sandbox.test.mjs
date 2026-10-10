@@ -1331,6 +1331,75 @@ test("sandbox follows a growing full wire-cut tail without replaying its deliver
   );
 });
 
+for (const tailLines of [200, 1000]) {
+  test(`sandbox follows full ${tailLines}-line wire cuts inside millisecond timestamp groups`, async () => {
+    const fixture = await sandboxFixture();
+    const start = Date.now() - 120_000;
+    const total = tailLines + 21;
+    // Deterministic 2–3-line millisecond groups model the supported timestamp
+    // precision. A full moving source must resume inside a partly delivered group.
+    let seed = 1;
+    const offsets = [];
+    for (let offset = 0; offsets.length < total; offset += 1) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const count = 2 + (seed >>> 31);
+      offsets.push(...Array.from({ length: count }, () => offset));
+    }
+    const row = (index) => ({
+      sandboxId: SANDBOX_ID,
+      time: new Date(start + offsets[index]).toISOString().replace("Z", "000000Z"),
+      level: "INFO",
+      target: "supervisor",
+      source: "sandbox",
+      message: `row=${index}; ${"ordinary diagnostic ".repeat(tailLines === 200 ? 350 : 105)}`,
+      fields: {},
+    });
+    fixture.gateway.state.lines = Array.from({ length: tailLines }, (_, index) => row(index));
+    let cursor;
+    let splitGroup = false;
+    const seen = [];
+    for (let poll = 0; poll < 8; poll += 1) {
+      if (poll > 0) {
+        const offset = fixture.gateway.state.lines.length;
+        fixture.gateway.state.lines.push(
+          ...Array.from({ length: 3 }, (_, index) => row(offset + index)),
+        );
+      }
+      fixture.gateway.state.bufferTotal = fixture.gateway.state.lines.length;
+      const response = await fixture.request(
+        "GET",
+        fixture.target.logsPath(
+          `source=sandbox&tailLines=${tailLines}${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+        ),
+      );
+      assert.equal(response.status, 200);
+      assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+      const lines = response.data.records.filter(({ type }) => type === "line");
+      const indices = lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1]));
+      seen.push(...indices);
+      if (response.data.truncated && indices.length > 0) {
+        const last = indices.at(-1);
+        splitGroup ||= offsets[last] === offsets[last + 1];
+      }
+      cursor = response.data.cursor;
+    }
+    assert.ok(splitGroup, "the response cut exercises a partly delivered timestamp group");
+    assert.deepEqual(
+      seen,
+      Array.from({ length: total }, (_, index) => index),
+    );
+    const replay = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=${tailLines}&cursor=${cursor}`),
+    );
+    assert.equal(replay.status, 200);
+    assert.deepEqual(
+      replay.data.records.filter(({ type }) => type === "line"),
+      [],
+    );
+  });
+}
+
 test("sandbox full wire-cut pages retain already-delivered untimed prefixes", async () => {
   const start = Date.now() - 120_000;
   const rows = Array.from({ length: 100 }, (_, index) => ({

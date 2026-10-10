@@ -474,7 +474,11 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
       return false;
     });
   }
-  if (checkpointLost) {
+  if (
+    checkpointLost &&
+    (!recoverDelivered || completeLines.some((line) => line.time === null)) &&
+    !leading.some((record) => record.type === "gap" && record.reason === "window_exceeded")
+  ) {
     leading.push(runtimeLogGap("window_exceeded", observedStream, earliest));
   }
   const remaining = checkpointValid

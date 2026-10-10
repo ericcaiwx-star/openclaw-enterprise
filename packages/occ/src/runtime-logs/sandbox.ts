@@ -365,8 +365,9 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     );
     // A full moving tail invalidates positional checkpoints on every append. Use
     // the normal delivered overlap when it still covers every undelivered time.
-    // Untimed rows, or a cut timestamp group beyond the bounded hash history,
-    // require the signed snapshot position until that observed window drains.
+    // A partial timestamp group still fits when the overlap counts every delivered
+    // occurrence at its time. Untimed rows, overflow, or a suffix before the overlap
+    // floor require the signed snapshot until that observed window drains.
     const newestDelivered = delivered.reduce<string | null>(
       (newest, line) =>
         line.time !== null && (newest === null || compareRuntimeLogTime(line.time, newest) > 0)
@@ -378,20 +379,27 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
       (pageCut &&
         (chunk.bufferTotal < tailLines ||
           consumedLines.some((line) => line.time === null) ||
+          window.overflow !== null ||
           window.since === null ||
           newestDelivered === null ||
           lines
             .slice(end)
             .some(
-              (line) =>
-                line.time === null ||
-                compareRuntimeLogTime(line.time, window.since!) < 0 ||
-                compareRuntimeLogTime(line.time, newestDelivered) <= 0,
+              (line) => line.time === null || compareRuntimeLogTime(line.time, window.since!) < 0,
             ))) ||
       (checkpoint !== undefined &&
         (consumedLines.some((line) => line.time === null) || lines.length === 0));
+    // Identical occurrences in a full single-time tail can roll without visible change.
+    const firstTime = chunk.lines[0]?.time;
+    const fullSingleTime =
+      firstTime != null &&
+      chunk.lines.length >= tailLines &&
+      chunk.lines.every(
+        (line) => line.time !== null && compareRuntimeLogTime(line.time, firstTime) === 0,
+      );
     const unobservableTail =
-      (retainCheckpoint || checkpoint !== undefined) && chunk.bufferTotal >= tailLines;
+      (retainCheckpoint || checkpoint !== undefined || fullSingleTime) &&
+      chunk.bufferTotal >= tailLines;
     const records = [
       ...leading,
       ...(unobservableTail &&
