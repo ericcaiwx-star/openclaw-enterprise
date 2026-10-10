@@ -2010,7 +2010,7 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
       "});",
       'test("primitive cause", () => { throw new Error("ordinary primitive wrapper", { cause: "ordinary primitive cause" }); });',
       'test("multiline tail", () => {',
-      '  const output = Array.from({ length: 300 }, (_, i) => "ordinary progress " + i + " " + "x".repeat(100));',
+      '  const output = Array.from({ length: 1000 }, (_, i) => "ordinary progress " + i + " " + process.env.LONG_SYNTHETIC_ENVIRONMENT_FIXTURE_NAME);',
       '  throw new Error(["ordinary wrapper failed", ...output, "ordinary wrapper stderr: final dependency failure", `final env ${process.env.CI_RUNNER_FIXTURE_CREDENTIAL}`].join("\\n"));',
       "});",
       'test("multiline key boundary", () => {',
@@ -2040,18 +2040,22 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
     groups: { ci: ["details"] },
   });
 
-  const result = run(root, [
-    "run",
-    "details",
-    "--manifest",
-    "manifest.json",
-    "--root",
+  const result = run(
     root,
-    "--state",
-    statePath,
-    "--results",
-    resultsPath,
-  ]);
+    [
+      "run",
+      "details",
+      "--manifest",
+      "manifest.json",
+      "--root",
+      root,
+      "--state",
+      statePath,
+      "--results",
+      resultsPath,
+    ],
+    { LONG_SYNTHETIC_ENVIRONMENT_FIXTURE_NAME: "fictional-value" },
+  );
 
   assert.equal(result.status, 1);
   const summary = JSON.parse(await readFile(resultsPath, "utf8"));
@@ -2065,7 +2069,7 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
     /run-tests: whole failure messages, stacks and output tails are in .*state\/details\.json\.diagnostics\.json \(artifact diagnostics-<prefix>-details-attempt-(?:\d+|<N>)\)/,
   );
   const text = await readFile(`${statePath}.diagnostics.json`, "utf8");
-  assert.doesNotMatch(text, /secretauthvalue|abcdefghijklmnop0123|passing output/);
+  assert.doesNotMatch(text, /secretauthvalue|abcdefghijklmnop0123|passing output|fictional-value/);
   const report = JSON.parse(text);
   assert.equal(report.lane, "details");
   assert.equal(report.failures.length, 1);

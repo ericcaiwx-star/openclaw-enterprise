@@ -146,7 +146,7 @@ marked; shared siblings remain separate. `scripts/ci/failure-redaction.mjs:captu
 normalizes controls and multiline key shapes before retaining complete leading/tail
 lines within 16,384 JavaScript UTF-16 units, including omission markers.
 Oversized single lines may be omitted. Reporter-generated boundary flags preserve
-safe tails through redaction and are excluded from artifacts. Top-frame and
+safe tails through redaction; expanded labels are re-budgeted. Flags stay out of artifacts. Top-frame and
 600-character summary limits remain unchanged. Integration covers actual Node
 events and diagnostic artifacts; passing files gain no text.
 

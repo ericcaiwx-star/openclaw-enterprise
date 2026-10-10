@@ -191,15 +191,19 @@ function redactDetailText(text, secrets, root, completeLines) {
   const raw = dropCredentialLines(
     stripControl(text.slice(0, failureInputLimit)).replace(privateKeyShape, "[redacted]"),
   );
-  return dropCredentialLines(
+  const complete = completeLines === true;
+  const redacted = dropCredentialLines(
     redactText(
       raw,
-      failureInputLimit,
+      complete ? Infinity : failureInputLimit,
       secrets,
       root,
-      completeLines === true ? false : text.length >= failureInputLimit,
+      complete ? false : text.length >= failureInputLimit,
     ),
   );
+  // Environment labels can grow the safe text. Re-budget complete lines after
+  // redaction too; legacy callers retain their prefix cut and conservative guard.
+  return complete && redacted !== undefined ? captureFailureText(redacted) : redacted;
 }
 
 export function redactFailureDetail(error, secrets, root) {

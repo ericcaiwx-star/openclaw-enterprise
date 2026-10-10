@@ -119,7 +119,7 @@ Labelled causes/siblings share each cap across 32 values/eight levels; cycles/li
 are marked. Long reported test-failure fields retain complete leading lines (up to 4,096 units) and
 tail lines within the remaining budget, including a counted marker. Oversized
 single lines may be omitted. This reporter path normalizes controls and multiline
-key shapes first; private boundary flags never reach artifacts. Existing redaction and
+key shapes first, and re-budgets after redaction; private flags never reach artifacts. Existing redaction and
 credential-line drops apply; unrecognized runtime-minted values can remain,
 so tests must not print secrets. Each record's `reason` distinguishes timeout
 (running tests and output so far, with `omittedLines`) from preparation failure
