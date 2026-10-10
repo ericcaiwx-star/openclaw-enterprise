@@ -8345,7 +8345,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
                 typeof terminated.finishedAt === "string" &&
                 this.validIsoTimestamp(terminated.finishedAt)
                   ? terminated.finishedAt
-                  : new Date().toISOString(),
+                  : (kubernetesTime(terminated.finishedAt) ?? new Date().toISOString()),
             };
           }
         }
