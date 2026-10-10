@@ -396,7 +396,9 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
           : newest,
       null,
     );
-    const deliveredHashes = pageCut ? new Set(lineHashes.slice(0, end)) : undefined;
+    const deliveredHashes = pageCut
+      ? new Set([...baseHashes, ...lineHashes.slice(0, end)])
+      : undefined;
     // Equal hashes across the cut do not identify which occurrences survive a
     // rolling tail. Retain its witness beside resumable timed overlap.
     const ambiguousOccurrences =

@@ -2998,3 +2998,37 @@ test("container shortened timed checkpoints disclose missing undelivered rows", 
     second.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
   );
 });
+
+test("container same-size short replacements disclose missing undelivered rows", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("wire-cut-same-size-short-window");
+  const start = Date.now() - 120_000;
+  fixture.computeDriver.state.lines = Array.from({ length: 80 }, (_, index) => ({
+    time: new Date(start + index * 1000).toISOString(),
+    raw: JSON.stringify({
+      level: "info",
+      subsystem: "gateway",
+      message: `old=${index}; ${"ordinary diagnostic ".repeat(350)}`,
+    }),
+  }));
+  const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=100"));
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  // Rotation retains the same row count but replaces the unread part with newer rows.
+  fixture.computeDriver.state.lines = Array.from({ length: 80 }, (_, index) => ({
+    time: new Date(start + (100 + index) * 1000).toISOString(),
+    raw: JSON.stringify({ level: "info", subsystem: "gateway", message: `new=${index}` }),
+  }));
+  const second = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=100&cursor=${first.data.cursor}`),
+  );
+  assert.equal(second.status, 200);
+  assert.equal(second.data.records.filter(({ type }) => type === "line").length, 80);
+  assert.equal(
+    second.data.records.filter(({ type, reason }) => type === "gap" && reason === "window_exceeded")
+      .length,
+    1,
+  );
+});

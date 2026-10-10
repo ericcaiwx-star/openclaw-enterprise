@@ -476,9 +476,6 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
   }
   if (
     checkpointLost &&
-    (!recoverDelivered ||
-      completeLines.length < checkpoint.seen ||
-      completeLines.some((line) => line.time === null)) &&
     !leading.some((record) => record.type === "gap" && record.reason === "window_exceeded")
   ) {
     leading.push(runtimeLogGap("window_exceeded", observedStream, earliest));

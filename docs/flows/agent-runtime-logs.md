@@ -174,7 +174,7 @@ fresh snapshots. Sandbox pins short windows, untimed rows and overflowing groups
 Full timed groups use counted overlap within its floor; identical cuts also retain
 rollover witnesses. Ordered overlap retains progress; uncertain context resets
 with a gap and replay. Single-time tails retain gaps. Container
-recovery retains shortened/unknown-window gaps without duplicates.
+recovery retains reset gaps without duplicates.
 All-untimed Driver byte cuts retain progress;
 mixed cuts advance through time with an explicit reset that may replay untimed rows.
 Matching checkpoints retain positional proof. Stable windows drain overflowing groups. UID/restarts reset progress; PEM recovery

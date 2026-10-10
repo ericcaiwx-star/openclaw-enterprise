@@ -1567,3 +1567,80 @@ test("sandbox matching witnesses deliver new late rows below the advanced overla
   assert.equal(seen.filter(({ message }) => message.startsWith("group=")).length, 300);
   assert.equal(seen.filter(({ message }) => message === "new late diagnostic").length, 1);
 });
+
+test("sandbox retains witnesses for unread copies of incoming overlap hashes", async () => {
+  const fixture = await sandboxFixture();
+  const start = Date.now() - 1000;
+  const x = {
+    sandboxId: SANDBOX_ID,
+    time: new Date(start).toISOString(),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: "remembered diagnostic X",
+    fields: {},
+  };
+  fixture.gateway.state.lines = [x];
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=42"),
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.data.records.filter(({ type }) => type === "line").length, 1);
+  const ys = Array.from({ length: 40 }, (_, index) => ({
+    ...x,
+    time: new Date(start + 1).toISOString(),
+    message: `Y=${index}; ${'"'.repeat(8000)}`,
+  }));
+  fixture.gateway.state.lines = [x, ...ys, x];
+  const second = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=42&cursor=${first.data.cursor}`),
+  );
+  assert.equal(second.status, 200);
+  assert.equal(second.data.truncated, true);
+  assert.equal(
+    second.data.records.filter(({ type, message }) => type === "line" && message === x.message)
+      .length,
+    0,
+  );
+  // The delivered X leaves the tail while its unread identical late copy survives.
+  // Without a raw witness, the incoming overlap hash consumes that unread copy.
+  fixture.gateway.state.lines.push({
+    ...x,
+    time: new Date(start + 2).toISOString(),
+    message: "new diagnostic Z",
+  });
+  fixture.gateway.state.bufferTotal = fixture.gateway.state.lines.length;
+  const seen = [];
+  const gaps = [];
+  let cursor = second.data.cursor;
+  for (let page = 0; page < 5; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=42&cursor=${cursor}`),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+    seen.push(...response.data.records.filter(({ type }) => type === "line"));
+    gaps.push(...response.data.records.filter(({ type }) => type === "gap"));
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+  }
+  assert.equal(
+    seen.filter(({ message }) => message === x.message).length,
+    1,
+    "the unread identical copy remains visible",
+  );
+  assert.ok(
+    gaps.some(({ reason }) => reason === "window_exceeded"),
+    "lost ordered context must disclose reset and possible replay",
+  );
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=42&cursor=${cursor}`),
+  );
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+});
