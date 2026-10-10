@@ -288,7 +288,7 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
 
 const manualReviewedCodexSeccompProfileSha256 =
   "71a2871a066a696a171049a15db3f065122c153cd11ef451cee3341ddbd9697f";
-const reviewedCodexSeccompProfileFilePattern = /^codex-0\.163\.0-alpha\.1-([a-f0-9]{64})\.json$/;
+const reviewedCodexSeccompProfileFilePattern = /^codex-0\.163\.0-alpha\.2-([a-f0-9]{64})\.json$/;
 
 async function ciPreparedCodexSeccompProfile(ciStatePath) {
   if (ciStatePath === undefined || ciStatePath.length === 0) {

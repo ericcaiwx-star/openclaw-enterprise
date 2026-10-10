@@ -93,7 +93,8 @@ Do not substitute an arbitrary profile or `Unconfined` policy.
 The pinned runtime and automatic preparation use Codex `0.163.0-alpha.2`. Its reviewed
 default sandbox uses the same syscall rules; the optional inherited PID namespace
 mode is outside this profile's scope. Profile generation does not upgrade the
-deployed image.
+deployed image. A profile generated for `0.163.0-alpha.1` has the same content
+and digest, so it stays valid without regeneration or renaming.
 
 ## Install on eligible nodes
 
