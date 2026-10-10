@@ -6,8 +6,8 @@ namespace ownership for the [Kubernetes Compute Driver](../kubernetes-compute.md
 ## Networking
 
 Configure the cluster DNS namespace and Pod labels and the gateway port.
-Every peer namespace must be a Kubernetes namespace name, a DNS label of at most
-63 characters; startup refuses others.
+Every peer namespace must be a DNS label of at most 63 characters; startup
+refuses others.
 Set `network.gatewayTrustedProxyCidrs` to nonempty, valid CIDRs for the proxy
 socket sources. This trusted Installation setting has no production default and
 rejects all-source ranges, including IPv4-mapped equivalents. Without private
@@ -51,13 +51,13 @@ from `gatewayRouting`: the Envoy namespace and the Gateway's exact owning name
 and namespace labels. Omit `network.gatewayClients`; startup rejects explicit
 clients in routed mode. The native gateway trusts
 the proxy's source range; NetworkPolicy distinguishes the authenticated proxy
-from other Pods in that range. Do not retain direct API or tenant-workload
-access to the native gateway port for this mode.
+from other Pods in that range. Remove direct API or tenant-workload access to
+the native gateway port in this mode.
 
 ### Gateway authentication
 
-Kubernetes Compute supports only trusted-proxy authentication, for every Agent
-and routing mode. It renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
+Kubernetes Compute supports only trusted-proxy authentication, in every
+routing mode. It renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
 `gateway.auth.mode: trusted-proxy`, `userHeader: x-occ-identity`, the allowed
 identity `occ-workspace-files` with `operator.admin`, and
 `gateway.allowRealIpFallback: true`. Configuration and Console starters
@@ -74,16 +74,17 @@ required-header and device auto-approval settings retain their separate purposes
 Compute renders `gateway.bind: lan` when it is omitted or `auto`, as native
 container detection misses containerd on cgroup v2. Deployment/provisioning
 refuse any other bind, `custom` unless `customBindHost` is `0.0.0.0`, and any
-`gateway.tailscale.mode` but `off`.
+`gateway.tailscale.mode` but `off`. Accepted `lan` and `custom` binds listen on
+IPv4 `0.0.0.0`, so Gateways need an IPv4 Pod address.
 
 An optional [loopback password](storage-and-credentials.md#runtime-credentials)
 supports operator verification.
 Kubernetes private status-port `GET /readyz` returns empty `200`/`503`, retaining
 readiness gates; Gateway probes HTTP. `gateway.tls.enabled: true` is refused
-before revision creation; omit/false is valid. Envoy terminates TLS. Docker/SSH
+before revision creation. Envoy terminates TLS. Docker/SSH
 retain managed-password defaults and explicit trusted-proxy HTTP.
 
-Operators must verify that configured CIDRs contain the proxy's
+Verify that configured CIDRs contain the proxy's
 source addresses and exclude untrusted sources. CIDRs do not authenticate a
 proxy: retain the exact Envoy NetworkPolicy peer, TLS verification, service-key
 authentication, and identity/header sanitization.
@@ -116,14 +117,13 @@ sets stock Codex `allow_local_binding = true` and `mode = "full"`. An explicit
 deny matching the broker hostname fails closed. The repository-bound filesystem
 profile additionally grants read-only access to the repository client at
 `/opt/oce/repository-credentials` and admitted session material at
-`/run/oce/repository-credentials`. Unbound Agents keep their existing policy
-without those changes.
+`/run/oce/repository-credentials`. Unbound Agents keep their existing policy.
 
 These settings apply to the Agent's whole tool proxy: local binding is allowed,
 Codex's additional private-address guard is disabled, and every HTTP method is
 allowed at otherwise allowed destinations. Domain rules match hostnames, not
 ports: an allowed host is reachable on any port permitted by the lower network
-layers. This is not a broker-only port or method exception. Managed requirements
+layers. Managed requirements
 that forbid local binding or require limited mode reject the conflicting
 configuration. Domain allowlisting, explicit denies, Kubernetes NetworkPolicy,
 TLS verification, and broker session/repository authorization remain separate
@@ -157,7 +157,7 @@ same profile. Missing, empty or unknown profiles receive no ordinary grant;
 default-deny policies still select every Pod in each runtime target.
 
 Compute assigns this profile to ordinary embedded and dedicated workload
-templates without changing their routes or ports. Deployment readiness requires
+templates, keeping their routes and ports. Deployment readiness requires
 the expected template profile.
 
 Harness Pods provisioned by a SandboxDriver, such as OpenShell, carry
@@ -196,7 +196,7 @@ mutation and NetworkPolicy writes; this Driver installs no admission controls
 for them.
 
 Kubernetes combines grants from every matching policy, so stale or additional
-allow policies can bypass this restriction. Inspect installed policies and
+allow policies can bypass this. Inspect installed policies and
 [check allowed and denied connections](../../../guides/operate/network-isolation.md)
 with NetworkPolicy enforcement.
 
@@ -338,7 +338,7 @@ existing-namespace selection with `409`.
 Workload Pods use the restricted
 [Pod and container hardening](../../security.md#pod-and-container-hardening),
 including the optional `runtime.codexSeccompProfile`, which applies only to the
-dedicated Codex Agent container. Agent identity is provided through an
+dedicated Codex Agent container. Agents get identity from an
 audience-scoped, short-lived projected ServiceAccount token. Workloads never
 receive controller credentials.
 
