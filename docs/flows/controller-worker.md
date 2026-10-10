@@ -301,8 +301,8 @@ Before publishing a permanent refusal of an inactive candidate that is exclusive
 or prepared while its Agent has no active revision (not a held runtime failure,
 the deadline or exhausted retries), `ControllerWorker.stopRefusedCandidate`
 stops it under the claim heartbeat, so a rejected deployment never serves. A stop failure publishes nothing: the work defers as
-`REFUSED_CANDIDATE_STOP_PENDING` past the attempt budget, deadline and lost claims
-(restarts) until the stop succeeds, after the readiness cadence doubled per failed stop up to 5 minutes
+`REFUSED_CANDIDATE_STOP_PENDING` past the attempt budget, deadline and, once
+recorded, lost claims (restarts) until the stop succeeds, after the readiness cadence doubled per failed stop up to 5 minutes
 but at least four times the stop's duration (`refusedStopRecheckMs`, in memory),
 so other Agents' work runs. Each deferral records evidence with the refusal
 (`repeatEvidence`) for deployment status and `worker.completed`'s `refusal`. A pass

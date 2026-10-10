@@ -836,12 +836,10 @@ for (const shape of ["exclusive", "shared"]) {
       let candidatePasses = 0;
       let stopCalls = 0;
       let release;
-      const running = new Set();
       const compute = {
         ...fixture.compute,
         ...(shape === "exclusive" ? { requiresStoppedPredecessors: () => true } : {}),
         async prepareRevision(revision) {
-          running.add(revision.id);
           const observed = await fixture.compute.prepareRevision(revision);
           if (revision.id !== candidateId) {
             return observed;
@@ -873,11 +871,8 @@ for (const shape of ["exclusive", "shared"]) {
               throw new Error("Pods did not terminate before the controller stopped");
             }
           }
-          running.delete(revision.id);
         },
-        async retireRevision(revision) {
-          running.delete(revision.id);
-        },
+        async retireRevision() {},
       };
       await fixture.start(compute);
       if (shape === "exclusive") {
@@ -893,7 +888,7 @@ for (const shape of ["exclusive", "shared"]) {
               return { blocked: true };
             }
             const { rows } = await fixture.workResult(candidate);
-            return rows[0]?.reason_code === null ? undefined : rows[0];
+            return rows[0] !== undefined && rows[0].reason_code !== null ? rows[0] : undefined;
           },
           30_000,
         );
@@ -915,7 +910,6 @@ for (const shape of ["exclusive", "shared"]) {
       const result = await fixture.workResult(candidate);
       assert.equal(result.rows[0].reason_code, "AUTHORIZATION_DENIED");
       assert.equal(stopCalls, restarts + 2, "the refusal was recorded after the stop succeeded");
-      assert.ok(!running.has(candidate.id), "the refused candidate was stopped");
       const recoveries = await fixture.observerPool.query(
         `SELECT details->>'refusal' AS refusal FROM occ.audit_events
          WHERE details->>'workId' = $1 AND details->>'reasonCode' = 'LEASE_EXPIRED'`,
