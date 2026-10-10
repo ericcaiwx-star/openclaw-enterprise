@@ -14694,7 +14694,7 @@ enabled = false
 `;
 
 test("an upgraded controller keeps an active Codex revision's earlier plugin-runtime ConfigMap", async () => {
-  for (const policy of ["on-request", "never", undefined]) {
+  for (const policy of ["on-request", "on-failure", "never", undefined]) {
     const { driver, revision, namespace, objects, records, state, context } =
       workspaceSetupFixture(false);
     revision.configuration = structuredClone(revision.configuration);
@@ -14712,7 +14712,15 @@ test("an upgraded controller keeps an active Codex revision's earlier plugin-run
       current.data["config.toml"].startsWith("approval_policy = "),
       policy !== undefined,
     );
+    if (policy === "on-failure") {
+      // The Gateway runs on-failure as on-request, so native startup gets on-request.
+      assert.ok(current.data["config.toml"].startsWith('approval_policy = "on-request"\n'));
+    }
     const earlier = [CODEX_CONFIG_BEFORE_PLUGIN_DEFAULTS, CODEX_CONFIG_BEFORE_APPROVAL_POLICY];
+    if (policy === "on-failure") {
+      // #1995 rendered the configured value as written.
+      earlier.push(`approval_policy = "on-failure"\n\n${CODEX_CONFIG_BEFORE_APPROVAL_POLICY}`);
+    }
     // Kubernetes refuses edits to an immutable ConfigMap, so a revision prepared before
     // the upgrade keeps the file its Pods mounted. Re-preparing the active revision must
     // finish instead of refusing it until the Agent is deployed again.

@@ -3505,6 +3505,103 @@ test("Agent plugin reviewer selection preserves omission and rejects unsupported
   assert.deepEqual(replaced.data.plugins, inherited);
 });
 
+test("Codex approval policy: saves refuse untrusted and deployment requires on-request for an automatic reviewer", async () => {
+  const configurationDriver = createTestConfigurationDriver();
+  const controller = await configuredController({ configurationDriver });
+  await bootstrap(controller);
+  const namespace = await createNamespace(controller, "codex-approval-policy-api");
+  const setting = "plugins.entries.codex.config.appServer.approvalPolicy";
+  const values = (approvalPolicy) => {
+    const configuration = createHarnessConfiguration("codex", "gpt-6-astra");
+    const appServer = configuration.plugins.entries.codex.config.appServer;
+    delete appServer.approvalPolicy;
+    if (approvalPolicy !== undefined) {
+      appServer.approvalPolicy = approvalPolicy;
+    }
+    return configuration;
+  };
+  const collection = `/namespaces/${namespace.id}/configurations`;
+  // The pinned Gateway refuses untrusted at configuration load, with a doctor hint that cannot
+  // edit Compute's read-only configuration (finding 987). Saves refuse it instead.
+  const untrusted = `Configuration setting ${setting} "untrusted" is retired by the OpenClaw runtime; use "on-request".`;
+  const refusedCreate = await controller.request("POST", collection, {
+    body: { kind: "agent", values: values("untrusted") },
+  });
+  assert.equal(refusedCreate.status, 400, JSON.stringify(refusedCreate.body));
+  assert.equal(refusedCreate.body.error.code, "INVALID_REQUEST");
+  assert.equal(refusedCreate.body.error.message, untrusted);
+  const configuration = await createConfiguration(controller, namespace.id, values(undefined));
+  const item = `${collection}/${configuration.id}`;
+  const refusedUpdate = await controller.request("PATCH", item, {
+    body: { values: values("untrusted") },
+  });
+  assert.equal(refusedUpdate.status, 400, JSON.stringify(refusedUpdate.body));
+  assert.equal(refusedUpdate.body.error.message, untrusted);
+  assert.deepEqual((await controller.request("GET", item)).data.values, values(undefined));
+
+  const pluginDriver = new CodexPluginDriver();
+  controller.fixture.controller.registerDriver(pluginDriver);
+  controller.fixture.controller.selectDriver("plugin", pluginDriver.id);
+  const automatic = { [linearPluginId]: { enabled: true, toolDefaults: { reviewer: "auto" } } };
+  const created = await controller.request("POST", `/namespaces/${namespace.id}/agents`, {
+    body: {
+      name: "approval-policy-agent",
+      executionMode: "dedicated",
+      configurationId: configuration.id,
+      plugins: automatic,
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const agentPath = `/namespaces/${namespace.id}/agents/${created.data.id}`;
+  await controller.fixture.controller.handleNamespaceLifecycle(
+    controller.fixture.principal.id,
+    namespace.id,
+    "ready",
+  );
+  await bindHarnessKey(controller.fixture, namespace.id, created.data);
+  const store = async (approvalPolicy) => {
+    const stored = configurationDriver.stored({ namespaceId: namespace.id, id: configuration.id });
+    await configurationDriver.update({ ...stored, values: values(approvalPolicy) });
+  };
+  const deploy = () => controller.request("POST", `${agentPath}/deploy`);
+  const reviewer = (fix) =>
+    `An automatic plugin reviewer requires Configuration setting ${setting} "on-request"; ${fix} or choose the human reviewer.`;
+  // Native startup checks the automatic reviewer against the policy Compute renders. When the
+  // policy is omitted, the Gateway picks its own session policy, which can be never, so the
+  // check would pass on a policy the sessions do not run (finding 988).
+  for (const [approvalPolicy, message] of [
+    [undefined, reviewer("set it explicitly")],
+    ["never", reviewer("change it")],
+    // A Configuration saved before the untrusted rule is refused with the save's text.
+    ["untrusted", untrusted],
+  ]) {
+    await store(approvalPolicy);
+    const refused = await deploy();
+    assert.equal(refused.status, 400, `${approvalPolicy}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.error.code, "INVALID_REQUEST");
+    assert.equal(refused.body.error.message, message);
+  }
+  // The Gateway runs on-failure as on-request; Compute renders on-request for both.
+  for (const approvalPolicy of ["on-request", "on-failure"]) {
+    await store(approvalPolicy);
+    const deployed = await deploy();
+    assert.equal(deployed.status, 202, `${approvalPolicy}: ${JSON.stringify(deployed.body)}`);
+  }
+  // Without an automatic reviewer the native default stays, and nothing is required.
+  await store(undefined);
+  for (const plugins of [
+    { [linearPluginId]: { enabled: true, toolDefaults: { reviewer: "human" } } },
+    { [linearPluginId]: { enabled: false, toolDefaults: { reviewer: "auto" } } },
+  ]) {
+    const updated = await controller.request("PATCH", agentPath, {
+      body: { configurationId: configuration.id, plugins },
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    const deployed = await deploy();
+    assert.equal(deployed.status, 202, JSON.stringify(deployed.body));
+  }
+});
+
 test("Codex Agents refuse plugin and tool approver overrides and keep Agent-wide approvers", async () => {
   const controller = await configuredController();
   await bootstrap(controller);
@@ -5702,6 +5799,47 @@ test("Agent provisioning API validates inline configuration with existing Secret
     invalidPolicy.body.error.message,
     "This Plugin Driver does not support tools[id].reviewer. Use toolDefaults.reviewer when supported, or omit the reviewer.",
   );
+  assert.deepEqual(
+    await fixture.platformState.read((view) => view.agents.listAgents(namespace.data.id)),
+    [],
+  );
+  // The Codex approval policy rules that Configuration saves and deployment apply (findings
+  // 987, 988) also refuse a provisioning request before anything durable is written.
+  const setting = "plugins.entries.codex.config.appServer.approvalPolicy";
+  const automatic = { [linearPluginId]: { enabled: true, toolDefaults: { reviewer: "auto" } } };
+  for (const [approvalPolicy, plugins, message] of [
+    [
+      "untrusted",
+      undefined,
+      `Configuration setting ${setting} "untrusted" is retired by the OpenClaw runtime; use "on-request".`,
+    ],
+    [
+      undefined,
+      automatic,
+      `An automatic plugin reviewer requires Configuration setting ${setting} "on-request"; set it explicitly or choose the human reviewer.`,
+    ],
+  ]) {
+    const body = provisioningRequestBody(namespace.data.id, secrets, {
+      ...(plugins === undefined ? {} : { plugins }),
+    });
+    body.configuration.values = {
+      ...body.configuration.values,
+      plugins: {
+        entries: {
+          codex: { config: { appServer: approvalPolicy === undefined ? {} : { approvalPolicy } } },
+        },
+      },
+    };
+    const refused = await injectedRequest(
+      fixture.app,
+      "POST",
+      `/namespaces/${namespace.data.id}/agents/provision`,
+      { body },
+    );
+    assert.equal(refused.status, 400, JSON.stringify(refused.body));
+    assert.equal(refused.body.error.code, "INVALID_REQUEST");
+    assert.equal(refused.body.error.message, message);
+  }
   assert.deepEqual(
     await fixture.platformState.read((view) => view.agents.listAgents(namespace.data.id)),
     [],

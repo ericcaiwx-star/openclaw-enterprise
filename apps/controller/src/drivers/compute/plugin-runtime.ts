@@ -179,15 +179,26 @@ function codexToml(
       ? CODEX_NO_PLUGIN_FEATURES_TOML
       : CODEX_SELECTED_PLUGIN_FEATURES_TOML
   }${pluginDefaults ? CODEX_PLUGIN_DEFAULTS_TOML : ""}`;
-  // Native startup reads this before the gateway can create a session. Preserve
-  // the selected policy, including incompatible choices that readiness rejects.
   return approvalPolicy === undefined
     ? plugins
     : `approval_policy = ${JSON.stringify(approvalPolicy)}\n\n${plugins}`;
 }
 
+/**
+ * The session policy the pinned Gateway runs for a configured `appServer.approvalPolicy`.
+ * Native startup reads it before the Gateway can create a session, so its reviewer checks see
+ * the same policy. The Gateway runs `on-failure` as `on-request`; other choices, including
+ * incompatible ones that readiness rejects, are kept. Deployment refuses `untrusted`, which the
+ * Gateway refuses at configuration load, and an omitted policy with an automatic reviewer.
+ */
+function nativeCodexApprovalPolicy(approvalPolicy: string | undefined): string | undefined {
+  return approvalPolicy === "on-failure" ? "on-request" : approvalPolicy;
+}
+
 function codexConfigurationToml(runtime: PluginRuntimeSpec): string | undefined {
-  return runtime.kind === "codex" ? codexToml(runtime, runtime.approvalPolicy, true) : undefined;
+  return runtime.kind === "codex"
+    ? codexToml(runtime, nativeCodexApprovalPolicy(runtime.approvalPolicy), true)
+    : undefined;
 }
 
 function configMapData(
@@ -210,10 +221,11 @@ export function pluginRuntimeConfigMapData(
  * The complete data earlier controllers rendered for this runtime, when it differs from
  * the current rendering. A revision's plugin-runtime ConfigMap is immutable, so one
  * prepared before a controller upgrade keeps the files its Pods mounted until the Agent
- * is deployed again. Only Codex `config.toml` changed, both on 2026-10-09: #508 added
- * the `[plugins._default]` table and #1995 the native `approval_policy`.
- * TODO: remove once no Codex revision prepared before #1995 can still be active; deploying
- * the Agent again replaces it.
+ * is deployed again. Only Codex `config.toml` changed: on 2026-10-09 #508 added the
+ * `[plugins._default]` table and #1995 the native `approval_policy`, and on 2026-10-10
+ * `on-failure` became `on-request` there.
+ * TODO: remove once no Codex revision prepared before that last change can still be active;
+ * deploying the Agent again replaces it.
  */
 export function pluginRuntimeEarlierConfigMapData(
   runtime: PluginRuntimeSpec,
@@ -221,8 +233,12 @@ export function pluginRuntimeEarlierConfigMapData(
   if (runtime.kind !== "codex") {
     return [];
   }
-  const current = codexToml(runtime, runtime.approvalPolicy, true);
-  return [codexToml(runtime, undefined, true), codexToml(runtime, undefined, false)]
+  const current = codexConfigurationToml(runtime);
+  return [
+    codexToml(runtime, runtime.approvalPolicy, true),
+    codexToml(runtime, undefined, true),
+    codexToml(runtime, undefined, false),
+  ]
     .filter((config) => config !== current)
     .map((config) => configMapData(runtime, config));
 }

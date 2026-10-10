@@ -184,6 +184,10 @@ import {
   SecretStorageDriverError,
   SecretValueError,
 } from "./errors.ts";
+import {
+  validateCodexApprovalPolicySetting,
+  validateCodexAutomaticReviewerPolicy,
+} from "./codex-approval-policy.ts";
 import { validateModelProviderSettings } from "./model-provider-settings.ts";
 import {
   readRuntimeLogPage,
@@ -2309,6 +2313,8 @@ export class OpenClawController {
         harnessAuth,
       );
       validateModelProviderSettings(configurationInput.values);
+      validateCodexApprovalPolicySetting(configurationInput.values);
+      validateCodexAutomaticReviewerPolicy(configurationInput.values, plugins);
       await configurationDriver.validate({
         id: "cfg_00000000-0000-4000-8000-000000000000",
         namespaceId: namespace.id,
@@ -4607,6 +4613,7 @@ export class OpenClawController {
         createdAt: this.timestamp(),
       });
       validateModelProviderSettings(values);
+      validateCodexApprovalPolicySetting(values);
       requireDeployableRoster(values);
       await driver.validate(configuration);
       const metadata = await state.configurations.createConfiguration({
@@ -4949,6 +4956,7 @@ export class OpenClawController {
         createdAt: advanced.createdAt,
       });
       validateModelProviderSettings(values);
+      validateCodexApprovalPolicySetting(values);
       // A stored Configuration that predates this rule still reads, and deployment refuses it as
       // before; only a replacement that keeps the refused roster fails.
       requireDeployableRoster(values);
@@ -6400,6 +6408,9 @@ export class OpenClawController {
           : admitLoggingConfiguration(sandboxConfiguration, this.loggingLevel),
       );
       await configurationDriver.validate({ ...configuration, values: admittedConfiguration });
+      // A stored Configuration that predates this rule is refused here, before preparation
+      // renders a configuration the Gateway refuses at load.
+      validateCodexApprovalPolicySetting(admittedConfiguration);
       if (resolveConfiguredHarnessId(admittedConfiguration) !== configuredHarnessId) {
         throw new ScopeViolationError(
           "A Sandbox Driver cannot change the selected Harness runtime.",
@@ -6457,6 +6468,9 @@ export class OpenClawController {
                 plugins: lockedAgent.plugins,
               } satisfies PluginRevisionState);
             })();
+      // Admission for deployment: the Agent's plugins and its Configuration are saved
+      // separately, so this is the first point that sees both.
+      validateCodexAutomaticReviewerPolicy(admittedConfiguration, pluginState?.plugins);
       const previous = await state.revisions.listRevisions(namespace.id, lockedAgent.id);
       const createdAt = this.timestamp();
       const repositoryCredentials = this.admitRepositoryCredentials(
