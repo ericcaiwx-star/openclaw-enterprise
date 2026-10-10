@@ -373,12 +373,15 @@ if (command === "docker" || command === "podman") {
     const imports = (state["imports:" + node] ?? 0) + 1;
     state["imports:" + node] = imports;
     const socket = "/run/k3s/containerd/containerd.sock: connect: ";
-    const refusal = node.endsWith("-agent-0") && {
-      "containerd-restart": imports === 1 && socket + "connection refused",
-      "containerd-socket-missing": imports === 1 && socket + "no such file or directory",
-      "containerd-refuses-imports": socket + "connection refused",
-      "other-socket-refused": imports === 1 && "/run/other.sock: connect: connection refused",
-    }[scenario];
+    let refusal;
+    if (node.endsWith("-agent-0")) {
+      if (scenario === "containerd-refuses-imports") refusal = socket + "connection refused";
+      if (imports === 1) {
+        if (scenario === "containerd-restart") refusal = socket + "connection refused";
+        if (scenario === "containerd-socket-missing") refusal = socket + "no such file or directory";
+        if (scenario === "other-socket-refused") refusal = "/run/other.sock: connect: connection refused";
+      }
+    }
     if (refusal) {
       commitState();
       process.stderr.write('ctr: connection error: desc = "transport: Error while dialing: dial unix ' +

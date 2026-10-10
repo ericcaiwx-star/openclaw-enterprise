@@ -534,20 +534,24 @@ test("fixture preparation fails on a hung containerd probe without polling again
 });
 
 // Only the node's own containerd socket (refused or missing) gets the one retry.
-for (const { scenario, imported, error } of [
-  { scenario: "containerd-restart", imported: true },
-  { scenario: "containerd-socket-missing", imported: true },
+for (const { scenario, retried, imported, error } of [
+  { scenario: "containerd-restart", retried: true, imported: true },
+  { scenario: "containerd-socket-missing", retried: true, imported: true },
   {
     scenario: "containerd-refuses-imports",
+    retried: true,
     error: /containerd\.sock: connect: connection refused/,
   },
-  { scenario: "other-socket-refused", error: /\/run\/other\.sock: connect: connection refused/ },
+  {
+    scenario: "other-socket-refused",
+    retried: false,
+    error: /\/run\/other\.sock: connect: connection refused/,
+  },
 ]) {
   test(`fixture preparation retries an import once only for the node socket: ${scenario}`, async (t) => {
     const commands = await fixtureImageCommands(t, scenario);
     const result = commands.prepare();
     assert.equal(result.status, imported ? 0 : 1, result.stderr);
-    const retried = scenario !== "other-socket-refused";
     assert.equal(
       /containerd refused the image import; waiting for it/.test(result.stderr),
       retried,

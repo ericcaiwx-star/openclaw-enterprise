@@ -408,7 +408,8 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
       const active = await fixture.activePointer(owner);
       assert.equal(active.rows[0].active_revision_id, first.id);
       if (failure === "unsupported") {
-        // The refused stop counts as a sweep: the next deployment does not repeat it.
+        // The refused stop counts as a sweep: the next deployment does not repeat it within the
+        // lease (30 s here). Only this refusal leaves the Agent deployable; revoked keeps its deny.
         const recovery = await fixture.revision(owner, 3);
         await fixture.work(recovery, "succeeded");
         assert.equal(driver.count(replacement), 1, "the next sweep skips the stopped candidate");
@@ -526,8 +527,10 @@ revisionTest(
       "the last attempt time moves while the stop is retried",
     );
     // A fast failing stop waits on the readiness cadence (0.5 s here), doubled per failure.
-    await waitFor("four failed refused stops", async () =>
-      failedStops.length >= 4 ? true : undefined,
+    await waitFor(
+      "four failed refused stops",
+      async () => (failedStops.length >= 4 ? true : undefined),
+      20_000,
     );
     const gaps = failedStops.slice(1, 4).map((at, index) => at - failedStops[index]);
     assert.ok(
@@ -674,12 +677,13 @@ revisionTest(
         stopping ? undefined : Promise.reject(new Error("Kubernetes API temporarily unavailable")),
     });
     // After three failed stops the candidate's next pass is at least 2 s away, so the newer
-    // revision's first pass sweeps it first.
+    // revision's first pass usually sweeps it first. Stops succeed only once the newer revision
+    // exists: an earlier candidate pass would publish its refusal instead of superseding.
     await waitFor("three failed refused stops", async () =>
       refusedStopWaits(events, replacement).length >= 3 ? true : undefined,
     );
-    stopping = true;
     const newer = await fixture.revision(owner, 3);
+    stopping = true;
     await fixture.work(newer, "succeeded");
     assert.equal(driver.count(replacement), 1, "the newer sweep stopped the candidate");
     await fixture.work(replacement, "succeeded", 30_000);
