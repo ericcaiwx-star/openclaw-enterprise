@@ -198,7 +198,8 @@ deadline fails the deployment with its own code.
 `REFUSED_CANDIDATE_STOP_PENDING` means the worker refused the candidate but could
 not yet stop its workload, for example Pods stuck terminating. The message names
 the refusal, such as `AUTHORIZATION_DENIED`, that `error` carries once the stop
-succeeds, unless a newer revision supersedes the deployment. The wait has no
+succeeds, unless a newer revision supersedes the deployment; a superseded one
+retries the stop of an earlier refusal even if that refusal has since lifted. The wait has no
 deadline or attempt limit, since the refused version could still serve. Each
 failed stop doubles the recheck, from the cadence above to 5 minutes, and waits
 at least four times the stop's duration, so other Agents' deployments keep

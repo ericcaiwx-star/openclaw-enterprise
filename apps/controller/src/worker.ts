@@ -4263,6 +4263,9 @@ export class ControllerWorker {
         });
       }
     }, this.queueOptions);
+    if (resolved.refusedCandidate !== undefined) {
+      this.recordRefusedStopFailure(claim);
+    }
     if (stoppedCandidate !== undefined) {
       await this.closeRevisionCredentials(claim, stoppedCandidate);
       await this.withClaimHeartbeat(claim, () => this.compute.stopRevision(stoppedCandidate!));
@@ -4409,6 +4412,18 @@ export class ControllerWorker {
    * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the failed stop took.
    */
   private refusedStopRecheckMs(claim: ClaimedWork, ageMs: number, stopMs: number): number {
+    const failures = (this.refusedStopFailures.get(claim.idempotencyKey) ?? 0) + 1;
+    return Math.max(
+      Math.min(
+        REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS,
+        revisionReadinessRecheckMs(ageMs) * 2 ** Math.min(failures - 1, 20),
+      ),
+      Math.ceil(Math.max(0, stopMs) * REFUSED_CANDIDATE_STOP_DURATION_FACTOR),
+    );
+  }
+
+  /** Counts a failed refused-candidate stop once its deferral committed. */
+  private recordRefusedStopFailure(claim: ClaimedWork): void {
     const key = claim.idempotencyKey;
     const failures = (this.refusedStopFailures.get(key) ?? 0) + 1;
     this.refusedStopFailures.delete(key);
@@ -4420,13 +4435,6 @@ export class ControllerWorker {
         this.refusedStopFailures.delete(oldest);
       }
     }
-    return Math.max(
-      Math.min(
-        REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS,
-        revisionReadinessRecheckMs(ageMs) * 2 ** Math.min(failures - 1, 20),
-      ),
-      Math.ceil(Math.max(0, stopMs) * REFUSED_CANDIDATE_STOP_DURATION_FACTOR),
-    );
   }
 
   private async completeStoppedRevisionWork(

@@ -572,7 +572,7 @@ revisionTest(
 // sweep, which gives up at its own deadline. The superseded pass now finishes the stop first.
 test(
   "a refused candidate superseded while its stop fails is stopped before it completes",
-  { ...requiresPostgres, timeout: 60_000 },
+  { ...requiresPostgres, timeout: 120_000 },
   async (context) => {
     // The newer revision's own sweep fails on the same stop and retries until it succeeds.
     const fixture = await setup(context, { maxAttempts: 20 });
@@ -623,7 +623,8 @@ test(
     const result = await fixture.workResult(replacement);
     assert.equal(result.rows[0].reason_code, "REVISION_SUPERSEDED");
     assert.ok(!driver.running.has(replacement.id), "the refused candidate was stopped");
-    await fixture.work(newer, "succeeded", 30_000);
+    // Its sweep retried on the queue's growing backoff while the stop failed.
+    await fixture.work(newer, "succeeded", 75_000);
   },
 );
 
