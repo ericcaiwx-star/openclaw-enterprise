@@ -8,7 +8,10 @@ import {
   createOpenShellBackend,
 } from "../../apps/controller/src/backends/openshell.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
-import { createKubernetesComputeDriver } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
+import {
+  createKubernetesComputeDriver,
+  KubernetesComputeDriver,
+} from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { OpenShellCredentialRefreshDriver } from "../../apps/controller/src/drivers/credential-refresh/openshell.ts";
 import { RUNTIME_WRAPPER_COMMAND } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../../apps/controller/src/drivers/compute/node-program.ts";
@@ -1361,6 +1364,35 @@ test("OpenShell provisions dedicated Codex with bearer passthrough and provider 
       },
     ],
   });
+
+  // Each turn the Gateway writes a native hook credential through Codex into the directory
+  // Compute renders, which the Harness entrypoint creates under its HOME. Hook commands
+  // then call the Gateway route on the host and port the node rule above admits.
+  const computeOptions = conformanceKubernetesOptions({
+    gatewayTrustedProxyCidrs: ["127.0.0.1/32"],
+    runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
+  });
+  // Routing derives the Gateway client peer from the Envoy namespace.
+  delete computeOptions.network.gatewayClients;
+  const compute = new KubernetesComputeDriver(
+    {
+      ...computeOptions,
+      gatewayRouting: {
+        hostname: "gateway.example.test",
+        gatewayName: "oce-agent-gateways",
+        gatewayNamespace: "openclaw-system",
+        envoyNamespace: "envoy-gateway-system",
+      },
+    },
+    { sandboxDriver: driver },
+  );
+  const relay = compute.gatewayNativeHookRelayConfiguration(revision, {}).plugins.entries.codex
+    .config.appServer.nativeHookRelay;
+  assert.equal(relay.credentialDirectory, `${requests[0].spec.environment.HOME}/.oce-native-hooks`);
+  const callback = new URL(relay.url);
+  assert.equal(callback.protocol, "https:");
+  assert.equal(callback.hostname, "gateway.example.test");
+  assert.equal(callback.port, "");
 
   await driver.cleanup({ ...context, revision });
   assert.equal(gatewayClient.providers.has(runtimeProvider), false);

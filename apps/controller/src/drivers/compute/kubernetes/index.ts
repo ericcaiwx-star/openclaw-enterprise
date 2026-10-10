@@ -10273,7 +10273,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     // the Harness entrypoint creates this directory under its own HOME.
     const harnessHome = this.sandboxDriverForRevision(revision)?.harnessHome ?? HARNESS_HOME;
     if (!posix.isAbsolute(harnessHome) || posix.normalize(harnessHome) !== harnessHome) {
-      throw new ConfigurationFailure("SandboxDriver Harness HOME must be a normalized absolute path.");
+      throw new ConfigurationFailure(
+        "SandboxDriver Harness HOME must be a normalized absolute path.",
+      );
     }
     appServer.nativeHookRelay = {
       url: `${endpoint.replace(/^wss:/, "https:")}/node/__openclaw__/native-hook`,
