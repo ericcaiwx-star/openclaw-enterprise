@@ -106,7 +106,7 @@ most 32 checks. Kubernetes reports held startup failures and probes Slack
 configuration, authentication, and connectivity without sending. Missing Pods
 yield `unknown`; unavailable evidence yields `503`. The call changes no stored
 state and proves no model response. On OpenShell the `agent` check is always
-`unknown`; use deployment status and the [Sandbox log](../guides/topics/agent-logs.md#sandbox-source). See the [diagnostics flow](../flows/agent-deployment-diagnostics.md).
+`unknown`; use deployment status and [Harness logs](../guides/topics/agent-troubleshoot.md#read-openshell-sandbox-and-supervisor-logs). See the [diagnostics flow](../flows/agent-deployment-diagnostics.md).
 
 ## Backend association
 
@@ -372,7 +372,8 @@ The public API has no revision mutation/deletion or explicit rollback endpoint.
 Controller API authentication for Agent service principals remains unavailable.
 The optional
 [OpenShell SandboxDriver](drivers/openshell-sandbox.md) requires bundled
-Kubernetes Compute and dedicated Codex; other combinations are rejected. Stock OpenShell lacks some required workload credentials; check its
+Kubernetes Compute and dedicated Codex; other combinations are rejected.
+Stock OpenShell lacks some required workload credentials; check its
 compatibility limits first.
 
 ## Failure semantics

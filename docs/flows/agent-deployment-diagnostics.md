@@ -86,10 +86,12 @@ startup step, with the failure code; diagnostics do not rerun that step. A
 failed or invalid status read adds nothing.
 
 An [OpenShell](../reference/drivers/openshell-sandbox.md) Harness listens inside
-its Sandbox's network namespace, so Pod-proxy reads of its private port fail
-(`502`). Its `agent` check is always `unknown` with code `UNAVAILABLE`, whether
-the Harness is healthy or holding a startup failure, and no held-failure check
-appears for it. Gateway checks are unaffected.
+its Sandbox's own network namespace, not the Pod's, so the Kubernetes API
+answers Pod-proxy reads of its private port with `503`, which the Driver treats
+as not serving. Its `agent` `runtime-status` check is always `unknown` with code
+`UNAVAILABLE`, whether the Harness is healthy or holding a startup failure, and
+no held-failure check appears for it. Gateway checks, including a held Gateway
+failure, are unaffected.
 
 ### 3. Return validated evidence
 
@@ -111,9 +113,11 @@ status, startup evidence, plugin warnings, and Agent state unchanged.
 - A `failed` check named after a startup step, such as `peer-bridge-record`,
   means the runtime is holding that failure. Its Logs tab shows the remedy.
 - On an OpenShell Harness, the `agent` check says nothing about its health.
-  Deployment status names a held failure's code, such as
-  `RUNTIME_MODEL_PROBE_FAILED`, and the
-  [Sandbox log](../guides/topics/agent-logs.md#sandbox-source) shows why.
+  A failed deployment's status names the held failure's code and cause, such as
+  `RUNTIME_MODEL_PROBE_FAILED`. The
+  [Sandbox source](../guides/topics/agent-logs.md#sandbox-source) shows policy
+  decisions; an operator can read the
+  [Harness output](../guides/topics/agent-troubleshoot.md#read-openshell-sandbox-and-supervisor-logs).
 - The focused API test covers exact permissions and sanitized Driver failures.
   The Kubernetes conformance test covers Pod proxy placement, revision and Pod
   identity, and missing-Pod behavior. These tests do not prove a live Slack
