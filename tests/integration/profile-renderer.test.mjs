@@ -796,7 +796,20 @@ test("preflight rejects invalid CIDRs before rendering", () => {
   );
 });
 
-test("preflight rejects metrics and native admin inputs that Helm would reject", () => {
+test("preflight rejects inputs that Helm would reject", () => {
+  for (const gatewayApiKeySecretName of ["occ-installation-startup", "occ-database", "occ-auth"]) {
+    assertPreflightFailure(
+      "openclaw",
+      baseInput({
+        controlPlane: {
+          ...baseInput().controlPlane,
+          gatewayApiKeySecretName,
+        },
+      }),
+      /controlPlane\.gatewayApiKeySecretName must name a dedicated Secret/,
+    );
+  }
+
   assertPreflightFailure(
     "codex",
     codexInput({
