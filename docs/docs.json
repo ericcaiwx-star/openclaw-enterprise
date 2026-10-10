@@ -963,6 +963,7 @@
               "testing/production-tui",
               "testing/slack",
               "testing/qa-matrix",
+              "testing/qa-matrix-results",
               "testing/service-accounts",
               "testing/plugins",
               "testing/openshell",
