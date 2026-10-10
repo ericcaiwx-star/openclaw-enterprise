@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -206,7 +206,8 @@ test(
   },
   async (t) => {
     await access(occ);
-    const root = await mkdtemp(join(tmpdir(), "oce-dev-up-openshell-real-"));
+    // LocalSetup requires a canonical parent; macOS temporary roots may be symlinks.
+    const root = await mkdtemp(join(await realpath(tmpdir()), "oce-dev-up-openshell-real-"));
     const stateDirectory = join(root, "state");
     const suffix = randomUUID().slice(0, 8);
     const cluster = `occ-dev-openshell-${suffix}`;
@@ -645,7 +646,9 @@ test(
   },
   async (t) => {
     await access(occ);
-    const root = await mkdtemp(join(tmpdir(), "oce-dev-up-openshell-compose-real-"));
+    const root = await mkdtemp(
+      join(await realpath(tmpdir()), "oce-dev-up-openshell-compose-real-"),
+    );
     const stateDirectory = join(root, "state");
     const suffix = randomUUID().slice(0, 8);
     const cluster = `occ-dev-os-compose-${suffix}`;
