@@ -255,6 +255,21 @@ class RefusedCandidateStopError extends Error {
     this.name = "RefusedCandidateStopError";
     this.refusal = refusal;
   }
+
+  /** The refusal stands; retry on the stop's own dependency terms so the next pass repeats both. */
+  retry(): {
+    readonly result: RevisionDispatchResult;
+    readonly logFields: Readonly<Record<string, string | number>>;
+  } {
+    const cause = this.cause;
+    return {
+      result:
+        cause instanceof TransientDependencyError
+          ? { outcome: "pending", code: cause.code, dependencyFailure: cause }
+          : { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" },
+      logFields: { ...revisionFailureLogFields(cause), refusal: this.refusal },
+    };
+  }
 }
 
 /**
@@ -3433,14 +3448,7 @@ export class ControllerWorker {
         throw error;
       }
       if (error instanceof RefusedCandidateStopError) {
-        // The refusal stands; only stopping its candidate failed. Retry on the stop's own
-        // dependency terms, so the next pass repeats the refusal and the stop.
-        const cause = error.cause;
-        result =
-          cause instanceof TransientDependencyError
-            ? { outcome: "pending", code: cause.code, dependencyFailure: cause }
-            : { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
-        failureLogFields = { ...revisionFailureLogFields(cause), refusal: error.refusal };
+        ({ result, logFields: failureLogFields } = error.retry());
       } else {
         if (
           error instanceof RepositoryCredentialAuthorityError ||
@@ -3460,7 +3468,16 @@ export class ControllerWorker {
         failureLogFields = revisionFailureLogFields(error);
       }
     }
-    await this.finalizeRevision(claim, result, failureLogFields);
+    try {
+      await this.finalizeRevision(claim, result, failureLogFields);
+    } catch (error) {
+      // A refusal caught above (for example lost repository authority) stops its candidate here.
+      if (!(error instanceof RefusedCandidateStopError)) {
+        throw error;
+      }
+      const retry = error.retry();
+      await this.finalizeRevision(claim, retry.result, retry.logFields);
+    }
   }
 
   private async authorizeRevision(
@@ -4310,6 +4327,12 @@ export class ControllerWorker {
       stoppedAt: Date.now(),
       restopAfterMs: this.leaseDurationMs,
     });
+    if (this.stoppedPredecessors.size > MAX_STOPPED_PREDECESSOR_RECORDS) {
+      const oldest = this.stoppedPredecessors.keys().next().value;
+      if (oldest !== undefined) {
+        this.stoppedPredecessors.delete(oldest);
+      }
+    }
   }
 
   private async completeStoppedRevisionWork(

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createControlledClock } from "../fixtures/repository-credentials/clock.mjs";
 import test, { after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { SandboxRevisionUnsupportedError } from "../../packages/occ/src/index.ts";
 import { requiresPostgres } from "../helpers/postgres-backend-state.mjs";
 import { waitFor } from "../helpers/wait-for.mjs";
 import { createWorkerRevisionFixtures } from "../helpers/postgres-worker-revision-fixture.mjs";
@@ -282,15 +283,19 @@ revisionTest(
 // stopped before its failure is published. A runtime that failed by itself (here a held model
 // probe) keeps its Pods for diagnosis on its version's Logs tab. Either way the pointer still
 // names the stopped predecessor: OCC never rolls back, and recovery is a new revision.
+// "unsupported" is a refusal thrown by the pass itself rather than decided by its observation.
+const refusals = { revoked: "AUTHORIZATION_DENIED", unsupported: "SANDBOX_HARNESS_UNSUPPORTED" };
 for (const { failure, stopFailsOnce = false } of [
   { failure: "revoked" },
   // A failed stop must not publish the refusal with the candidate still running: the pass
   // retries, repeats the refusal and the stop, and the refusal keeps its code.
   { failure: "revoked", stopFailsOnce: true },
+  { failure: "unsupported", stopFailsOnce: true },
   { failure: "held" },
 ]) {
+  const refused = failure !== "held";
   revisionTest(
-    `a ${failure} exclusive candidate ${failure === "revoked" ? "is stopped" : "stays for diagnosis"} when its deployment fails${stopFailsOnce ? " after a failed stop" : ""}`,
+    `a ${failure} exclusive candidate ${refused ? "is stopped" : "stays for diagnosis"} when its deployment fails${stopFailsOnce ? " after a failed stop" : ""}`,
     async (fixture) => {
       const owner = await fixture.agent(`exclusive-failed-${failure}`, {
         executionMode: "dedicated",
@@ -325,6 +330,9 @@ for (const { failure, stopFailsOnce = false } of [
               [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
             );
           }
+          if (failure === "unsupported" && candidatePasses > 1) {
+            throw new SandboxRevisionUnsupportedError("SANDBOX_HARNESS_UNSUPPORTED", "test");
+          }
         },
       });
       const events = [];
@@ -348,19 +356,18 @@ for (const { failure, stopFailsOnce = false } of [
       candidateId = replacement.id;
       await fixture.work(replacement, "failed_permanent", 30_000);
       const result = await fixture.workResult(replacement);
-      assert.equal(
-        result.rows[0].reason_code,
-        failure === "revoked" ? "AUTHORIZATION_DENIED" : "RUNTIME_MODEL_PROBE_FAILED",
-      );
-      assert.equal(driver.count(first), 1, "replacement stopped the predecessor");
-      if (failure === "revoked") {
+      assert.equal(result.rows[0].reason_code, refusals[failure] ?? "RUNTIME_MODEL_PROBE_FAILED");
+      // A thrown pass forgets the sweep record, so the retry repeats the idempotent stop.
+      const predecessorStops = failure === "unsupported" ? 2 : 1;
+      assert.equal(driver.count(first), predecessorStops, "replacement stopped the predecessor");
+      if (refused) {
         assert.equal(driver.count(replacement), 1, "the refused candidate is stopped once");
         assert.deepEqual([...driver.running], [], "nothing serves the Agent");
         const retried = events.filter(
           ({ event, workId, refusal }) =>
             event === "worker.completed" &&
             workId === replacement.idempotencyKey &&
-            refusal === "AUTHORIZATION_DENIED",
+            refusal === refusals[failure],
         );
         assert.deepEqual(
           retried.map(({ outcome, code }) => [outcome, code]),
