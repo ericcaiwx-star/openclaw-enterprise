@@ -73,9 +73,10 @@ Responses include `deploymentId`, `namespaceId`, `agentId`, `status`, nullable
 - `failed`: terminal failure or completion without activation.
 
 Pending `progress.lastAttempt` contains the latest exact-work result's
-allowlisted `code`, fixed `message`, and `at`, when first recorded; repeated
-deferrals record once ([readiness codes](agents/deployment.md#pending-deployment-progress)). Null means no bound evidence, not proof work never ran. Maintenance and
-cleanup results are excluded. `progress.nextAttemptAt` is the earliest queued
+allowlisted `code`, fixed `message`, and `at`; repeated deferrals record once,
+except [refused-candidate stops](agents/deployment.md#pending-deployment-progress).
+Null means no bound evidence. Maintenance and cleanup
+results are excluded. `progress.nextAttemptAt` is the earliest queued
 eligibility, not a promised start; it is null while claimed. Terminal `progress`
 is null. Results describe recorded checks, not runtime health.
 

@@ -155,6 +155,14 @@ const REVISION_READINESS_CODES: ReadonlySet<string> = new Set([
   ...Object.values(REVISION_PENDING_CODES),
 ]);
 
+// A refused candidate whose stop keeps failing waits on that stop, which can block the serial
+// worker for minutes (Kubernetes waits for gateway and Agent Pods to terminate). Each failed stop
+// doubles its recheck from the readiness cadence up to 5 minutes, and waits at least four times
+// as long as that stop took, so a blocked stop holds at most a fifth of the worker and other
+// Agents' work runs between attempts (finding 1002).
+const REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS = 300_000;
+const REFUSED_CANDIDATE_STOP_DURATION_FACTOR = 4;
+
 // A repository cleanup that another pass cannot settle (an invalidated attempt or a cleanup
 // error, with no session still closing) still rechecks so its obligation stays visible, but
 // the delay grows with the work row's age, as for long readiness rechecks: age / 40, at least
@@ -244,16 +252,20 @@ function revisionFailureLogFields(error: unknown): {
 }
 
 /**
- * Stopping a refused exclusive candidate failed. The pass retries like any dependency failure,
- * and its log keeps the refusal code the stop was for.
+ * Stopping a refused exclusive candidate failed. The pass waits as
+ * `REFUSED_CANDIDATE_STOP_PENDING`, whose evidence and log keep the refusal code the stop was
+ * for, and its log names the stop's own failure.
  */
 class RefusedCandidateStopError extends Error {
   readonly refusal: string;
+  /** How long the failed stop held the worker. */
+  readonly durationMs: number;
 
-  constructor(refusal: string, cause: unknown) {
+  constructor(refusal: string, durationMs: number, cause: unknown) {
     super("The refused AgentRevision candidate could not be stopped.", { cause });
     this.name = "RefusedCandidateStopError";
     this.refusal = refusal;
+    this.durationMs = durationMs;
   }
 
   /**
@@ -264,16 +276,14 @@ class RefusedCandidateStopError extends Error {
     readonly result: RevisionDispatchResult;
     readonly logFields: Readonly<Record<string, string | number>>;
   } {
-    const cause = this.cause;
     return {
       result: {
         outcome: "pending",
-        ...(cause instanceof TransientDependencyError
-          ? { code: cause.code, dependencyFailure: cause }
-          : { code: "DEPENDENCY_UNAVAILABLE" }),
+        code: "REFUSED_CANDIDATE_STOP_PENDING",
         refusedCandidate: this.refusal,
+        refusedStopMs: this.durationMs,
       },
-      logFields: { ...revisionFailureLogFields(cause), refusal: this.refusal },
+      logFields: { ...revisionFailureLogFields(this.cause), refusal: this.refusal },
     };
   }
 }
@@ -331,6 +341,8 @@ interface RevisionDispatchResult extends DispatchResult {
    * candidate serving with nothing left to stop it.
    */
   readonly refusedCandidate?: string;
+  /** How long the refused candidate's failed stop took; it lengthens the recheck. */
+  readonly refusedStopMs?: number;
   readonly data?: Readonly<Record<string, unknown>>;
   readonly resultData?: Readonly<Record<string, unknown>>;
   readonly revision?: Readonly<AgentRevision>;
@@ -882,6 +894,11 @@ export class ControllerWorker {
     { readonly stoppedAt: number; readonly restopAfterMs: number }
   >();
   private readonly deployTimings = new Map<string, DeployTiming>();
+  /**
+   * Consecutive failed refused-candidate stops per deployment work item, which set its backoff.
+   * A restart forgets them, so the backoff starts again from the readiness cadence.
+   */
+  private readonly refusedStopFailures = new Map<string, number>();
   /** The last stuck-cleanup cause logged per repository cleanup work item. */
   private readonly repositoryCleanupCauses = new Map<string, string>();
   /**
@@ -3304,6 +3321,24 @@ export class ControllerWorker {
               ),
             );
       if (successor !== undefined) {
+        // A refusal decided after this check (lost repository authority, a Secret or
+        // credential-source problem, a refused observation) may still wait on its candidate's
+        // stop. The newer revision's sweep gives up at its own deadline, so finish that stop
+        // before superseding; a failed stop keeps waiting (finding 1004).
+        // The wait need not be the latest evidence: a lost claim or a retry may have followed it.
+        // A stop this process made within a lease (the newer revision's sweep) is not repeated.
+        const stopped = this.stoppedPredecessors.get(revision.id);
+        const waited =
+          claim.idempotencyKey === `agent_revision:${revision.id}:reconcile` &&
+          (stopped === undefined || Date.now() - stopped.stoppedAt >= stopped.restopAfterMs)
+            ? await this.queue.findWorkAttempt(
+                claim.idempotencyKey,
+                "REFUSED_CANDIDATE_STOP_PENDING",
+              )
+            : undefined;
+        if (waited !== undefined) {
+          await this.stopRefusedExclusiveCandidate(claim, waited.refusal ?? "UNKNOWN_FAILURE");
+        }
         await this.finalizeRevision(claim, {
           outcome: "success",
           code: "REVISION_SUPERSEDED",
@@ -4123,6 +4158,16 @@ export class ControllerWorker {
     if (resolved.outcome === "permanent" && heldFailureCode === undefined && !expired) {
       await this.stopRefusedExclusiveCandidate(claim, resolved.code);
     }
+    let refusedStopRecheckMs: number | undefined;
+    if (resolved.refusedCandidate === undefined) {
+      this.refusedStopFailures.delete(claim.idempotencyKey);
+    } else {
+      refusedStopRecheckMs = this.refusedStopRecheckMs(
+        claim,
+        Date.now() - claim.createdAt.getTime(),
+        resolved.refusedStopMs ?? 0,
+      );
+    }
     let activated: Readonly<AgentRevision> | undefined;
     let stoppedCandidate: Readonly<AgentRevision> | undefined;
     let committedOutcome: WorkOutcome =
@@ -4188,6 +4233,14 @@ export class ControllerWorker {
           code: resolved.code,
           ...(resolved.resultData === undefined ? {} : { resultData: resolved.resultData }),
         });
+      } else if (resolved.refusedCandidate !== undefined) {
+        // Every deferral is recorded, so `lastAttempt.at` shows the stop is still retried; the
+        // backoff bounds them to one per few minutes.
+        await queue.defer(
+          claim,
+          { code: resolved.code, refusal: resolved.refusedCandidate },
+          { delayMs: refusedStopRecheckMs!, repeatEvidence: true },
+        );
       } else if (resolved.outcome === "pending") {
         const ageMs = Date.now() - claim.createdAt.getTime();
         await queue.defer(
@@ -4195,9 +4248,7 @@ export class ControllerWorker {
           { code: resolved.code },
           // A transient dependency failure is rechecked on the readiness cadence:
           // like an unready runtime, it waits for convergence, not for a fix.
-          resolved.dependencyFailure !== undefined ||
-            resolved.refusedCandidate !== undefined ||
-            REVISION_READINESS_CODES.has(resolved.code)
+          resolved.dependencyFailure !== undefined || REVISION_READINESS_CODES.has(resolved.code)
             ? { delayMs: revisionReadinessRecheckMs(ageMs) }
             : {},
         );
@@ -4212,6 +4263,9 @@ export class ControllerWorker {
         });
       }
     }, this.queueOptions);
+    if (resolved.refusedCandidate !== undefined) {
+      this.recordRefusedStopFailure(claim);
+    }
     if (stoppedCandidate !== undefined) {
       await this.closeRevisionCredentials(claim, stoppedCandidate);
       await this.withClaimHeartbeat(claim, () => this.compute.stopRevision(stoppedCandidate!));
@@ -4322,6 +4376,7 @@ export class ControllerWorker {
     ) {
       return;
     }
+    const started = Date.now();
     try {
       if (compute.bindAgent !== undefined) {
         await this.withClaimHeartbeat(claim, async () => {
@@ -4334,8 +4389,9 @@ export class ControllerWorker {
       if (error instanceof WorkClaimLostError) {
         throw error;
       }
-      throw new RefusedCandidateStopError(refusal, error);
+      throw new RefusedCandidateStopError(refusal, Date.now() - started, error);
     }
+    this.refusedStopFailures.delete(claim.idempotencyKey);
     // Like a swept predecessor, the next deployment need not stop it again within a lease.
     this.stoppedPredecessors.delete(revision.id);
     this.stoppedPredecessors.set(revision.id, {
@@ -4346,6 +4402,37 @@ export class ControllerWorker {
       const oldest = this.stoppedPredecessors.keys().next().value;
       if (oldest !== undefined) {
         this.stoppedPredecessors.delete(oldest);
+      }
+    }
+  }
+
+  /**
+   * The recheck after this work's next failed refused-candidate stop: the readiness cadence,
+   * doubled for each earlier consecutive failure up to REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS, and
+   * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the failed stop took.
+   */
+  private refusedStopRecheckMs(claim: ClaimedWork, ageMs: number, stopMs: number): number {
+    const failures = (this.refusedStopFailures.get(claim.idempotencyKey) ?? 0) + 1;
+    return Math.max(
+      Math.min(
+        REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS,
+        revisionReadinessRecheckMs(ageMs) * 2 ** Math.min(failures - 1, 20),
+      ),
+      Math.ceil(Math.max(0, stopMs) * REFUSED_CANDIDATE_STOP_DURATION_FACTOR),
+    );
+  }
+
+  /** Counts a failed refused-candidate stop once its deferral committed. */
+  private recordRefusedStopFailure(claim: ClaimedWork): void {
+    const key = claim.idempotencyKey;
+    const failures = (this.refusedStopFailures.get(key) ?? 0) + 1;
+    this.refusedStopFailures.delete(key);
+    this.refusedStopFailures.set(key, failures);
+    if (this.refusedStopFailures.size > MAX_STOPPED_PREDECESSOR_RECORDS) {
+      // Forgetting a record only restarts that work's backoff.
+      const oldest = this.refusedStopFailures.keys().next().value;
+      if (oldest !== undefined) {
+        this.refusedStopFailures.delete(oldest);
       }
     }
   }
