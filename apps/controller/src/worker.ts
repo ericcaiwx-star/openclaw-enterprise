@@ -256,17 +256,23 @@ class RefusedCandidateStopError extends Error {
     this.refusal = refusal;
   }
 
-  /** The refusal stands; retry on the stop's own dependency terms so the next pass repeats both. */
-  retry(): {
+  /**
+   * The refusal stands, but it is not published while its candidate may still serve: the work
+   * waits on the stop's own dependency and the next pass repeats the refusal and the stop.
+   */
+  pending(): {
     readonly result: RevisionDispatchResult;
     readonly logFields: Readonly<Record<string, string | number>>;
   } {
     const cause = this.cause;
     return {
-      result:
-        cause instanceof TransientDependencyError
-          ? { outcome: "pending", code: cause.code, dependencyFailure: cause }
-          : { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" },
+      result: {
+        outcome: "pending",
+        ...(cause instanceof TransientDependencyError
+          ? { code: cause.code, dependencyFailure: cause }
+          : { code: "DEPENDENCY_UNAVAILABLE" }),
+        refusedCandidate: this.refusal,
+      },
       logFields: { ...revisionFailureLogFields(cause), refusal: this.refusal },
     };
   }
@@ -319,6 +325,12 @@ interface DispatchResult {
 interface RevisionDispatchResult extends DispatchResult {
   /** A transient dependency failure, retried until the convergence deadline. */
   readonly dependencyFailure?: TransientDependencyError;
+  /**
+   * A refusal whose exclusive candidate could not be stopped yet. Its pending passes outlast
+   * the attempt budget and the convergence deadline: ending the work would leave the refused
+   * candidate serving with nothing left to stop it.
+   */
+  readonly refusedCandidate?: string;
   readonly data?: Readonly<Record<string, unknown>>;
   readonly resultData?: Readonly<Record<string, unknown>>;
   readonly revision?: Readonly<AgentRevision>;
@@ -3448,7 +3460,7 @@ export class ControllerWorker {
         throw error;
       }
       if (error instanceof RefusedCandidateStopError) {
-        ({ result, logFields: failureLogFields } = error.retry());
+        ({ result, logFields: failureLogFields } = error.pending());
       } else {
         if (
           error instanceof RepositoryCredentialAuthorityError ||
@@ -3475,8 +3487,8 @@ export class ControllerWorker {
       if (!(error instanceof RefusedCandidateStopError)) {
         throw error;
       }
-      const retry = error.retry();
-      await this.finalizeRevision(claim, retry.result, retry.logFields);
+      const pending = error.pending();
+      await this.finalizeRevision(claim, pending.result, pending.logFields);
     }
   }
 
@@ -4052,6 +4064,7 @@ export class ControllerWorker {
         : undefined;
     const expired =
       result.outcome === "pending" &&
+      result.refusedCandidate === undefined &&
       Date.now() - claim.createdAt.getTime() >= this.convergenceTimeoutMs;
     // Runtime entrypoints publish a runtime failure only after their own retries
     // end, and then hold the container unready until an explicit restart that
@@ -4182,7 +4195,9 @@ export class ControllerWorker {
           { code: resolved.code },
           // A transient dependency failure is rechecked on the readiness cadence:
           // like an unready runtime, it waits for convergence, not for a fix.
-          resolved.dependencyFailure !== undefined || REVISION_READINESS_CODES.has(resolved.code)
+          resolved.dependencyFailure !== undefined ||
+            resolved.refusedCandidate !== undefined ||
+            REVISION_READINESS_CODES.has(resolved.code)
             ? { delayMs: revisionReadinessRecheckMs(ageMs) }
             : {},
         );

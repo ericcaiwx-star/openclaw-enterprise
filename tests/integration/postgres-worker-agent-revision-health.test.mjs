@@ -285,17 +285,20 @@ revisionTest(
 // names the stopped predecessor: OCC never rolls back, and recovery is a new revision.
 // "unsupported" is a refusal thrown by the pass itself rather than decided by its observation.
 const refusals = { revoked: "AUTHORIZATION_DENIED", unsupported: "SANDBOX_HARNESS_UNSUPPORTED" };
-for (const { failure, stopFailsOnce = false } of [
+for (const { failure, stopFailures = 0, convergenceTimeoutMs } of [
   { failure: "revoked" },
-  // A failed stop must not publish the refusal with the candidate still running: the pass
-  // retries, repeats the refusal and the stop, and the refusal keeps its code.
-  { failure: "revoked", stopFailsOnce: true },
-  { failure: "unsupported", stopFailsOnce: true },
+  // A failed stop must not publish the refusal with the candidate still running: the work
+  // waits, repeats the refusal and the stop, and the refusal keeps its code.
+  { failure: "revoked", stopFailures: 1 },
+  { failure: "unsupported", stopFailures: 1 },
+  // A stop outage outlasts the attempt budget (5) and the convergence deadline: ending the
+  // work then would leave the refused candidate serving with nothing left to stop it.
+  { failure: "revoked", stopFailures: 7, convergenceTimeoutMs: 2_000 },
   { failure: "held" },
 ]) {
   const refused = failure !== "held";
   revisionTest(
-    `a ${failure} exclusive candidate ${refused ? "is stopped" : "stays for diagnosis"} when its deployment fails${stopFailsOnce ? " after a failed stop" : ""}`,
+    `a ${failure} exclusive candidate ${refused ? "is stopped" : "stays for diagnosis"} when its deployment fails${stopFailures === 0 ? "" : ` after ${stopFailures} failed stops`}`,
     async (fixture) => {
       const owner = await fixture.agent(`exclusive-failed-${failure}`, {
         executionMode: "dedicated",
@@ -336,25 +339,33 @@ for (const { failure, stopFailsOnce = false } of [
         },
       });
       const events = [];
-      let stopFailures = 0;
+      let failedStops = 0;
       await fixture.start(
         {
           ...driver.compute,
           async stopRevision(revision) {
-            if (stopFailsOnce && revision.id === candidateId && stopFailures === 0) {
-              stopFailures += 1;
+            if (revision.id === candidateId && failedStops < stopFailures) {
+              failedStops += 1;
               throw new Error("Kubernetes API temporarily unavailable");
             }
             return driver.compute.stopRevision(revision);
           },
         },
-        { emit: (event) => events.push(event) },
+        {
+          emit: (event) => events.push(event),
+          ...(convergenceTimeoutMs === undefined ? {} : { convergenceTimeoutMs }),
+        },
       );
       const first = await fixture.revision(owner, 1);
       await fixture.work(first, "succeeded");
+      const deployed = Date.now();
       const replacement = await fixture.revision(owner, 2);
       candidateId = replacement.id;
       await fixture.work(replacement, "failed_permanent", 30_000);
+      assert.equal(failedStops, stopFailures);
+      if (convergenceTimeoutMs !== undefined) {
+        assert.ok(Date.now() - deployed > convergenceTimeoutMs, "the stop outlasted the deadline");
+      }
       const result = await fixture.workResult(replacement);
       assert.equal(result.rows[0].reason_code, refusals[failure] ?? "RUNTIME_MODEL_PROBE_FAILED");
       // A thrown pass forgets the sweep record, so the retry repeats the idempotent stop.
@@ -363,15 +374,15 @@ for (const { failure, stopFailsOnce = false } of [
       if (refused) {
         assert.equal(driver.count(replacement), 1, "the refused candidate is stopped once");
         assert.deepEqual([...driver.running], [], "nothing serves the Agent");
-        const retried = events.filter(
+        const waited = events.filter(
           ({ event, workId, refusal }) =>
             event === "worker.completed" &&
             workId === replacement.idempotencyKey &&
             refusal === refusals[failure],
         );
         assert.deepEqual(
-          retried.map(({ outcome, code }) => [outcome, code]),
-          stopFailsOnce ? [["retry", "DEPENDENCY_UNAVAILABLE"]] : [],
+          waited.map(({ outcome, code }) => [outcome, code]),
+          Array.from({ length: stopFailures }, () => ["pending", "DEPENDENCY_UNAVAILABLE"]),
         );
       } else {
         assert.equal(driver.count(replacement), 0, "the failed runtime stays for diagnosis");
