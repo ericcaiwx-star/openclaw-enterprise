@@ -3295,6 +3295,7 @@ test("Agent create and update replace policy-only plugin maps and revisions free
     }),
   };
 
+  const readsBeforeSave = configurationReads;
   const created = await controller.request("POST", `/namespaces/${namespace.id}/agents`, {
     body: {
       name: "plugin-agent",
@@ -3307,8 +3308,9 @@ test("Agent create and update replace policy-only plugin maps and revisions free
   assert.deepEqual(created.data.plugins, initialPlugins);
   assert.deepEqual(created.data.pluginApprovers, []);
   assertPolicyOnlyPlugin(created.data.plugins[diffsPluginId]);
-  // This Plugin Driver has no Configuration check, so the save never reads the values.
-  assert.equal(configurationReads, 0);
+  // This Plugin Driver has no Configuration check, so the save does not read the values: an
+  // unavailable or slow Configuration Driver must not block saves that have nothing to check.
+  assert.equal(configurationReads, readsBeforeSave);
 
   const saved = await controller.request(
     "GET",
@@ -3574,11 +3576,11 @@ test("the Codex Plugin Driver refuses an automatic reviewer without an on-reques
       executionMode: "dedicated",
       configurationId: omitted.id,
       plugins: {
-        ...automatic,
         "codex-plugin:github@openai-curated-remote": {
           enabled: true,
           toolDefaults: { reviewer: "human" },
         },
+        ...automatic,
       },
     },
   });
@@ -3615,10 +3617,14 @@ test("the Codex Plugin Driver refuses an automatic reviewer without an on-reques
   pluginDriver.validateAgentConfiguration = () => {
     throw new Error("synthetic Driver detail");
   };
-  const conflict = await controller.request("PATCH", agentPath, {
-    body: { configurationId: configuration.id },
-  });
-  delete pluginDriver.validateAgentConfiguration;
+  let conflict;
+  try {
+    conflict = await controller.request("PATCH", agentPath, {
+      body: { configurationId: configuration.id },
+    });
+  } finally {
+    delete pluginDriver.validateAgentConfiguration;
+  }
   assert.equal(conflict.status, 409, JSON.stringify(conflict.body));
   assert.equal(conflict.body.error.code, "RESOURCE_CONFLICT");
   assert.equal(

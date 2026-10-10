@@ -4381,8 +4381,9 @@ test("Codex gateway supervisor keeps its peer bridge record usable after an inte
   first.exit(null, "SIGTERM");
   await respawn;
   assert.deepEqual(previous.exits, [1]);
-  assert.equal(previous.tearWrite, undefined, "the record write was interrupted");
+  assert.equal(previous.tearWrite, undefined, "the record write should have been interrupted");
   assert.equal(previous.files.get(record), kept);
+  assert.equal(previous.files.has(`${record}.pending`), false);
   const gateway = await startCodexGatewaySupervisor(t, {
     writableConfig: true,
     savedFiles: previous.files,
@@ -4602,6 +4603,7 @@ test("Codex gateway supervisor retains refusal of a native-edited managed bridge
   // container restart that follows would treat the edit as generated and overwrite it.
   const { bridges } = JSON.parse(gateway.files.get(`${path}.oce-peer-bridge.json`));
   assert.equal(bridges.length, 1);
+  assert.equal(bridges[0].plugins.linear.enabled, true, "the bridge generated for the new peer");
   assert.notEqual(bridges[0].plugins.linear.name, "Native edit");
 });
 

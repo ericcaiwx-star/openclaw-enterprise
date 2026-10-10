@@ -52,9 +52,8 @@ await chmod(fakeDocker, 0o700);
 // The helper reads both at import.
 process.env.OCC_DOCKER_BIN = fakeDocker;
 process.env.OCC_TEST_RUNTIME_IMAGE = "localhost/oce/runtime:failure-output-test";
-const { failureTail, listGatewayPlugins, runGatewaySmoke, waitForGatewayReady } = await import(
-  "../helpers/runtime-image-startup.mjs"
-);
+const { failureTail, listGatewayPlugins, runGatewaySmoke, waitForGatewayReady } =
+  await import("../helpers/runtime-image-startup.mjs");
 
 test("failureTail keeps short output and the end of long output from a line start", () => {
   assert.equal(failureTail("short output", 64), "short output");
@@ -95,7 +94,7 @@ test("readiness and plugin list failures keep the end of their command output", 
     () => assert.fail("readiness should time out when every probe fails"),
     (failure) => failure,
   );
-  assert.match(readiness.message, /^Gateway readiness timed out\./);
+  assert.match(readiness.message, /^Gateway readiness timed out\.\n/);
   assertKeptTail(readiness.message, "readiness stderr", 2048 + 128);
   const plugins = await listGatewayPlugins("fake-container").then(
     () => assert.fail("plugin list output that is not JSON should be refused"),
@@ -132,9 +131,13 @@ test("a Gateway smoke failure from a docker command keeps the end of its stderr 
   );
   const reported = error.message.slice(0, reporterMessageLimit);
   // The headline names the command; its stderr follows, cut to its end, then the logs' end.
-  assert.match(reported, /^Command failed: .*docker inspect /);
-  assert.match(reported, /inspect stderr final line\n/);
+  assert.match(
+    reported,
+    /^Command failed: .*docker inspect [^\n]*\n[\s\S]*inspect stderr final line\n[\s\S]*wrapper failed: final stderr line/,
+  );
   assert.doesNotMatch(reported, /inspect stderr first line/);
-  assert.match(reported, /wrapper failed: final stderr line/);
-  assert.ok(error.message.length < reporterMessageLimit, `message is ${error.message.length} chars`);
+  assert.ok(
+    error.message.length < reporterMessageLimit,
+    `message is ${error.message.length} chars`,
+  );
 });
