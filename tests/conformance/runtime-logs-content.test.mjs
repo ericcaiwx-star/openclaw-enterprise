@@ -2968,3 +2968,33 @@ test("container checkpoint recovery keeps an unknown-time reset visible", async 
     second.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
   );
 });
+
+test("container shortened timed checkpoints disclose missing undelivered rows", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("wire-cut-shortened-timed-window");
+  const start = Date.now() - 120_000;
+  fixture.computeDriver.state.lines = Array.from({ length: 80 }, (_, index) => ({
+    time: new Date(start + index * 1000).toISOString(),
+    raw: JSON.stringify({
+      level: "info",
+      subsystem: "gateway",
+      message: `row=${index}; ${"ordinary diagnostic ".repeat(350)}`,
+    }),
+  }));
+  const first = await fixture.request("GET", target.logsPath("source=gateway&tailLines=100"));
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  // Rotation can leave a short surviving window in the same container. Its
+  // later times establish progress, not continuity with the unread snapshot.
+  fixture.computeDriver.state.lines = fixture.computeDriver.state.lines.slice(-5);
+  const second = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=100&cursor=${first.data.cursor}`),
+  );
+  assert.equal(second.status, 200);
+  assert.equal(second.data.records.filter(({ type }) => type === "line").length, 5);
+  assert.ok(
+    second.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+  );
+});

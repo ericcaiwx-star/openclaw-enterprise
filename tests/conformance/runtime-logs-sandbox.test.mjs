@@ -1456,3 +1456,54 @@ test("sandbox full wire-cut pages retain already-delivered untimed prefixes", as
     Array.from({ length: 100 }, (_, index) => index),
   );
 });
+
+test("sandbox partial identical groups preserve rollover uncertainty beside newer timestamps", async () => {
+  const fixture = await sandboxFixture();
+  const time = new Date(Date.now() - 1000).toISOString().replace("Z", "000000Z");
+  const originalCount = 40;
+  const original = Array.from({ length: originalCount }, () => ({
+    sandboxId: SANDBOX_ID,
+    time,
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `same diagnostic ${'"'.repeat(8000)}`,
+    fields: {},
+  }));
+  fixture.gateway.state.lines = original;
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=40"),
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  const delivered = first.data.records.filter(({ type }) => type === "line").length;
+  assert.ok(delivered > 0 && delivered < originalCount);
+  // The delivered copies leave the requested tail; identical unread copies
+  // cannot identify their occurrence by hash. Newer times hide that ambiguity
+  // from a single-time check, so the changed snapshot must retain its gap.
+  fixture.gateway.state.lines.push(
+    ...Array.from({ length: delivered }, (_, index) => ({
+      ...original[0],
+      time: new Date(Date.parse(time) + index + 1).toISOString().replace("Z", "000000Z"),
+      message: `new diagnostic ${index}`,
+    })),
+  );
+  fixture.gateway.state.bufferTotal = fixture.gateway.state.lines.length;
+  const second = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=40&cursor=${first.data.cursor}`),
+  );
+  assert.equal(second.status, 200);
+  assert.equal(
+    second.data.records.filter(
+      ({ type, message }) => type === "line" && message.startsWith("same diagnostic"),
+    ).length,
+    originalCount - delivered,
+    "the unread identical copies remain in the surviving snapshot",
+  );
+  assert.ok(Buffer.byteLength(second.text) <= 512 * 1024);
+  assert.ok(
+    second.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+  );
+});

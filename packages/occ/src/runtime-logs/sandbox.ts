@@ -336,6 +336,7 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     ? eligible.filter(({ index }) => index >= checkpoint.count)
     : eligible;
   const lines = remaining.map(({ line }) => line);
+  const lineHashes = lines.map(sandboxLogLineHash);
   const issuedAt = now();
   const observedAt = new Date(issuedAt).toISOString();
   return boundedRuntimeLogPage(lines.length, (end) => {
@@ -375,11 +376,22 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
           : newest,
       null,
     );
+    const deliveredHashes = pageCut ? new Set(lineHashes.slice(0, end)) : undefined;
+    // Equal hashes across the cut do not identify which occurrences survive a
+    // rolling tail. Retain the observed snapshot and its conservative reset.
+    const ambiguousOccurrences =
+      pageCut &&
+      lines
+        .slice(end)
+        .some(
+          (line, index) => line.time !== null && deliveredHashes!.has(lineHashes[end + index]!),
+        );
     const retainCheckpoint =
       (pageCut &&
         (chunk.bufferTotal < tailLines ||
           consumedLines.some((line) => line.time === null) ||
           window.overflow !== null ||
+          ambiguousOccurrences ||
           window.since === null ||
           newestDelivered === null ||
           lines

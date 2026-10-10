@@ -171,9 +171,9 @@ Signed cut checkpoints retain prefix digest/count, query floor and pre-cut basel
 Container retains two-second overlap. Changed timed windows resume
 from delivered progress; changed tails and ambiguous single-time replacements take
 fresh snapshots. Sandbox pins short windows, untimed rows and overflowing groups.
-Full timed windows use counted overlap for partial groups whose remaining times
-fit its floor. Full single-time windows retain their ambiguity gap. Container
-recovery keeps unknown-time gaps without duplicate loss notices.
+Full timed windows use counted overlap for distinct partial groups within its floor.
+Identical cut occurrences retain snapshots; single-time tails retain ambiguity gaps.
+Container recovery keeps shortened/unknown-window gaps without duplicate notices.
 All-untimed Driver byte cuts retain progress;
 mixed cuts advance through time with an explicit reset that may replay untimed rows.
 Matching checkpoints retain positional proof across growth. Stable windows drain,
