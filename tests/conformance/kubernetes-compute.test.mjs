@@ -53,6 +53,7 @@ import {
   currentComputeAbortSignal,
   withComputeAbortSignal,
   withComputeWorkWaiting,
+  withYieldingComputeStop,
 } from "../../apps/controller/src/drivers/compute/operation-context.ts";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
@@ -12256,6 +12257,29 @@ test("stopping a provider-owned Kubernetes revision waits for Sandbox workload t
 
   await driver.stopRevision(revision);
   assert.equal(cleanupComplete, true);
+  assert.equal(podObservations, 2);
+
+  // Other Work waiting ends a yielding stop's wait after one observation of a live Pod; the
+  // caller retries the stop (finding 1022). Any other stop keeps waiting for termination.
+  const waiting = async () => true;
+  podObservations = 0;
+  await assert.rejects(
+    withComputeWorkWaiting(waiting, () =>
+      withYieldingComputeStop(() => driver.stopRevision(revision)),
+    ),
+    (error) =>
+      error instanceof DependencyUnavailableError && /still terminating/u.test(error.message),
+  );
+  assert.equal(podObservations, 1);
+  podObservations = 0;
+  await withComputeWorkWaiting(waiting, () => driver.stopRevision(revision));
+  assert.equal(podObservations, 2);
+  // With nothing waiting, a yielding stop waits too.
+  podObservations = 0;
+  await withComputeWorkWaiting(
+    async () => false,
+    () => withYieldingComputeStop(() => driver.stopRevision(revision)),
+  );
   assert.equal(podObservations, 2);
 });
 

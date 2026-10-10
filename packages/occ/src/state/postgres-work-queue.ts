@@ -1025,6 +1025,39 @@ export class PostgresWorkQueue {
         });
   }
 
+  /**
+   * How many `REFUSED_CANDIDATE_STOP_PENDING` deferrals this work item recorded since its latest
+   * evidence without a refusal, reading its latest 64 evidence rows. A recovered lost claim
+   * (`LEASE_EXPIRED` with a refusal) continues that run without adding to it.
+   */
+  async countRefusedStopWaits(idempotencyKey: string): Promise<number> {
+    // The same work-bound evidence as findWorkAttempt, newest first.
+    const found = await this.client.query(
+      `SELECT event.details->>'reasonCode' AS reason_code,
+         event.details->>'refusal' AS refusal
+       FROM occ.controller_work AS work
+       JOIN occ.audit_events AS event
+         ON event.namespace_id = work.namespace_id AND event.actor_id = work.actor_id
+         AND event.resource_kind = 'agent_revision' AND event.resource_id = work.revision_id
+         AND event.kind = 'mutation' AND event.action = 'reconcile'
+         AND event.details->>'workId' = work.idempotency_key
+         AND event.occurred_at >= work.created_at
+       WHERE work.idempotency_key = $1
+       ORDER BY event.occurred_at DESC, event.id DESC LIMIT 64`,
+      [nonempty(idempotencyKey, "Controller work idempotency key")],
+    );
+    let waits = 0;
+    for (const row of found.rows as { reason_code: string | null; refusal: string | null }[]) {
+      if (row.refusal === null) {
+        break;
+      }
+      if (row.reason_code === "REFUSED_CANDIDATE_STOP_PENDING") {
+        waits += 1;
+      }
+    }
+    return waits;
+  }
+
   async complete(claim: WorkClaim, result: WorkResult = {}): Promise<void> {
     validateClaim(claim);
     const reasonCode = safeFailureCode(result.code ?? "RECONCILE_SUCCEEDED");

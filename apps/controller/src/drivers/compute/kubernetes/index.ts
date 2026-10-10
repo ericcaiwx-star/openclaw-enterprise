@@ -133,6 +133,7 @@ import {
   OAUTH_VOLUME_ANNOTATION,
 } from "../../kubernetes/oauth-seal.ts";
 import {
+  computeStopShouldYield,
   computeWorkWaiting,
   currentComputeAbortSignal,
   withComputeAbortSignal,
@@ -1035,6 +1036,8 @@ function settledSchedulingConflict(
 
 const WORKLOAD_TERMINATION_TIMEOUT_MS = 120_000;
 const WORKLOAD_TERMINATION_POLL_MS = 100;
+// A yielding stop asks the queue whether other Work waits at most once a second.
+const WORKLOAD_TERMINATION_YIELD_CHECK_MS = 1_000;
 const AGENT_TRANSPORT_PORT = 18_790;
 const NATIVE_WORKER_PROFILE = "dedicated-native";
 const DEFAULT_NATIVE_OPENCLAW_SESSION_CAPACITY = 8;
@@ -6358,6 +6361,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         ? GATEWAY_STOP_TIMEOUT_MS + REQUEST_TIMEOUT_MS
         : WORKLOAD_TERMINATION_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
+    let yieldCheckedAt: number | undefined;
     for (;;) {
       signal.throwIfAborted();
       const observed = asRecord(
@@ -6408,6 +6412,19 @@ export class KubernetesComputeDriver implements ComputeDriver {
         throw new DependencyUnavailableError(
           "The AgentRevision workload Pods did not terminate before the deadline.",
         );
+      }
+      // A refused candidate's stop does not hold the serial worker while its Pods terminate:
+      // other Work runs, and the next pass repeats the whole stop (finding 1022).
+      if (
+        yieldCheckedAt === undefined ||
+        Date.now() - yieldCheckedAt >= WORKLOAD_TERMINATION_YIELD_CHECK_MS
+      ) {
+        yieldCheckedAt = Date.now();
+        if (await computeStopShouldYield()) {
+          throw new DependencyUnavailableError(
+            "The AgentRevision workload Pods are still terminating; other work is waiting.",
+          );
+        }
       }
       await new Promise<void>((resolve) => setTimeout(resolve, WORKLOAD_TERMINATION_POLL_MS));
     }
