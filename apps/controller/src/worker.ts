@@ -254,13 +254,13 @@ function revisionFailureLogFields(error: unknown): {
 }
 
 /**
- * Stopping a refused candidate failed. The pass waits as
+ * Stopping a refused candidate failed or yielded to other Work. The pass waits as
  * `REFUSED_CANDIDATE_STOP_PENDING`, whose evidence and log keep the refusal code the stop was
  * for, and its log names the stop's own failure.
  */
 class RefusedCandidateStopError extends Error {
   readonly refusal: string;
-  /** How long the failed stop held the worker. */
+  /** How long the unfinished stop held the worker. */
   readonly durationMs: number;
   /** The stop yielded to other Work rather than failing, so it does not double the backoff. */
   readonly yielded: boolean;
@@ -347,7 +347,7 @@ interface RevisionDispatchResult extends DispatchResult {
    * candidate serving with nothing left to stop it.
    */
   readonly refusedCandidate?: string;
-  /** How long the refused candidate's failed stop took; it lengthens the recheck. */
+  /** How long the refused candidate's unfinished stop took; it lengthens the recheck. */
   readonly refusedStopMs?: number;
   /** That stop yielded to other Work; later rechecks do not count it as a failure. */
   readonly refusedStopYielded?: boolean;
@@ -4453,9 +4453,9 @@ export class ControllerWorker {
   }
 
   /**
-   * The recheck after this work's next failed refused-candidate stop: the readiness cadence,
+   * The recheck after this work's next unfinished refused-candidate stop: the readiness cadence,
    * doubled for each earlier consecutive failure up to REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS, and
-   * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the failed stop took. The
+   * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the stop took. The
    * earlier failures are counted from the work's evidence, so a restart keeps the backoff
    * (finding 1022); if that read fails, the backoff starts again. A stop that yielded to other
    * Work is not a failure, so a busy queue does not double it (finding 1025).

@@ -50,6 +50,7 @@ import {
   ServiceAccountCredentialSecretExistsError,
 } from "../../packages/occ/src/index.ts";
 import {
+  ComputeStopYieldedError,
   currentComputeAbortSignal,
   withComputeAbortSignal,
   withComputeWorkWaiting,
@@ -12169,8 +12170,7 @@ test("a refused candidate's stop deletes its Harness before the Gateway drains",
       async () => true,
       () => withYieldingComputeStop(() => driver.stopRevision(revision)),
     ),
-    (error) =>
-      error instanceof DependencyUnavailableError && /still terminating/u.test(error.message),
+    (error) => error instanceof ComputeStopYieldedError && /still terminating/u.test(error.message),
   );
   assert.deepEqual(events, ["delete Agent Deployment", "list agent Pods", "list gateway Pods"]);
   assert.equal(deploymentPresent, false);
@@ -12301,8 +12301,7 @@ test("stopping a provider-owned Kubernetes revision waits for Sandbox workload t
     withComputeWorkWaiting(waiting, () =>
       withYieldingComputeStop(() => driver.stopRevision(revision)),
     ),
-    (error) =>
-      error instanceof DependencyUnavailableError && /still terminating/u.test(error.message),
+    (error) => error instanceof ComputeStopYieldedError && /still terminating/u.test(error.message),
   );
   assert.equal(podObservations, 1);
   podObservations = 0;
