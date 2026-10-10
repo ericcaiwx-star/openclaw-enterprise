@@ -5551,6 +5551,33 @@ test("Agent provisioning API validates inline configuration with existing Secret
     );
     assert.doesNotMatch(JSON.stringify(refused.body), /10\.99\./);
   }
+  // The retired Codex untrusted approval policy is one of those gateway settings (finding 987).
+  const untrustedPolicy = await injectedRequest(
+    fixture.app,
+    "POST",
+    `/namespaces/${namespace.data.id}/agents/provision`,
+    {
+      body: provisioningRequestBody(namespace.data.id, secrets, {
+        configuration: {
+          values: {
+            ...model,
+            plugins: {
+              entries: { codex: { config: { appServer: { approvalPolicy: "untrusted" } } } },
+            },
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(untrustedPolicy.status, 409, JSON.stringify(untrustedPolicy.body));
+  assert.deepEqual(
+    { code: untrustedPolicy.body.error.code, message: untrustedPolicy.body.error.message },
+    {
+      code: "RESOURCE_CONFLICT",
+      message:
+        'Configuration setting plugins.entries.codex.config.appServer.approvalPolicy must not be "untrusted", which the OpenClaw runtime retired: use "on-request".',
+    },
+  );
   // A refusal the caller cannot fix (here the Installation enables dedicated runtime storage
   // without gateway routing) keeps fixed text, since its reason names Installation settings.
   // The API log names it with the request ID for the operator.

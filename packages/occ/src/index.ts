@@ -9768,8 +9768,9 @@ export class OpenClawController {
     if (plugins === undefined || Object.keys(plugins).length === 0) {
       return;
     }
+    const driver = this.pluginDriver();
     try {
-      this.pluginDriver().validateAgentConfiguration?.(plugins, configuration);
+      driver.validateAgentConfiguration?.(plugins, configuration);
     } catch (error) {
       if (error instanceof ConfigurationHarnessError) {
         throw error;

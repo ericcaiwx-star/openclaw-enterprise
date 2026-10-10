@@ -38,9 +38,9 @@ export function validateCodexApprovalPolicySetting(
 /**
  * Native startup checks an automatic app reviewer against the session approval policy in its
  * startup configuration. When the policy is omitted, the Gateway picks its own session policy
- * (`never` over its websocket transport unless guardian mode or managed requirements say
- * otherwise), which that check cannot see, so the Codex Plugin Driver requires the policy
- * the Gateway runs as `on-request`.
+ * (`never` over its websocket transport unless guardian mode or the Gateway's environment
+ * override say otherwise), which that check cannot see, so the Codex Plugin Driver requires
+ * the policy the Gateway runs as `on-request`.
  */
 export function validateCodexAutomaticReviewerPolicy(
   selections: PluginDesiredState,
