@@ -5,8 +5,57 @@ import { selectQaMatrix, validateQaInputs } from "../../tests/helpers/qa-selecti
 
 const selection = selectQaMatrix();
 
+const repositoryPattern = /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9][a-z0-9._-]{0,99}$/;
+
+function validateRepositoryFixture() {
+  const fixture = process.env.QA_REPOSITORY_FIXTURE ?? "default";
+  assert.ok(
+    fixture === "default" || fixture === "isolated",
+    "QA_REPOSITORY_FIXTURE must be default or isolated",
+  );
+  if (fixture !== "isolated") {
+    return;
+  }
+
+  const target = process.env.QA_ISOLATED_REPOSITORY_FULL_NAME;
+  assert.ok(target, "QA_ISOLATED_REPOSITORY_FULL_NAME is required");
+  assert.match(
+    target,
+    repositoryPattern,
+    "QA_ISOLATED_REPOSITORY_FULL_NAME must be a lowercase owner/repository name",
+  );
+  assert.notEqual(
+    target,
+    process.env.GITHUB_REPOSITORY?.toLowerCase(),
+    "isolated QA repository fixture must not target this workflow repository",
+  );
+
+  let registry;
+  try {
+    registry = JSON.parse(process.env.REPOSITORY_REGISTRY_JSON ?? "");
+  } catch {
+    throw new Error("REPOSITORY_REGISTRY_JSON must be valid JSON");
+  }
+  assert.ok(
+    registry !== null && typeof registry === "object" && !Array.isArray(registry),
+    "REPOSITORY_REGISTRY_JSON must be an object",
+  );
+  assert.ok(Array.isArray(registry.repositories), "repository registry must contain repositories");
+  assert.equal(
+    registry.repositories.length,
+    1,
+    "isolated QA repository registry must contain exactly one repository",
+  );
+  assert.equal(
+    registry.repositories[0]?.repository,
+    target,
+    "isolated QA repository registry must match QA_ISOLATED_REPOSITORY_FULL_NAME",
+  );
+}
+
 // A workflow-scoped materializer: no secrets are written into the checkout,
 // test results, command arguments, or the environment file itself.
+validateRepositoryFixture();
 const directory = join(process.env.RUNNER_TEMP, "qa-matrix-credentials");
 await mkdir(directory, { mode: 0o700 });
 const mapping = {

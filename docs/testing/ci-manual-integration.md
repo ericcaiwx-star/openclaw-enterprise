@@ -9,7 +9,7 @@ local or hosted test results.
 
 Start with the [QA matrix scenario inventory](qa-matrix.md#coverage-and-applicability)
 for the four shipped installation/preset combinations. Read its
-[scenario outcomes](qa-matrix.md#read-scenario-outcomes) to distinguish passed,
+[scenario outcomes](qa-matrix-results.md#read-scenario-outcomes) to distinguish passed,
 failed, blocked, and unexecuted coverage.
 
 The matrix overlaps ordinary deployment and model checks in `k3d-model`, but
