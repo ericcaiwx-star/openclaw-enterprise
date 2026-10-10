@@ -3505,6 +3505,88 @@ test("Agent plugin reviewer selection preserves omission and rejects unsupported
   assert.deepEqual(replaced.data.plugins, inherited);
 });
 
+test("the Codex Plugin Driver refuses an automatic reviewer without an on-request session policy at deployment", async () => {
+  const configurationDriver = createTestConfigurationDriver();
+  const controller = await configuredController({ configurationDriver });
+  await bootstrap(controller);
+  const namespace = await createNamespace(controller, "codex-approval-policy-api");
+  const setting = "plugins.entries.codex.config.appServer.approvalPolicy";
+  const values = (approvalPolicy) => {
+    const configuration = createHarnessConfiguration("codex", "gpt-6-astra");
+    const appServer = configuration.plugins.entries.codex.config.appServer;
+    delete appServer.approvalPolicy;
+    if (approvalPolicy !== undefined) {
+      appServer.approvalPolicy = approvalPolicy;
+    }
+    return configuration;
+  };
+  // Configuration saves do not know the Agent's plugins, so an omitted policy still saves.
+  const configuration = await createConfiguration(controller, namespace.id, values(undefined));
+  const pluginDriver = new CodexPluginDriver();
+  controller.fixture.controller.registerDriver(pluginDriver);
+  controller.fixture.controller.selectDriver("plugin", pluginDriver.id);
+  const automatic = { [linearPluginId]: { enabled: true, toolDefaults: { reviewer: "auto" } } };
+  const created = await controller.request("POST", `/namespaces/${namespace.id}/agents`, {
+    body: {
+      name: "approval-policy-agent",
+      executionMode: "dedicated",
+      configurationId: configuration.id,
+      plugins: automatic,
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const agentPath = `/namespaces/${namespace.id}/agents/${created.data.id}`;
+  await controller.fixture.controller.handleNamespaceLifecycle(
+    controller.fixture.principal.id,
+    namespace.id,
+    "ready",
+  );
+  await bindHarnessKey(controller.fixture, namespace.id, created.data);
+  const store = async (approvalPolicy) => {
+    const stored = configurationDriver.stored({ namespaceId: namespace.id, id: configuration.id });
+    await configurationDriver.update({ ...stored, values: values(approvalPolicy) });
+  };
+  const deploy = () => controller.request("POST", `${agentPath}/deploy`);
+  const revisions = async () =>
+    (await controller.request("GET", `${agentPath}/revisions`)).data.length;
+  // Native startup checks the automatic reviewer against the policy Compute renders. When the
+  // policy is omitted, the Gateway picks its own session policy, which can be never, so the
+  // check would pass on a policy the sessions do not run (finding 988).
+  for (const [approvalPolicy, fix] of [
+    [undefined, "set it explicitly"],
+    ["never", "change it"],
+  ]) {
+    await store(approvalPolicy);
+    const refused = await deploy();
+    assert.equal(refused.status, 400, `${approvalPolicy}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.error.code, "INVALID_REQUEST");
+    assert.equal(
+      refused.body.error.message,
+      `An automatic plugin reviewer requires Configuration setting ${setting} "on-request"; ${fix} or choose the human reviewer.`,
+    );
+    assert.equal(await revisions(), 0);
+  }
+  // The Gateway runs on-failure as on-request; Compute renders on-request for both.
+  for (const approvalPolicy of ["on-request", "on-failure"]) {
+    await store(approvalPolicy);
+    const deployed = await deploy();
+    assert.equal(deployed.status, 202, `${approvalPolicy}: ${JSON.stringify(deployed.body)}`);
+  }
+  // Without an enabled automatic reviewer the native default stays, and nothing is required.
+  await store(undefined);
+  for (const plugins of [
+    { [linearPluginId]: { enabled: true, toolDefaults: { reviewer: "human" } } },
+    { [linearPluginId]: { enabled: false, toolDefaults: { reviewer: "auto" } } },
+  ]) {
+    const updated = await controller.request("PATCH", agentPath, {
+      body: { configurationId: configuration.id, plugins },
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    const deployed = await deploy();
+    assert.equal(deployed.status, 202, JSON.stringify(deployed.body));
+  }
+});
+
 test("Codex Agents refuse plugin and tool approver overrides and keep Agent-wide approvers", async () => {
   const controller = await configuredController();
   await bootstrap(controller);
@@ -5469,6 +5551,33 @@ test("Agent provisioning API validates inline configuration with existing Secret
     );
     assert.doesNotMatch(JSON.stringify(refused.body), /10\.99\./);
   }
+  // The retired Codex untrusted approval policy is one of those gateway settings (finding 987).
+  const untrustedPolicy = await injectedRequest(
+    fixture.app,
+    "POST",
+    `/namespaces/${namespace.data.id}/agents/provision`,
+    {
+      body: provisioningRequestBody(namespace.data.id, secrets, {
+        configuration: {
+          values: {
+            ...model,
+            plugins: {
+              entries: { codex: { config: { appServer: { approvalPolicy: "untrusted" } } } },
+            },
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(untrustedPolicy.status, 409, JSON.stringify(untrustedPolicy.body));
+  assert.deepEqual(
+    { code: untrustedPolicy.body.error.code, message: untrustedPolicy.body.error.message },
+    {
+      code: "RESOURCE_CONFLICT",
+      message:
+        'Configuration setting plugins.entries.codex.config.appServer.approvalPolicy must not be "untrusted", which the OpenClaw runtime retired: use "on-request".',
+    },
+  );
   // A refusal the caller cannot fix (here the Installation enables dedicated runtime storage
   // without gateway routing) keeps fixed text, since its reason names Installation settings.
   // The API log names it with the request ID for the operator.
@@ -5701,6 +5810,31 @@ test("Agent provisioning API validates inline configuration with existing Secret
   assert.equal(
     invalidPolicy.body.error.message,
     "This Plugin Driver does not support tools[id].reviewer. Use toolDefaults.reviewer when supported, or omit the reviewer.",
+  );
+  assert.deepEqual(
+    await fixture.platformState.read((view) => view.agents.listAgents(namespace.data.id)),
+    [],
+  );
+  // The Codex Plugin Driver's automatic reviewer rule (finding 988) also refuses a
+  // provisioning request before anything durable is written.
+  const automaticReviewer = provisioningRequestBody(namespace.data.id, secrets, {
+    plugins: { [linearPluginId]: { enabled: true, toolDefaults: { reviewer: "auto" } } },
+  });
+  automaticReviewer.configuration.values = {
+    ...automaticReviewer.configuration.values,
+    plugins: { entries: { codex: { config: { appServer: { approvalPolicy: "never" } } } } },
+  };
+  const refusedReviewer = await injectedRequest(
+    fixture.app,
+    "POST",
+    `/namespaces/${namespace.data.id}/agents/provision`,
+    { body: automaticReviewer },
+  );
+  assert.equal(refusedReviewer.status, 400, JSON.stringify(refusedReviewer.body));
+  assert.equal(refusedReviewer.body.error.code, "INVALID_REQUEST");
+  assert.equal(
+    refusedReviewer.body.error.message,
+    'An automatic plugin reviewer requires Configuration setting plugins.entries.codex.config.appServer.approvalPolicy "on-request"; change it or choose the human reviewer.',
   );
   assert.deepEqual(
     await fixture.platformState.read((view) => view.agents.listAgents(namespace.data.id)),
@@ -6500,6 +6634,64 @@ test("authorization rejects sparse decision evidence", async () => {
   });
   assert.equal(response.status, 503);
   assert.equal(response.body.error.code, "DEPENDENCY_UNAVAILABLE");
+});
+
+test("deployment refuses the retired Codex untrusted approval policy across Compute Drivers", async (t) => {
+  for (const [kind, nativeCompute] of plaintextGatewayComputeDrivers()) {
+    await t.test(kind, async () => {
+      // The API/state fixture owns lifecycle and credentials; the actual selected
+      // Driver owns admission. No worker or remote backend is dispatched here.
+      const computeDriver = createProvisioningCapableComputeDriver();
+      computeDriver.validateGatewaySettings = (configuration) =>
+        nativeCompute.validateGatewaySettings?.(configuration);
+      const fixture = await createInjectedFixture({ computeDriver });
+      const controller = {
+        request: (method, path, options) => injectedRequest(fixture.app, method, path, options),
+      };
+      await bootstrap(controller, `Codex approval ${kind}`);
+      const namespace = await createNamespace(controller, `codex-approval-${kind}`);
+      await fixture.controller.handleNamespaceLifecycle(
+        fixture.principal.id,
+        namespace.id,
+        "ready",
+      );
+      // The pinned Gateway refuses untrusted at configuration load, with a doctor hint that
+      // cannot edit Compute's read-only configuration (finding 987).
+      for (const [name, approvalPolicy, expectedStatus] of [
+        ["untrusted", "untrusted", 409],
+        ["on-failure", "on-failure", 202],
+        ["omitted", undefined, 202],
+      ]) {
+        const agent = await createAgent(controller, namespace.id, `codex-approval-${name}`, {
+          plugins: {
+            entries: {
+              codex: {
+                config: { appServer: approvalPolicy === undefined ? {} : { approvalPolicy } },
+              },
+            },
+          },
+        });
+        await bindHarnessKey(fixture, namespace.id, agent);
+        const result = await controller.request(
+          "POST",
+          `/namespaces/${namespace.id}/agents/${agent.id}/deploy`,
+        );
+        assert.equal(result.status, expectedStatus, `${kind}: ${JSON.stringify(result.body)}`);
+        if (expectedStatus === 409) {
+          assert.equal(result.body.error.code, "RESOURCE_CONFLICT");
+          assert.equal(
+            result.body.error.message,
+            'Configuration setting plugins.entries.codex.config.appServer.approvalPolicy must not be "untrusted", which the OpenClaw runtime retired: use "on-request".',
+          );
+          const revisions = await controller.request(
+            "GET",
+            `/namespaces/${namespace.id}/agents/${agent.id}/revisions`,
+          );
+          assert.deepEqual(revisions.data, []);
+        }
+      }
+    });
+  }
 });
 
 test("deployment refuses native listener TLS before admitting a revision across Compute Drivers", async (t) => {

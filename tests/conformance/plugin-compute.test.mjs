@@ -658,18 +658,29 @@ test("compute serializes selected OpenClaw plugins for startup-time resolution",
 });
 
 test("Codex startup preserves explicit session approval choices and native defaults", () => {
-  for (const policy of ["never", "untrusted", "on-failure", undefined]) {
+  // Native startup gets the policy the pinned Gateway runs: it runs on-failure as on-request.
+  // A reviewer request must never silently upgrade an incompatible session policy to
+  // on-request; the native readiness check owns that rejection, and deployment refuses
+  // untrusted and an omitted policy with an automatic reviewer before rendering.
+  for (const [policy, native] of [
+    ["on-request", "on-request"],
+    ["on-failure", "on-request"],
+    ["never", "never"],
+    ["untrusted", "untrusted"],
+    [undefined, undefined],
+  ]) {
     const candidate = revision({ plugins: codexLinearPluginState() });
     candidate.configuration.plugins.entries.codex.config.appServer.approvalPolicy = policy;
     const runtime = pluginRuntimeSpecForRevision(candidate);
     const config = pluginRuntimeConfigMapData(runtime)[PLUGIN_RUNTIME_CODEX_CONFIG];
-    // A reviewer request must never silently upgrade an incompatible session
-    // policy to on-request. The native readiness check owns that rejection.
-    if (policy === undefined) {
+    if (native === undefined) {
       assert.doesNotMatch(config, /approval_policy/);
     } else {
-      assert.ok(config.startsWith(`approval_policy = "${policy}"\n`));
+      assert.ok(config.startsWith(`approval_policy = "${native}"\n\n[features]`), policy);
     }
+    // Docker delivers the same file through the environment.
+    const delivered = JSON.parse(pluginRuntimeEnvironment(runtime)[PLUGIN_RUNTIME_ENVIRONMENT]);
+    assert.equal(delivered.codexConfigurationToml, config);
   }
   const malformed = revision();
   malformed.configuration.plugins.entries.codex.config.appServer.approvalPolicy = "invalid";
@@ -703,6 +714,21 @@ enabled = false
   );
   // Only config.toml differs; the manifest that carries selections and approvers must match.
   assert.deepEqual(pluginRuntimeEarlierConfigMapData(runtime), [
+    { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforeApprovalPolicy },
+    { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforePluginDefaults },
+  ]);
+  // #1995 rendered on-failure as written; the Gateway runs it as on-request, which the
+  // current rendering carries.
+  const onFailure = revision({ plugins: codexLinearPluginState() });
+  onFailure.configuration.plugins.entries.codex.config.appServer.approvalPolicy = "on-failure";
+  const onFailureRuntime = pluginRuntimeSpecForRevision(onFailure);
+  const onFailureCurrent = pluginRuntimeConfigMapData(onFailureRuntime);
+  assert.deepEqual(onFailureCurrent, current);
+  assert.deepEqual(pluginRuntimeEarlierConfigMapData(onFailureRuntime), [
+    {
+      ...current,
+      [PLUGIN_RUNTIME_CODEX_CONFIG]: `approval_policy = "on-failure"\n\n${beforeApprovalPolicy}`,
+    },
     { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforeApprovalPolicy },
     { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforePluginDefaults },
   ]);

@@ -28,6 +28,7 @@ import { ComputeLifecycleDispatcher } from "../lifecycle-hooks.ts";
 import { currentComputeAbortSignal } from "../operation-context.ts";
 import { WORKSPACE_SETUP_RUNTIME } from "../workspace-setup-runtime.ts";
 import { validatePlaintextNativeGateway } from "../native-gateway-transport.ts";
+import { validateCodexApprovalPolicySetting } from "../../../gateway/codex-approval-policy.ts";
 import { unsupportedNativeGatewayAuthFields } from "../../../gateway/auth-fields.ts";
 import { SystemSshCommandExecutor, type SshCommandExecutor } from "./executor.ts";
 
@@ -168,11 +169,13 @@ function sshGatewayConfigurationDocument(
   validateTransport = true,
 ): OpenClawConfigurationDocument {
   if (validateTransport) {
-    validatePlaintextNativeGateway(
-      configuration,
-      (setting, requirement) =>
-        new ConfigurationFailure(`Configuration setting ${setting} ${requirement}.`),
-    );
+    for (const validate of [validatePlaintextNativeGateway, validateCodexApprovalPolicySetting]) {
+      validate(
+        configuration,
+        (setting, requirement) =>
+          new ConfigurationFailure(`Configuration setting ${setting} ${requirement}.`),
+      );
+    }
   }
   const gatewayRecord = asRecord(configuration.gateway);
   if (configuration.gateway !== undefined && gatewayRecord === undefined) {
@@ -445,6 +448,7 @@ export class SshComputeDriver implements ComputeDriver {
 
   validateGatewaySettings(configuration: Readonly<OpenClawConfigurationDocument>): void {
     validatePlaintextNativeGateway(configuration);
+    validateCodexApprovalPolicySetting(configuration);
   }
 
   validateHarnessAuth(harness: RevisionHarnessDescriptor, auth: HarnessAuthSnapshot): void {
