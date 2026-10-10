@@ -22,13 +22,15 @@ but with the policy omitted the Gateway picks its own, which can be `never`.
 **Who is affected.** Custom Codex Configurations with `untrusted` (the Gateway
 already refused them at load, with a `doctor --fix` hint that cannot work), and
 Agents with an automatic plugin reviewer whose Configuration omits the policy.
-Every bundled Preset sets it.
+With `never`, deployment now refuses what readiness refused before. Every
+bundled Preset sets the policy.
 
 **How to tell.** The `400` names the setting.
 
 **Steps.** Set the policy to `on-request`, or choose the human reviewer, then
 deploy the Agent again. `on-failure` still works; native startup now gets
-`on-request`, which the Gateway runs for it.
+`on-request`, which the Gateway runs for it. An Agent already deployed with the
+policy omitted keeps its current session policy until it is deployed again.
 
 ## 2026-10-09: refresh-token source updates need a new Secret
 
