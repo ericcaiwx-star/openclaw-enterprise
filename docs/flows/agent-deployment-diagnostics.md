@@ -1,7 +1,7 @@
 ---
 created: 2026-09-27
 updated: 2026-10-10
-last_updated_session: fix-1013
+last_updated_session: fix-1022-1019
 ---
 
 # Agent deployment diagnostics flow
@@ -85,6 +85,12 @@ failure there. The Driver lists it first as a `failed` check named after the
 startup step, with the failure code; diagnostics do not rerun that step. A
 failed or invalid status read adds nothing.
 
+An [OpenShell](../reference/drivers/openshell-sandbox.md) Harness listens inside
+its Sandbox's network namespace, so Pod-proxy reads of its private port fail
+(`502`). Its `agent` check is always `unknown` with code `UNAVAILABLE`, whether
+the Harness is healthy or holding a startup failure, and no held-failure check
+appears for it. Gateway checks are unaffected.
+
 ### 3. Return validated evidence
 
 `packages/occ/src/deployment-diagnostics.ts:deploymentDiagnostics` requires
@@ -104,6 +110,10 @@ status, startup evidence, plugin warnings, and Agent state unchanged.
   code, because these checks do not test model credentials.
 - A `failed` check named after a startup step, such as `peer-bridge-record`,
   means the runtime is holding that failure. Its Logs tab shows the remedy.
+- On an OpenShell Harness, the `agent` check says nothing about its health.
+  Deployment status names a held failure's code, such as
+  `RUNTIME_MODEL_PROBE_FAILED`, and the
+  [Sandbox log](../guides/topics/agent-logs.md#sandbox-source) shows why.
 - The focused API test covers exact permissions and sanitized Driver failures.
   The Kubernetes conformance test covers Pod proxy placement, revision and Pod
   identity, and missing-Pod behavior. These tests do not prove a live Slack
@@ -120,6 +130,8 @@ status, startup evidence, plugin warnings, and Agent state unchanged.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 14:30: Document that an OpenShell Harness's runtime status is unreachable to diagnostics. (fix-1022-1019)
 
 - 2026-10-10 10:00: Report a held runtime startup failure as the first diagnostic check. (fix-1013)
 
