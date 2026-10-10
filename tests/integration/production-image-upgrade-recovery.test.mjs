@@ -224,7 +224,7 @@ if (tool === 'helm') {
     fs.readFileSync(0);
     log('read ' + args.at(-1));
     const home = (state.inventoryNamespaces ?? []).find((ns) => ns.agents.some((a) => a.id === args.at(-1)));
-    const name = args.includes('agent') && fileArg('--namespace') !== home?.id ? undefined : state.names[args.at(-1)];
+    const name = args.includes('agent') && (!args.includes('--namespace') || fileArg('--namespace') !== home?.id) ? undefined : state.names[args.at(-1)];
     if (name === undefined) { process.stderr.write('permission denied\\n'); process.exit(1); }
     out({id: args.at(-1), name});
   } else if (args.includes('deploy')) {
@@ -1119,7 +1119,8 @@ test("an unchecked repository image pair cannot start an upgrade", async (t) => 
   assert.deepEqual(await f.events(), []);
 });
 
-// Exactly ten stranded Agents are all listed, with no "and N more" line.
+// Twelve stranded Agents list ten plus "and 2 more"; exactly ten list all of them, with no
+// "and N more" line.
 for (const count of [12, 10]) {
   test(`${count} running Agents without an active revision are named with their remedy before mutation`, async (t) => {
     const agent = (id, fields = {}) => ({

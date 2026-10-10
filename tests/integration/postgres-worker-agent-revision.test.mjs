@@ -5235,10 +5235,11 @@ test(
   "a deploy denial during repository admission leaves a first deployment's runtime untouched",
   requiresPostgres,
   async (context) => {
-    // Without an active revision a refused candidate is stopped only if Compute may have
-    // prepared it. Here the actor loses deploy while the first pass opens its repository
-    // session, so the recheck after admission refuses it before Compute is asked to prepare,
-    // with no earlier evidence: nothing may stop it.
+    // On Compute that does not declare exclusive replacement, a refused candidate without an
+    // active revision is stopped only if Compute may have prepared it. Here the actor loses
+    // deploy while the first pass opens its repository session; the repository lifecycle's
+    // authority recheck, as it records the opened session, refuses it before Compute is asked to
+    // prepare, with no earlier evidence: nothing may stop it.
     const repository = repositoryBoundary();
     const fixture = await setup(context, { repoDriver: repository.driver });
     const { owner, candidate } = await fixture.admitInitialRevision("repository-denied", {

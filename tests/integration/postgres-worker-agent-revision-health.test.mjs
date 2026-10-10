@@ -527,8 +527,8 @@ for (const { declares, shape, stopFailures = 0, refusal = "revoked" } of [
         assert.equal(active.rows[0].active_revision_id, null);
         assert.equal(counted(stops, candidate), 1, "the refused first deployment is stopped once");
         assert.deepEqual([...running], [], "nothing runs for the Agent");
-        // Like every Compute stop, each try binds the Agent first, even when this pass refused
-        // before Compute and never bound it.
+        // Like Agent stop and retirement, each try binds the Agent first, even when this pass
+        // refused before Compute and never bound it.
         assert.ok(
           effects.every((effect, index) => effect !== "stop" || effects[index - 1] === "bind"),
           effects.join(","),

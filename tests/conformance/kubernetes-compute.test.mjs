@@ -4247,6 +4247,7 @@ test("Kubernetes refuses native listener addresses that cannot serve its Pod-fac
   ];
   for (const configure of [options, routedOptions]) {
     const driver = createKubernetesComputeDriver(configure());
+    let settingFailure;
     for (const [gateway, setting] of invalid) {
       const candidate = routedRevision(driver, { configuration: { gateway } });
       assert.throws(
@@ -4267,10 +4268,14 @@ test("Kubernetes refuses native listener addresses that cannot serve its Pod-fac
         throw new Error("unexpected cluster access");
       };
       // Preparation refuses it like any other gateway setting, not as an admission conflict.
-      const other = routedRevision(driver, { configuration: { gateway: { auth: null } } });
-      const settingFailure = await driver
-        .prepareRevision(other, authContext(other))
-        .catch((e) => e);
+      if (settingFailure === undefined) {
+        const other = routedRevision(driver, { configuration: { gateway: { auth: null } } });
+        settingFailure = await driver.prepareRevision(other, authContext(other)).then(
+          () => assert.fail("gateway.auth null must be refused"),
+          (error) => error,
+        );
+        assert.match(settingFailure.message, /gateway\.auth /);
+      }
       for (const operation of ["prepareRevision", "activateRevision"]) {
         await assert.rejects(
           driver[operation](candidate, authContext(candidate)),
@@ -7331,7 +7336,8 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
     podUid: pods[role].metadata.uid,
   });
   let diagnosticsServing = true;
-  // Unrun channel checks the Gateway adds to its one socket check (at most 32 in all).
+  // Unrun channel checks the Gateway adds to its one socket check (a status report may carry at
+  // most 32 checks).
   let extraGatewayChecks = 0;
   driver.apiClients = Promise.resolve({
     core: {
