@@ -4050,7 +4050,14 @@ test("Codex gateway supervisor waits for its Harness plugin status without a dea
 // process spawning and the filesystem are substituted.
 async function startCodexGatewaySupervisor(
   t,
-  { bindingDeviceId, writableConfig = false, savedFiles, initialPeerStatus } = {},
+  {
+    bindingDeviceId,
+    writableConfig = false,
+    savedFiles,
+    initialPeerStatus,
+    runtimeStatus = false,
+    expectStart = true,
+  } = {},
 ) {
   const peerHttp = await import("node:http");
   const configurationPath = writableConfig
@@ -4074,6 +4081,7 @@ async function startCodexGatewaySupervisor(
       failures: [initialFailure],
     },
     peerAvailable: true,
+    peerRequests: 0,
     serving: true,
     readinessProbes: [],
     children: [],
@@ -4116,6 +4124,7 @@ async function startCodexGatewaySupervisor(
   };
   const peerPort = await listen(async (request, response) => {
     assert.equal(request.url, "/openclaw/plugin-runtime/status");
+    fixture.peerRequests++;
     if (fixture.peerGate !== undefined) {
       fixture.peerRequestPending = true;
       await fixture.peerGate;
@@ -4171,6 +4180,10 @@ async function startCodexGatewaySupervisor(
           ? {}
           : {
               OPENCLAW_WORKSPACE_NODE_PATH: "/home/node/workspace-node-binding/workspace-node.json",
+            }),
+        ...(bindingDeviceId === undefined && !runtimeStatus
+          ? {}
+          : {
               OPENCLAW_RUNTIME_STATUS_PORT: "18792",
               OPENCLAW_RUNTIME_STATUS_CONTAINER: "gateway",
             }),
@@ -4279,7 +4292,9 @@ async function startCodexGatewaySupervisor(
   // The peer poll is the last interval the wrapper registers.
   fixture.pollPeer = () => fixture.intervals.at(-1)();
   vm.runInNewContext(GATEWAY_RUNTIME_ENTRYPOINT, sandbox);
-  await waitForCondition("gateway supervisor start", () => fixture.children.length === 1);
+  if (expectStart) {
+    await waitForCondition("gateway supervisor start", () => fixture.children.length === 1);
+  }
   return fixture;
 }
 
@@ -4341,19 +4356,76 @@ for (const after of [false, true]) {
   });
 }
 
-test("Codex gateway supervisor refuses provenance for another revision or managed snapshot", async (t) => {
-  const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
-  const path = "/home/node/.openclaw/openclaw.json.oce-peer-bridge.json";
-  for (const patch of [{ revisionId: "another-revision" }, { sourceHash: "0".repeat(64) }]) {
-    const savedFiles = new Map(previous.files);
-    const journal = JSON.parse(savedFiles.get(path));
-    savedFiles.set(path, JSON.stringify({ ...journal, ...patch }));
-    await assert.rejects(
-      startCodexGatewaySupervisor(t, { writableConfig: true, savedFiles }),
-      /Gateway peer configuration state does not match the admitted revision/,
-    );
-  }
-});
+// The Pod-local bridge record survives container restarts, so an unusable one
+// would fail every restart the same way until the Pod is replaced. The wrapper
+// holds unready instead, names the file and the remedy, reports the failure on
+// the runtime status port and keeps the record (removing it could overwrite
+// native edits with a rebuilt bridge).
+for (const [name, record, problem] of [
+  ["empty", () => "", "is unreadable"],
+  ["truncated", (saved) => saved.slice(0, -5), "is unreadable"],
+  ["null", () => "null", "does not match the admitted revision"],
+  ["an array", () => "[]", "does not match the admitted revision"],
+  [
+    "another revision",
+    (saved) => JSON.stringify({ ...JSON.parse(saved), revisionId: "another-revision" }),
+    "does not match the admitted revision",
+  ],
+  [
+    "another managed snapshot",
+    (saved) => JSON.stringify({ ...JSON.parse(saved), sourceHash: "0".repeat(64) }),
+    "does not match the admitted revision",
+  ],
+]) {
+  test(`Codex gateway supervisor holds with a named remedy for a peer bridge record that is ${name}`, async (t) => {
+    const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
+    const path = "/home/node/.openclaw/openclaw.json.oce-peer-bridge.json";
+    let savedFiles = new Map(previous.files);
+    savedFiles.set(path, record(savedFiles.get(path)));
+    const saved = savedFiles.get(path);
+    // A container restart in the same Pod starts again from the files the last one left.
+    for (let restart = 0; restart < 2; restart++) {
+      const gateway = await startCodexGatewaySupervisor(t, {
+        writableConfig: true,
+        savedFiles,
+        runtimeStatus: true,
+        expectStart: false,
+      });
+      savedFiles = gateway.files;
+      // Longer than a loopback peer round trip: a wrapper that went on past the hold
+      // would have asked its Harness peer by now.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(gateway.peerRequests, 0, "the held wrapper never asks its Harness peer");
+      assert.deepEqual(gateway.children, [], "OpenClaw must not start from an unusable record");
+      assert.deepEqual(gateway.exits, [], "the wrapper holds rather than crash-looping");
+      assert.equal(gateway.files.get(path), saved, "the record is kept for Pod replacement");
+      assert.ok(
+        gateway.logs.includes(
+          `Gateway peer configuration record ${path} ${problem}. OpenClaw was not started. ` +
+            "Delete the Pod to restore the managed configuration snapshot; native configuration " +
+            "edits in this Pod are lost.",
+        ),
+        JSON.stringify(gateway.logs),
+      );
+      const phases = gateway.logs
+        .filter((line) => typeof line === "string" && line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter(({ event }) => event === "runtime.startup_phase")
+        .map(({ phase, outcome, code }) => ({ phase, outcome, code }));
+      assert.deepEqual(phases, [
+        { phase: "peer-bridge-record", outcome: "failed", code: "PEER_BRIDGE_RECORD_UNUSABLE" },
+      ]);
+      const { runtimeFailure } = gateway.runtimeStatus();
+      assert.equal(runtimeFailure.check, "peer-bridge-record");
+      assert.equal(runtimeFailure.code, "UNAVAILABLE");
+      assert.equal(gateway.status().phase, "starting");
+      assert.equal((await readReadyStatusFromHandler(gateway.statusHandler)).status, 503);
+      // The remedy deletes the Pod: termination ends the held wrapper at once.
+      gateway.signalHandlers.SIGTERM();
+      assert.deepEqual(gateway.exits, [0]);
+    }
+  });
+}
 
 test("Codex gateway supervisor preserves native edits when its initial config is writable", async (t) => {
   const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });

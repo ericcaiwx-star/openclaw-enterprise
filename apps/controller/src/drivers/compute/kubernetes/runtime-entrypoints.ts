@@ -2587,15 +2587,37 @@ const codexBridgeOwner = writableInitialConfig ? {
   sourceHash: require("node:crypto").createHash("sha256").update(admittedConfigText).digest("hex"),
 } : undefined;
 let generatedCodexBridges = [];
+// Why the Pod-local record cannot be used, if it cannot. Every container
+// restart in this Pod reads the same file, so startup holds instead of exiting.
+let codexBridgeRecordProblem;
 if (writableInitialConfig && pluginExistsSync(codexBridgeStatePath)) {
-  const saved = JSON.parse(pluginReadFileSync(codexBridgeStatePath, "utf8"));
-  if (!isPlainObject(saved) ||
+  let saved;
+  try {
+    saved = JSON.parse(pluginReadFileSync(codexBridgeStatePath, "utf8"));
+  } catch {
+    codexBridgeRecordProblem = "is unreadable";
+  }
+  if (codexBridgeRecordProblem === undefined && (!isPlainObject(saved) ||
       Object.entries(codexBridgeOwner).some(([key, value]) => saved[key] !== value) ||
       !Array.isArray(saved.bridges) || saved.bridges.length > 2 ||
-      !saved.bridges.every(isPlainObject)) {
-    throw new Error("Gateway peer configuration state does not match the admitted revision.");
+      !saved.bridges.every(isPlainObject))) {
+    codexBridgeRecordProblem = "does not match the admitted revision";
   }
-  generatedCodexBridges = saved.bridges;
+  if (codexBridgeRecordProblem === undefined) generatedCodexBridges = saved.bridges;
+}
+
+// Rebuilding generated bridges without the record could overwrite native
+// edits, so the record is kept and only Pod replacement clears it.
+function holdCodexBridgeRecordFailure() {
+  console.error(
+    "Gateway peer configuration record " + codexBridgeStatePath + " " + codexBridgeRecordProblem +
+      ". OpenClaw was not started. Delete the Pod to restore the managed configuration snapshot;" +
+      " native configuration edits in this Pod are lost.",
+  );
+  logStartupPhase("peer-bridge-record", startupPhaseOrigin, "failed", "PEER_BRIDGE_RECORD_UNUSABLE");
+  publishRuntimeFailure("peer-bridge-record", "UNAVAILABLE");
+  forwardTermination(() => undefined);
+  setInterval(() => {}, 3600000);
 }
 
 function recordWritableCodexBridges(bridges) {
@@ -2751,6 +2773,10 @@ let pluginResult;
 let peerStatus;
 let resetWorkspaceNodeTracking = () => {};
 (async () => {
+if (codexBridgeRecordProblem !== undefined) {
+  holdCodexBridgeRecordFailure();
+  return;
+}
 peerStatus = followsPeerStatus
   ? await timeStartupPhase("peer-plugin-status", waitForPeerPluginRuntimeStatus)
   : undefined;
