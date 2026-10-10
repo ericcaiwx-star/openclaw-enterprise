@@ -4224,6 +4224,54 @@ test("gateway routing derives stable endpoints and exact Envoy HTTPRoutes", asyn
   );
 });
 
+test("Kubernetes refuses native listener addresses that cannot serve its Pod-facing routes", async () => {
+  const invalid = [
+    [{ bind: "loopback" }, "gateway.bind"],
+    [{ bind: "tailnet" }, "gateway.bind"],
+    [{ bind: "custom", customBindHost: "127.0.0.1" }, "gateway.customBindHost"],
+    [{ bind: "custom", customBindHost: " 127.1.2.3 " }, "gateway.customBindHost"],
+  ];
+  for (const configure of [options, routedOptions]) {
+    const driver = createKubernetesComputeDriver(configure());
+    for (const [gateway, setting] of invalid) {
+      const candidate = routedRevision(driver, { configuration: { gateway } });
+      assert.throws(
+        () => driver.validateGatewaySettings(candidate.configuration),
+        (error) => error instanceof ComputeGatewaySettingError && error.setting === setting,
+      );
+      assert.throws(
+        () =>
+          driver.validateAgentProvisioning({
+            executionMode: "dedicated",
+            configuration: candidate.configuration,
+          }),
+        (error) => error instanceof ComputeGatewaySettingError && error.setting === setting,
+      );
+      // No remote read or write is necessary to reject a listener that cannot
+      // accept the Service's Pod-IP traffic. This protects both worker phases.
+      driver.clients = async () => {
+        throw new Error("unexpected cluster access");
+      };
+      for (const operation of ["prepareRevision", "activateRevision"]) {
+        await assert.rejects(driver[operation](candidate, authContext(candidate)), {
+          message: new RegExp(setting.replaceAll(".", "\\.")),
+        });
+      }
+    }
+    for (const gateway of [
+      {},
+      { bind: "auto" },
+      { bind: "lan" },
+      { bind: "custom", customBindHost: "0.0.0.0" },
+      { bind: "custom", customBindHost: "10.42.0.17" },
+      { bind: "lan", customBindHost: "127.0.0.1" },
+      { tailscale: { mode: "off" } },
+    ]) {
+      assert.doesNotThrow(() => driver.validateGatewaySettings({ gateway }));
+    }
+  }
+});
+
 test("agent provisioning validation reuses native trusted-proxy admission before cluster access", () => {
   const driver = createKubernetesComputeDriver(routedOptions());
   const revision = routedRevision(driver);
