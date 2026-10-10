@@ -4249,6 +4249,7 @@ test("Kubernetes refuses native listener addresses that cannot serve its Pod-fac
   ];
   for (const configure of [options, routedOptions]) {
     const driver = createKubernetesComputeDriver(configure());
+    let settingFailure;
     for (const [gateway, setting] of invalid) {
       const candidate = routedRevision(driver, { configuration: { gateway } });
       assert.throws(
@@ -4268,10 +4269,22 @@ test("Kubernetes refuses native listener addresses that cannot serve its Pod-fac
       driver.clients = async () => {
         throw new Error("unexpected cluster access");
       };
+      // Preparation refuses it like any other gateway setting, not as an admission conflict.
+      if (settingFailure === undefined) {
+        const other = routedRevision(driver, { configuration: { gateway: { auth: null } } });
+        settingFailure = await driver.prepareRevision(other, authContext(other)).then(
+          () => assert.fail("gateway.auth null must be refused"),
+          (error) => error,
+        );
+        assert.match(settingFailure.message, /gateway\.auth /);
+      }
       for (const operation of ["prepareRevision", "activateRevision"]) {
-        await assert.rejects(driver[operation](candidate, authContext(candidate)), {
-          message: new RegExp(setting.replaceAll(".", "\\.")),
-        });
+        await assert.rejects(
+          driver[operation](candidate, authContext(candidate)),
+          (error) =>
+            error.constructor === settingFailure.constructor &&
+            new RegExp(setting.replaceAll(".", "\\.")).test(error.message),
+        );
       }
     }
     for (const gateway of [
@@ -4312,9 +4325,53 @@ test("Kubernetes renders an all-interfaces native listener when gateway.bind is 
   }
 });
 
-test("Kubernetes keeps a revision's gateway document rendered before the lan bind", async () => {
-  for (const bind of [undefined, "auto", "lan"]) {
-    const { driver, revision, objects, records, state, context } = workspaceSetupFixture(false);
+test("Kubernetes keeps a revision's gateway document rendered before the lan bind", async (t) => {
+  // A two-cluster Installation's gateway document carries the execution cluster's CA beside it.
+  const directory = await mkdtemp(join(tmpdir(), "oce-execution-ca-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const certificate = join(directory, "execution-ca.pem");
+  const generated = spawnSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "ec",
+      "-pkeyopt",
+      "ec_paramgen_curve:prime256v1",
+      "-nodes",
+      "-days",
+      "1",
+      "-keyout",
+      join(directory, "execution-ca.key"),
+      "-out",
+      certificate,
+      "-subj",
+      "/CN=execution-ca",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
+  const executionCluster = {
+    ...twoClusterOptions().executionCluster,
+    caBundle: await readFile(certificate, "utf8"),
+  };
+  for (const [bind, computeOptions] of [
+    [undefined, {}],
+    ["auto", {}],
+    ["lan", {}],
+    [undefined, { executionCluster }],
+  ]) {
+    const { driver, revision, objects, records, state, context } = workspaceSetupFixture(
+      false,
+      true,
+      undefined,
+      computeOptions,
+    );
+    if (computeOptions.executionCluster !== undefined) {
+      // One stand-in API serves both clusters.
+      driver.executionApiClients = driver.apiClients;
+    }
     revision.configuration = structuredClone(revision.configuration);
     if (bind !== undefined) {
       revision.configuration.gateway.bind = bind;
@@ -4325,6 +4382,7 @@ test("Kubernetes keeps a revision's gateway document rendered before the lan bin
       key.endsWith(`:gateway-${digest(revision.agentId)}-rev-${digest(revision.id)}`),
     );
     const current = structuredClone(objects.get(documentKey));
+    assert.equal(current.data["execution-ca.pem"], computeOptions.executionCluster?.caBundle);
     const rendered = JSON.parse(current.data["openclaw.json"]);
     assert.equal(rendered.gateway.bind, "lan");
     // Earlier controllers wrote an omitted or auto bind as submitted; that rendering differed
@@ -7280,6 +7338,9 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
     podUid: pods[role].metadata.uid,
   });
   let diagnosticsServing = true;
+  // Unrun channel checks the Gateway adds to its one socket check (a status report may carry at
+  // most 32 checks).
+  let extraGatewayChecks = 0;
   driver.apiClients = Promise.resolve({
     core: {
       async listNamespace({ labelSelector }) {
@@ -7334,6 +7395,12 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
               state: role === "agent" ? "succeeded" : "unknown",
               checkedAt: role === "agent" ? "2026-09-19T12:00:00.000Z" : null,
             },
+            ...Array.from({ length: role === "gateway" ? extraGatewayChecks : 0 }, (_, index) => ({
+              component: "gateway",
+              check: `channel-${index}`,
+              state: "unknown",
+              checkedAt: null,
+            })),
           ],
         };
       },
@@ -7413,6 +7480,45 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
   ]);
   diagnosticsServing = true;
 
+  // An Agent holding a failed model check reports it as well, without its cause and at
+  // millisecond precision. Held failures lead, and the 32-check cap drops diagnostics checks.
+  const gatewayHeld = runtimeStatus;
+  runtimeStatus = (role) =>
+    role === "gateway"
+      ? gatewayHeld(role)
+      : {
+          ...gatewayHeld(role),
+          runtimeFailure: {
+            component: "agent",
+            check: "model-probe",
+            checkedAt: "2026-09-19T11:58:00Z",
+            code: "MODEL_PROBE_FAILED",
+            cause: { kind: "PROBE_STATUS", detail: "format" },
+          },
+        };
+  extraGatewayChecks = 31;
+  const capped = (await driver.diagnoseAgentDeployment(binding)).checks;
+  assert.equal(capped.length, 32);
+  assert.deepEqual(capped.slice(0, 3), [
+    {
+      component: "agent",
+      check: "model-probe",
+      state: "failed",
+      checkedAt: "2026-09-19T11:58:00.000Z",
+      code: "MODEL_PROBE_FAILED",
+    },
+    { ...heldFailure, state: "failed" },
+    {
+      component: "agent",
+      check: "auth",
+      state: "succeeded",
+      checkedAt: "2026-09-19T12:00:00.000Z",
+    },
+  ]);
+  assert.equal(capped.at(-1).check, "channel-27");
+  extraGatewayChecks = 0;
+  runtimeStatus = gatewayHeld;
+
   // A status read that is refused or returns another Pod's report adds nothing;
   // the diagnostics read alone decides the observation.
   const held = runtimeStatus;
@@ -7438,7 +7544,9 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
   // Tolerating a failed status read never swallows the caller's cancellation.
   const owner = new AbortController();
   const cancelled = new Error("diagnostics caller went away");
-  runtimeStatus = () => {
+  runtimeStatus = async () => {
+    // The diagnostics reads have finished by now, so only the failed status read sees it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     owner.abort(cancelled);
     throw Object.assign(new Error("pods/proxy denied"), { code: 403, headers: {} });
   };
