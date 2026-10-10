@@ -506,7 +506,10 @@ test(
       });
       assert.equal(harnessService.spec.selector["openclaw.dev/namespace"], first.namespaceId);
       assert.equal(harnessService.spec.selector["openclaw.dev/agent"], first.identity.agentId);
-      assert.equal(harnessService.spec.selector["openclaw.dev/revision"], first.identity.revisionId);
+      assert.equal(
+        harnessService.spec.selector["openclaw.dev/revision"],
+        first.identity.revisionId,
+      );
       assert.match(harnessService.spec.selector["app.kubernetes.io/name"], /-inactive$/);
     }
     const reuseEnv = { ...env };
