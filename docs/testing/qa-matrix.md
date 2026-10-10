@@ -100,7 +100,9 @@ Compose native UI access uses the documented gateway password through a
 loopback TLS relay. Kubernetes native access uses the console's authenticated
 native-admin endpoint with the documented [per-Agent native-admin opt-in](../guides/deploy/native-admin.md). The suite installs only its uniquely named CA trust entry,
 keeps browser certificate verification enabled, and removes that trust entry at
-cleanup. Compose does not claim integrated shared-session native tabs.
+cleanup. Compose does not claim integrated shared-session native tabs. Its private routing
+files retain mode `0600` and use the controller image’s UID/GID so hosted runner
+identity differences do not prevent controller startup.
 
 Slack applies only to Codex. The sender and gateway bot must be distinct members
 of the authorized channel. The sender credential must permit posting plus
