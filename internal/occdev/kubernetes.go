@@ -396,7 +396,7 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 		config["drivers"].(map[string]any)["sandbox"] = openShellInstallationConfiguration(s, openShell.workspaceResources)
 		config["drivers"].(map[string]any)["credential_gateway"] = map[string]any{
 			"id":            openShellCredentialGatewayID,
-			"configuration": map[string]any{"binaries": []string{openShellCodexBinary}},
+			"configuration": map[string]any{"binaries": openShellCodexBinaries()},
 		}
 		config["backend"] = []any{openShellBackendConfiguration(s)}
 	}
@@ -410,9 +410,16 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 const (
 	openShellSandboxID           = "sandbox-openshell-development"
 	openShellCredentialGatewayID = "credential-gateway-openshell-development"
-	// The native Codex binary is the only process allowed to use injected model credentials.
-	openShellCodexBinary = "/app/node_modules/openclaw/node_modules/.pnpm/@openai+codex@0.163.0-alpha.1-linux-x64/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex"
 )
+
+// Match the kernel-resolved executable on both architectures of the pinned runtime.
+// The container engine may run remotely, so the launcher's architecture is not authoritative.
+func openShellCodexBinaries() []string {
+	return []string{
+		"/app/node_modules/openclaw/node_modules/.pnpm/@openai+codex@0.163.0-alpha.1-linux-x64/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex",
+		"/app/node_modules/openclaw/node_modules/.pnpm/@openai+codex@0.163.0-alpha.1-linux-arm64/node_modules/@openai/codex/vendor/aarch64-unknown-linux-musl/bin/codex",
+	}
+}
 
 // openShellBackendConfiguration owns the gateway connection shared by the Sandbox and
 // Credential Gateway Drivers.

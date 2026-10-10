@@ -1,31 +1,20 @@
 ---
 created: "2026-09-21"
 updated: 2026-10-09
-last_updated_session: authoring-run/6eefb93e-33fb-450a-9657-51ebe15a686e
+last_updated_session: authoring-run/1e7118f7-bdb0-4564-894c-02f990f75e67
 ---
 
 # OpenShell Sandbox provisioning flow
 
 ## Overview
 
-The Kubernetes Compute Driver delegates dedicated Codex and native OpenClaw
-Harnesses to the selected OpenShell Sandbox Driver. One deployment-paired OpenShell Gateway uses
-an explicitly configured workspace mode. Operator mode is implemented: for each
-OCC Namespace, the Driver labels the Kubernetes namespace, reconciles rendered
-workspace-chart resources, and creates or adopts an OpenShell Workspace with
-the same physical name. Managed mode is recognized but fails before mutation.
-Sandbox requests are homed in the operator-mode Workspace.
-
-The model credential uses a [credential source](credential-source-lifecycle.md),
-so the Agent receives no Secret permission. For dedicated Codex, Compute passes
-only the app-server token verifier and admitted runtime-file contents. The
-Sandbox Driver realizes the files as a revision-owned OpenShell provider and
-enables bearer passthrough on the Codex service exposure. Codex, not OpenShell,
-authenticates the Gateway request. Compute detects the Driver's endpoint
-capability and configures the Agent Gateway to use the OpenShell-advertised
-WebSocket origin. It does not activate the direct Kubernetes Harness Service for
-that path. Drivers without the capability retain the existing Service or private
-route behavior.
+Kubernetes Compute delegates dedicated Codex and native OpenClaw Harnesses to
+the OpenShell Sandbox Driver. Operator mode owns a Workspace for each OCC
+Namespace; managed mode fails before mutation. Model access uses a
+[credential source](credential-source-lifecycle.md), without granting the Agent
+Secret permission. Dedicated Codex receives revision-owned provider files and
+authenticates Gateway requests through OpenShell's bearer-passthrough exposure.
+Compute uses that advertised endpoint instead of the direct Harness Service.
 
 The development Driver puts the expiring workspace-node setup envelope in a
 revision-owned provider file. The Harness signs the bootstrap token that the
@@ -108,7 +97,9 @@ graph TD
 
 The written Installation declares the `openshell` Backend with the Gateway
 endpoint, the Sandbox, and a Credential Gateway whose `binaries` list holds the
-native Codex executable. Model egress comes from the credential source's
+native Codex executable for each supported runtime architecture, x64 and ARM64.
+The launcher host does not determine the container architecture. Model egress
+comes from the credential source's
 provider profile, not the Sandbox policy.
 
 `scripts/dev-up` validates Kubernetes Compute with OpenShell and delegates to
@@ -364,6 +355,8 @@ networking. Native OpenClaw remains a separate verification-only path.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-09 19:45: Cover both runtime architectures in the development credential policy. (authoring-run/1e7118f7-bdb0-4564-894c-02f990f75e67 - bd540bcdef63cdc719e73192e4dbe99c365953c3)
 
 - 2026-10-09 23:18: Accept bracketed IPv6 endpoints. (authoring-run/6eefb93e-33fb-450a-9657-51ebe15a686e - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)
 
