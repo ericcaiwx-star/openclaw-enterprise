@@ -6,7 +6,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { imageSmokeTimeoutMultiplier } from "../helpers/image-smoke-timeout.mjs";
 import {
-  GATEWAY_READINESS_ENTRYPOINT,
   GATEWAY_RUNTIME_ENTRYPOINT as KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
   PLUGIN_APP_SERVER_TOKEN_HMAC_DOMAIN,
 } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
@@ -16,6 +15,7 @@ import {
   commandOutput,
   createAdmittedRuntimeImageConfiguration,
   jsonLogEntries,
+  failureTail,
   runGatewaySmoke,
 } from "../helpers/runtime-image-startup.mjs";
 
@@ -87,8 +87,6 @@ test(
           "exec",
           "-e",
           `OCC_TEST_WORKSPACE_NODE_ID=${workspaceNodeId}`,
-          "-e",
-          `OCC_TEST_GATEWAY_READINESS=${GATEWAY_READINESS_ENTRYPOINT}`,
           "-e",
           `OCC_TEST_TOKEN_DOMAIN=${PLUGIN_APP_SERVER_TOKEN_HMAC_DOMAIN}`,
           containerName,
@@ -175,7 +173,7 @@ async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) 
       "OPENCLAW_POD_UID=pod-peer-respawn",
       "OPENCLAW_WORKSPACE_DIR=/home/node/workspace",
       // The stale-replacement fixture answers its verification read only after
-      // checking the replacement (a readiness command and two local reads), so
+      // checking the replacement (an HTTP readiness request and two local reads), so
       // the wrapper's peer read must outlast that work on a slow runner.
       `OPENCLAW_PLUGIN_RUNTIME_REQUEST_TIMEOUT_MS=${30_000 * imageSmokeTimeoutMultiplier}`,
     ],
@@ -193,8 +191,6 @@ async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) 
         "-e",
         `OCC_TEST_GATEWAY_SCENARIO=${scenario}`,
         "-e",
-        `OCC_TEST_GATEWAY_READINESS=${GATEWAY_READINESS_ENTRYPOINT}`,
-        "-e",
         `OCC_TEST_TOKEN_DOMAIN=${PLUGIN_APP_SERVER_TOKEN_HMAC_DOMAIN}`,
         containerName,
         "node",
@@ -211,7 +207,7 @@ async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) 
   if (!(failure.stdout ?? "").includes(`"phase":"${expectedPhase}"`)) {
     const logs = await runDocker(["logs", containerName]).catch((error) => error);
     assert.fail(
-      `Expected ${expectedPhase} was not observed.\n${commandOutput(failure)}\n${commandOutput(logs)}`,
+      `Expected ${expectedPhase} was not observed.\n${failureTail(commandOutput(failure), 4096)}\n${failureTail(commandOutput(logs), 8192)}`,
     );
   }
   // The fixture fails on its own only when the wrapper outlives its deadline;
@@ -226,7 +222,9 @@ async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) 
     timeout: 30_000 * imageSmokeTimeoutMultiplier,
   }).catch(async (error) => {
     const logs = await runDocker(["logs", containerName]).catch((logsError) => logsError);
-    assert.fail(`The Gateway container did not exit.\n${error.message}\n${commandOutput(logs)}`);
+    assert.fail(
+      `The Gateway container did not exit.\n${error.message}\n${failureTail(commandOutput(logs))}`,
+    );
   });
   assert.equal(exited.stdout.trim(), "1");
   const inspect = await runDocker(["inspect", containerName, "--format", "{{json .State}}"]);

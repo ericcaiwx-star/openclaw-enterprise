@@ -229,7 +229,7 @@ before another attempt.
 | Variable                          | Required value or format                                                                                |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `OCC_AUTH_SECRET`                 | Same mounted Better Auth secret used by the API.                                                        |
-| `OCC_AUTH_BASE_URL`               | Same as the API; HTTPS unless the host is `localhost` or `127.0.0.1`.                                   |
+| `OCC_AUTH_BASE_URL`               | Same as the API; HTTPS unless the host is `localhost`, `127.0.0.1`, or `[::1]`.                         |
 | `OCC_BOOTSTRAP_ADMIN_EMAIL`       | Email address for the first administrator account.                                                      |
 | `OCC_BOOTSTRAP_PASSWORD_FILE`     | New file path on protected operator-owned storage for the generated password.                           |
 | `OCC_BOOTSTRAP_INSTALLATION_NAME` | Installation display name; it must follow the API Name rule (`INSTALLATION_NAME_INVALID`).              |
@@ -244,8 +244,8 @@ parent directory must be private and neither destination may already exist.
 Helm sets the key path from `bootstrap.password.mountPath` and
 `bootstrap.serviceKey.fileName` (default `initial-admin-service-key.json`). The
 key filename must be a simple basename distinct from `bootstrap.password.fileName`.
-`bootstrap.password.claimName` must be a DNS subdomain of at most 253 characters,
-with each label at most 63, the same rule `prepare-bootstrap-volume` applies to
+`bootstrap.password.claimName` must follow Kubernetes' DNS-subdomain name rule:
+253 characters total, the same rule `prepare-bootstrap-volume` applies to
 `--claim`. Both use that existing PVC. Reruns do not inspect,
 replace, or regenerate output; see [recovery](../../guides/deploy/service-keys.md#recover-an-incomplete-bootstrap).
 

@@ -723,6 +723,19 @@ test("production native examples satisfy the current Helm, Installation, and PVC
     }),
     /drivers\.compute\.configuration does not match its Driver configuration schema at \/resources\/gateway\/limits\/cpu: must be string/,
   );
+  // Trusted Installation startup must reject a validly spelled request that
+  // Kubernetes refuses against its smaller limit, before any cluster operation.
+  const impossible = loadYaml(example.replace("<actual-proxy-source-cidr>", "192.0.2.10/32"));
+  impossible.drivers.compute.configuration.resources.gateway.requests.cpu = "5";
+  const impossiblePath = join(directory, "request-over-limit.yaml");
+  await writeFile(impossiblePath, JSON.stringify(impossible));
+  await assert.rejects(
+    loadInstallationConfiguration({
+      mode: "production",
+      environment: { OCC_CONFIG_PATH: impossiblePath },
+    }),
+    /Gateway CPU request \(resources\.gateway\.requests\.cpu\) cannot exceed its limit/,
+  );
   const values = loadYaml(await readFile(new URL("values.yaml", productionExamples), "utf8"));
   assert.equal(values.gatewayRouting.enabled, true);
   assert.equal(compute.gatewayRouting.gatewayName, "oce-agent-gateways");
@@ -3362,16 +3375,9 @@ test("the chart refuses administrator emails the bootstrap Job refuses", tooling
 test("the chart refuses bootstrap claim names the volume helper refuses", tooling, async () => {
   const message =
     /bootstrap\.password\.claimName must be a DNS subdomain of at most 253 characters/;
-  const longLabel = "a".repeat(64);
-  const longest = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
-  for (const claimName of [
-    "Bootstrap",
-    "claim_name",
-    "claim-",
-    `.claim`,
-    longLabel,
-    `${"a".repeat(254)}`,
-  ]) {
+  // This is Kubernetes' 253-character object-name limit, not a DNS hostname limit.
+  const longest = "a".repeat(253);
+  for (const claimName of ["Bootstrap", "claim_name", "claim-", `.claim`, `${"a".repeat(254)}`]) {
     await assert.rejects(
       render({}, { strings: { "bootstrap.password.claimName": claimName } }),
       ({ code, stderr }) => code !== 0 && message.test(stderr),
@@ -3396,6 +3402,21 @@ test(
   "the real Helm renderer rejects mutable images, broad dependencies, and shared credentials",
   tooling,
   async () => {
+    // Helm accepts dotted and overlong --namespace values, but Kubernetes
+    // Namespace admission requires a single DNS-1123 label of at most 63.
+    for (const namespace of ["openclaw.system", "a".repeat(64), "a".repeat(253)]) {
+      await assert.rejects(
+        render({}, { namespace }),
+        /Helm release namespace must be a DNS-1123 label of at most 63 characters/,
+      );
+    }
+    for (const namespace of ["1system", "0", "a".repeat(63)]) {
+      const objects = await resources(
+        (await render(externalGatewayRoutingValues, { namespace })).stdout,
+      );
+      const gateway = objects.find((object) => object.kind === "Gateway");
+      assert.equal(gateway.metadata.namespace, namespace);
+    }
     for (const [description, override] of [
       ["mutable controller", { "images.controller": "registry.example/controller:latest" }],
       ["missing Better Auth secret", { "auth.secretName": "" }],
@@ -4565,6 +4586,7 @@ test(
           "controlPlane.nodeSelector.topology\\.kubernetes\\.io/zone": "east",
           "controlPlane.nodeSelector.node-role\\.kubernetes\\.io/infra": "",
           "controlPlane.nodeSelector.edge": "a_b.c-d",
+          [`controlPlane.nodeSelector.${"a".repeat(253)}/pool`]: "control",
         },
       },
     );
@@ -4573,6 +4595,13 @@ test(
     // Kubernetes allows empty label values; charts before #1848 rendered them.
     assert.match(stdout, /node-role\.kubernetes\.io\/infra: ""/);
     assert.match(stdout, /edge: a_b\.c-d/);
+    const objects = await resources(stdout);
+    const api = objects.find(
+      (object) =>
+        object.kind === "Deployment" &&
+        object.metadata.labels?.["app.kubernetes.io/component"] === "api",
+    );
+    assert.equal(api.spec.template.spec.nodeSelector[`${"a".repeat(253)}/pool`], "control");
   },
 );
 

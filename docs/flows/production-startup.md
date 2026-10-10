@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
-updated: 2026-10-10
-last_updated_session: "authoring-run/e1243091-f075-4ff3-b6e2-0ee47714a472"
+updated: "2026-10-10"
+last_updated_session: "authoring-run/3cecc2d2-5f5c-4ce3-9901-928542c3d370"
 ---
 
 # Production Startup Flow
@@ -76,11 +76,12 @@ process keeps running and the next query opens a new connection.
 
 `deploy/helm/openclaw-enterprise/values.yaml:1`
 
-Outside the checkout, the operator edits production example values, Installation
-YAML, and the bootstrap PVC. Helm selects controller image, API endpoint, Secret
-names, bootstrap claim, API-client/control-plane node selectors, and egress.
-Installation YAML selects IAM, Configuration, Compute, optional Backend,
-gateway/Agent images, projected workload identity, and runtime networking/storage.
+Outside the checkout, the operator prepares production values, Installation
+YAML and bootstrap PVC. Helm selects controller images, API endpoint, Secrets,
+claim, client/node selectors and egress. `openclaw.validate` requires a DNS-1123
+release Namespace label of at most 63 characters. Installation YAML selects IAM,
+Configuration, Compute, optional Backends, gateway/Agent images, projected
+workload identity and runtime networking/storage.
 
 File-backed Kubernetes Secrets supply Installation startup, database URLs/optional
 CA, Better Auth signing, and optional ChatGPT administrator credentials. These
@@ -134,19 +135,19 @@ DDL, preventing bootstrap from running. The same preflight serves development
 and production; see [migration history and recovery](../reference/settings/operations.md#migration-history)
 for the read-only check and developer-selected recreation procedure.
 
-`scripts/bootstrap-installation.mjs` creates or verifies the singleton
-Installation, human administrator, service administrator, IAM seed, audit
-evidence, and initial service key. On fresh bootstrap, it creates the initial
-`default` Namespace through `OpenClawController.createNamespace`, authorized
-as the bootstrap Principal. The Namespace and its queued reconciliation commit
-with Installation/IAM state and bootstrap audit; existing Installations receive
-no new Namespace. The worker later provisions normal Driver-owned infrastructure;
-operators still provide the tenant RoleBindings described in the deployment
-guide. The platform name does not select Kubernetes' `default` namespace.
-It writes password and service-key files only
-from the bootstrap container to the protected PVC. Existing output, unsafe
-storage permissions, inconsistent accounts, or mismatched IAM identity fail the
-Job; Helm failure does not imply the database hook was rolled back.
+`scripts/bootstrap-installation.mjs:authBaseURL` checks an HTTP(S) origin before
+database access. Production requires HTTPS except for HTTP loopback verification
+(`127.0.0.1`, `localhost`, `[::1]`).
+
+`scripts/bootstrap-installation.mjs` creates or verifies Installation,
+human/service administrators, IAM seed, audit evidence, and initial service key.
+Fresh bootstrap creates `default` through `OpenClawController.createNamespace`,
+authorized as the bootstrap Principal. Its queued reconciliation commits
+with Installation/IAM state and audit. Existing Installations add no Namespace;
+this name does not select Kubernetes' `default` namespace. The worker provisions
+Driver-owned infrastructure; operators provide the guide's tenant RoleBindings. The bootstrap container alone writes protected PVC password/service-key files.
+Existing output, unsafe permissions, or inconsistent accounts/IAM identity fail
+the Job. Helm failure does not imply database-hook rollback.
 
 ### 4. Start private API and worker Deployments
 
@@ -318,13 +319,19 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 
 ## Changelog
 
+- 2026-10-10 08:22: Retain Namespace and bootstrap guidance with peer-map validation. (authoring-run/3cecc2d2-5f5c-4ce3-9901-928542c3d370 - ac237c12f504fd8f49a5e66c05a8d3865b13444e)
+
 - 2026-10-10 02:11: Validate active production peer matchLabels before submission, preserving accepted values. (authoring-run/e1243091-f075-4ff3-b6e2-0ee47714a472 - dd8bbacc9b974b77f416d48f6783e3e113faa2f9)
 
 - 2026-10-09 23:51: Refuse custom Gateway hostnames Compute rejects during production configuration loading. (authoring-run/0d8da3d8-474a-4801-9887-230406a6b7bd - 5b9dd76c497c1b552a2651ee4b984978cdef0a93)
 
+- 2026-10-09 22:22: Validate release Namespace labels before Helm rendering. (authoring-run/25ae11d6-4539-4513-9b2a-24d10996f971 - 7f358117e68076912a6062411d363e920a0e6adb)
+
 - 2026-10-09 22:25: Refuse database CA paths that duplicate active database-client mounts before Kubernetes admission. (codex/01a12074-7896-7f63-99fe-9f42e9041d02 - 7f358117e)
 
 - 2026-10-09 21:04: Refuse fractional routing ports before Helm emits Kubernetes resources. (authoring-run/b1433176-2fef-435b-bc30-c52bc7fa09e4 - 78677c21f)
+
+- 2026-10-06 16:25: Admit IPv6 HTTP loopback origins through the existing production bootstrap verification exception. (authoring-run/f8a921de-7cd3-48d1-8355-98e3a6d05d02 - 3395f6f8e71757319b566f369fe0ad2853051bc5)
 - 2026-10-05 12:10: Bound initialization hook names for valid long Helm releases. (authoring-run/54e33467-f3d2-4f4e-afad-952157ec12f0 - 4cda6515736280ca39f0fbe92cff78194b2c3638)
 - 2026-10-05 06:59: Preserve bootstrap Pod namespace strings. (01a0f9e4-a0bf-76f1-acdb-e6b55ada490a - 66a4a07028fd0a08c29ea80e8f95cadc48a74932)
 - 2026-10-05: Name Preset file failures `PRESET_FILE_INVALID`.

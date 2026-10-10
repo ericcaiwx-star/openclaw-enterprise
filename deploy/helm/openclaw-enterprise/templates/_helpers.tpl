@@ -1,6 +1,9 @@
 {{- /* One IPv4 host. Go's ParseCIDR rejects an octet above 255 and a leading zero. */ -}}
 {{- define "openclaw.ipv4Host32" -}}^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])){3}/32${{- end -}}
 {{- define "openclaw.validate" -}}
+{{- if or (gt (len .Release.Namespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .Release.Namespace)) -}}
+{{- fail "Helm release namespace must be a DNS-1123 label of at most 63 characters" -}}
+{{- end -}}
 {{- if hasKey .Values "integrations" -}}{{- fail "integrations is retired; configure ChatGPT packaging under backend.chatgpt" -}}{{- end -}}
 {{- if hasKey .Values "workspaceFiles" -}}{{- fail "workspaceFiles is retired; configure private Envoy Gateway routing under gatewayRouting" -}}{{- end -}}
 {{- range $name, $image := .Values.images -}}
@@ -219,8 +222,8 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if not (or (eq $authBaseHost $sharedCookieDomain) (hasSuffix (printf ".%s" $sharedCookieDomain) $authBaseHost)) -}}{{- fail "agentNativeAdmin.sharedCookieDomain must contain the auth.baseUrl host" -}}{{- end -}}
 {{- if not .Values.gatewayRouting.enabled -}}{{- fail "agentNativeAdmin.enabled requires gatewayRouting.enabled so the API can reach private Agent gateways" -}}{{- end -}}
 {{- end -}}
-{{- /* The bootstrap Job, in production, refuses plain HTTP unless the host is 127.0.0.1 or localhost. Other spellings of 127.0.0.1 (127.1, 0177.0.0.1, a trailing dot) are refused here. */ -}}
-{{- if and (ne $baseUrl.scheme "https") (not (has (lower $baseUrl.hostname) (list "127.0.0.1" "localhost"))) -}}{{- fail "auth.baseUrl must use HTTPS unless its host is 127.0.0.1 or localhost; the bootstrap Job refuses plain HTTP elsewhere" -}}{{- end -}}
+{{- /* The bootstrap Job refuses plain HTTP unless the host is 127.0.0.1, localhost, or ::1. Helm reads http://[::1] as hostname ::1. Other spellings of 127.0.0.1 (127.1, 0177.0.0.1, a trailing dot) are refused here. */ -}}
+{{- if and (ne $baseUrl.scheme "https") (not (has (lower $baseUrl.hostname) (list "127.0.0.1" "localhost" "::1"))) -}}{{- fail "auth.baseUrl must use HTTPS unless its host is 127.0.0.1 or localhost or ::1; the bootstrap Job refuses plain HTTP elsewhere" -}}{{- end -}}
 {{- /* The bootstrap Job trims with JavaScript trim, lowercases, then requires local@domain.tld. The rendered env keeps the value as written. */ -}}
 {{- $adminEmailTrim := "^[\\t\\n\\x0B\\f\\r\\p{Zs}\\x{2028}\\x{2029}\\x{FEFF}]+|[\\t\\n\\x0B\\f\\r\\p{Zs}\\x{2028}\\x{2029}\\x{FEFF}]+$" -}}
 {{- $adminEmail := lower (regexReplaceAll $adminEmailTrim (toString .Values.bootstrap.adminEmail) "") -}}
@@ -235,15 +238,10 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if or (not .Values.bootstrap.password.claimName) (not .Values.bootstrap.password.mountPath) (not .Values.bootstrap.password.fileName) -}}
 {{- fail "bootstrap.password must reference an existing protected PVC output path" -}}
 {{- end -}}
-{{- /* prepare-bootstrap-volume is_dns_subdomain: at most 253 characters, each label a DNS label of at most 63. */ -}}
+{{- /* Kubernetes DNS-subdomain object names, as in prepare-bootstrap-volume: at most 253 characters total. */ -}}
 {{- $claimName := toString .Values.bootstrap.password.claimName -}}
 {{- if or (gt (len $claimName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $claimName)) -}}
 {{- fail "bootstrap.password.claimName must be a DNS subdomain of at most 253 characters" -}}
-{{- end -}}
-{{- range $label := splitList "." $claimName -}}
-{{- if gt (len $label) 63 -}}
-{{- fail "bootstrap.password.claimName must be a DNS subdomain of at most 253 characters" -}}
-{{- end -}}
 {{- end -}}
 {{- if or (not .Values.bootstrap.serviceKey) (not .Values.bootstrap.serviceKey.fileName) -}}
 {{- fail "bootstrap.serviceKey.fileName must identify the service key output file name" -}}
@@ -306,9 +304,6 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- $name := index $parts 1 -}}
 {{- if or (ne (len $parts) 2) (gt (len $prefix) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $prefix)) (gt (len $name) 63) (not (regexMatch $labelName $name)) -}}
 {{- fail "controlPlane.nodeSelector keys must be Kubernetes label keys" -}}
-{{- end -}}
-{{- range $label := splitList "." $prefix -}}
-{{- if gt (len $label) 63 -}}{{- fail "controlPlane.nodeSelector keys must be Kubernetes label keys" -}}{{- end -}}
 {{- end -}}
 {{- else if or (gt (len $key) 63) (not (regexMatch $labelName $key)) -}}
 {{- fail "controlPlane.nodeSelector keys must be Kubernetes label keys" -}}
