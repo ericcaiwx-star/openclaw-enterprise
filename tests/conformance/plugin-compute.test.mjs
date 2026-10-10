@@ -4081,6 +4081,7 @@ async function startCodexGatewaySupervisor(
       failures: [initialFailure],
     },
     peerAvailable: true,
+    peerRequests: 0,
     serving: true,
     readinessProbes: [],
     children: [],
@@ -4123,6 +4124,7 @@ async function startCodexGatewaySupervisor(
   };
   const peerPort = await listen(async (request, response) => {
     assert.equal(request.url, "/openclaw/plugin-runtime/status");
+    fixture.peerRequests++;
     if (fixture.peerGate !== undefined) {
       fixture.peerRequestPending = true;
       await fixture.peerGate;
@@ -4378,10 +4380,10 @@ for (const [name, record, problem] of [
   test(`Codex gateway supervisor holds with a named remedy for a peer bridge record that is ${name}`, async (t) => {
     const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
     const path = "/home/node/.openclaw/openclaw.json.oce-peer-bridge.json";
-    const savedFiles = new Map(previous.files);
+    let savedFiles = new Map(previous.files);
     savedFiles.set(path, record(savedFiles.get(path)));
     const saved = savedFiles.get(path);
-    // A container restart in the same Pod starts again from the same files.
+    // A container restart in the same Pod starts again from the files the last one left.
     for (let restart = 0; restart < 2; restart++) {
       const gateway = await startCodexGatewaySupervisor(t, {
         writableConfig: true,
@@ -4389,7 +4391,11 @@ for (const [name, record, problem] of [
         runtimeStatus: true,
         expectStart: false,
       });
-      await new Promise((resolve) => setImmediate(resolve));
+      savedFiles = gateway.files;
+      // Longer than a loopback peer round trip: a wrapper that went on past the hold
+      // would have asked its Harness peer by now.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(gateway.peerRequests, 0, "the held wrapper never asks its Harness peer");
       assert.deepEqual(gateway.children, [], "OpenClaw must not start from an unusable record");
       assert.deepEqual(gateway.exits, [], "the wrapper holds rather than crash-looping");
       assert.equal(gateway.files.get(path), saved, "the record is kept for Pod replacement");
@@ -4413,6 +4419,7 @@ for (const [name, record, problem] of [
       assert.equal(runtimeFailure.check, "peer-bridge-record");
       assert.equal(runtimeFailure.code, "UNAVAILABLE");
       assert.equal(gateway.status().phase, "starting");
+      assert.equal((await readReadyStatusFromHandler(gateway.statusHandler)).status, 503);
       // The remedy deletes the Pod: termination ends the held wrapper at once.
       gateway.signalHandlers.SIGTERM();
       assert.deepEqual(gateway.exits, [0]);

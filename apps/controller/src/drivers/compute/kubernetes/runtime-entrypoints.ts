@@ -2609,13 +2609,13 @@ if (writableInitialConfig && pluginExistsSync(codexBridgeStatePath)) {
 // Rebuilding generated bridges without the record could overwrite native
 // edits, so the record is kept and only Pod replacement clears it.
 function holdCodexBridgeRecordFailure() {
-  logStartupPhase("peer-bridge-record", startupPhaseOrigin, "failed", "PEER_BRIDGE_RECORD_UNUSABLE");
-  publishRuntimeFailure("peer-bridge-record", "UNAVAILABLE");
   console.error(
     "Gateway peer configuration record " + codexBridgeStatePath + " " + codexBridgeRecordProblem +
       ". OpenClaw was not started. Delete the Pod to restore the managed configuration snapshot;" +
       " native configuration edits in this Pod are lost.",
   );
+  logStartupPhase("peer-bridge-record", startupPhaseOrigin, "failed", "PEER_BRIDGE_RECORD_UNUSABLE");
+  publishRuntimeFailure("peer-bridge-record", "UNAVAILABLE");
   forwardTermination(() => undefined);
   setInterval(() => {}, 3600000);
 }
