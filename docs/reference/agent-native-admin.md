@@ -77,11 +77,12 @@ for the opt-in predicate, mounts, and copy lifecycle.
 
 Do not change `gateway.bind`, `gateway.customBindHost`, or
 `gateway.tailscale.mode` in that copy. OCE checks these listener settings in the
-managed Configuration at deployment, not after a native edit, and the edit
+managed Configuration at deployment, not after a native edit. The edit
 survives same-Pod restarts. With `loopback`, the Gateway stays Ready, because its
 readiness check uses loopback, but refuses traffic to the Pod IP: the native
-admin UI goes dark and cannot undo the edit. With Tailscale `serve` or `funnel`,
-native startup refuses the bind and the container restarts in a loop. To
+admin UI goes dark and cannot undo the edit. With Tailscale `serve` or `funnel`
+and the rendered `lan` bind, native startup fails and the container restarts in
+a loop. To
 recover, delete the Pod or redeploy the Agent.
 
 Redeployment does not imply a factory reset of native files, conversations,

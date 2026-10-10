@@ -56,8 +56,8 @@ the native gateway port in this mode.
 
 ### Gateway authentication
 
-Kubernetes Compute supports only trusted-proxy authentication, for every Agent
-and routing mode. It renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
+Kubernetes Compute supports only trusted-proxy authentication, in every
+routing mode. It renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
 `gateway.auth.mode: trusted-proxy`, `userHeader: x-occ-identity`, the allowed
 identity `occ-workspace-files` with `operator.admin`, and
 `gateway.allowRealIpFallback: true`. Configuration and Console starters
@@ -74,8 +74,8 @@ required-header and device auto-approval settings retain their separate purposes
 Compute renders `gateway.bind: lan` when it is omitted or `auto`, as native
 container detection misses containerd on cgroup v2. Deployment/provisioning
 refuse any other bind, `custom` unless `customBindHost` is `0.0.0.0`, and any
-`gateway.tailscale.mode` but `off`. Both listen on IPv4 `0.0.0.0`, so Gateways
-need an IPv4 Pod address.
+`gateway.tailscale.mode` but `off`. Accepted `lan` and `custom` binds listen on
+IPv4 `0.0.0.0`, so Gateways need an IPv4 Pod address.
 
 An optional [loopback password](storage-and-credentials.md#runtime-credentials)
 supports operator verification.
@@ -157,7 +157,7 @@ same profile. Missing, empty or unknown profiles receive no ordinary grant;
 default-deny policies still select every Pod in each runtime target.
 
 Compute assigns this profile to ordinary embedded and dedicated workload
-templates without changing their routes or ports. Deployment readiness requires
+templates, keeping their routes and ports. Deployment readiness requires
 the expected template profile.
 
 Harness Pods provisioned by a SandboxDriver, such as OpenShell, carry
@@ -196,7 +196,7 @@ mutation and NetworkPolicy writes; this Driver installs no admission controls
 for them.
 
 Kubernetes combines grants from every matching policy, so stale or additional
-allow policies can bypass this restriction. Inspect installed policies and
+allow policies can bypass this. Inspect installed policies and
 [check allowed and denied connections](../../../guides/operate/network-isolation.md)
 with NetworkPolicy enforcement.
 
