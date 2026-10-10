@@ -80,8 +80,9 @@ currently returns no channel checks.
 
 `KubernetesComputeDriver.heldRuntimeFailureCheck` also reads each Pod's private
 runtime status. A runtime that held startup, such as a Gateway with an unusable
-peer configuration record, reports its failure there. The Driver adds it first
-as a `failed` check named after the startup step, with the failure code. A
+peer configuration record or an Agent whose model check failed, reports its
+failure there. The Driver lists it first as a `failed` check named after the
+startup step, with the failure code; diagnostics do not rerun that step. A
 failed or invalid status read adds nothing.
 
 ### 3. Return validated evidence

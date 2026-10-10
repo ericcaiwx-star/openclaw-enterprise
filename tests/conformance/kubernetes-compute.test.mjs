@@ -7371,7 +7371,8 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
   const binding = { namespace: tenant, agent, revision };
   // A Gateway holding a startup failure still answers diagnostics, with channel
   // checks it could not run. The failure it holds on the status path leads the
-  // observation as a failed check named after the startup step.
+  // observation (ahead of the 32-check cap) as a failed check named after the
+  // startup step.
   const heldFailure = {
     component: "gateway",
     check: "peer-bridge-record",
@@ -7389,8 +7390,8 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
       ({ component, check, state, code }) => ({ component, check, state, code }),
     ),
     [
-      { component: "agent", check: "auth", state: "succeeded", code: undefined },
       { component: "gateway", check: "peer-bridge-record", state: "failed", code: "UNAVAILABLE" },
+      { component: "agent", check: "auth", state: "succeeded", code: undefined },
       { component: "gateway", check: "socket", state: "unknown", code: undefined },
     ],
   );
@@ -7404,8 +7405,8 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
     code: "UNAVAILABLE",
   });
   assert.deepEqual((await driver.diagnoseAgentDeployment(binding)).checks, [
-    notServing("agent"),
     { ...heldFailure, state: "failed" },
+    notServing("agent"),
     notServing("gateway"),
   ]);
   diagnosticsServing = true;
@@ -7419,6 +7420,11 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
     },
     (role) => ({ ...held(role), podUid: "replaced-pod-uid" }),
     (role) => ({ ...held(role), runtimeFailure: { ...heldFailure, code: "not a code" } }),
+    // Parseable, but outside the timestamps OCC accepts.
+    (role) => ({
+      ...held(role),
+      runtimeFailure: { ...heldFailure, checkedAt: "+010000-01-01T00:00:00.000Z" },
+    }),
   ]) {
     runtimeStatus = failingStatus;
     assert.deepEqual(
@@ -7426,6 +7432,18 @@ test("Kubernetes runtime diagnostics read exact private Pod status without nativ
       ["auth", "socket"],
     );
   }
+
+  // Tolerating a failed status read never swallows the caller's cancellation.
+  const owner = new AbortController();
+  const cancelled = new Error("diagnostics caller went away");
+  runtimeStatus = () => {
+    owner.abort(cancelled);
+    throw Object.assign(new Error("pods/proxy denied"), { code: 403, headers: {} });
+  };
+  await assert.rejects(
+    withComputeAbortSignal(owner.signal, () => driver.diagnoseAgentDeployment(binding)),
+    (error) => error === cancelled,
+  );
 });
 
 test("Kubernetes runtime diagnostics reject missing timestamps and raced Pod readbacks", async () => {

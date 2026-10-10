@@ -1050,6 +1050,8 @@ const CODEX_ACCESS_TOKEN = "CODEX_ACCESS_TOKEN";
 const MAX_RUNTIME_CREDENTIAL_BYTES = 65_536;
 const MAX_RUNTIME_STATUS_RESPONSE_BYTES = 65_536;
 const RUNTIME_STATUS_IDENTIFIER = /^[A-Za-z0-9._~:@-]{1,64}$/u;
+const RUNTIME_DIAGNOSTIC_TIMESTAMP =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$/u;
 const RUNTIME_STATE_VOLUME_SIZE = "1Gi";
 const GATEWAY_PRIVATE_STATE_VOLUME = "openclaw-gateway-state";
 const GATEWAY_PRIVATE_STATE_SIZE = "10Gi";
@@ -3447,22 +3449,30 @@ export class KubernetesComputeDriver implements ComputeDriver {
               this.runtimeDiagnosticChecks(revision, namespace, container),
               this.heldRuntimeFailureCheck(revision, namespace, container),
             ]);
-            const reported = checks ?? [
-              {
-                component: container,
-                check: "runtime-status",
-                state: "unknown",
-                checkedAt: null,
-                code: "UNAVAILABLE",
-              } satisfies RuntimeDiagnosticCheck,
-            ];
-            return heldFailure === undefined ? reported : [heldFailure, ...reported];
+            return {
+              heldFailure,
+              checks: checks ?? [
+                {
+                  component: container,
+                  check: "runtime-status",
+                  state: "unknown",
+                  checkedAt: null,
+                  code: "UNAVAILABLE",
+                } satisfies RuntimeDiagnosticCheck,
+              ],
+            };
           }),
         );
+        // Held startup failures lead, so the check cap never drops them.
         return {
           revisionId: revision.id,
           observedAt: new Date().toISOString(),
-          checks: reports.flat().slice(0, 32),
+          checks: [
+            ...reports.flatMap(({ heldFailure }) =>
+              heldFailure === undefined ? [] : [heldFailure],
+            ),
+            ...reports.flatMap(({ checks }) => checks),
+          ].slice(0, 32),
         };
       });
     } catch (error) {
@@ -8182,11 +8192,16 @@ export class KubernetesComputeDriver implements ComputeDriver {
       if (failure === undefined) {
         return undefined;
       }
+      // OCC accepts only millisecond UTC timestamps; anything else adds nothing.
+      const checkedAt = new Date(failure.checkedAt).toISOString();
+      if (!RUNTIME_DIAGNOSTIC_TIMESTAMP.test(checkedAt)) {
+        return undefined;
+      }
       return {
         component: failure.component,
         check: failure.check,
         state: "failed",
-        checkedAt: new Date(failure.checkedAt).toISOString(),
+        checkedAt,
         code: failure.code,
       };
     } catch {
