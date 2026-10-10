@@ -2059,6 +2059,39 @@ export const scenarios = {
     description:
       "Denied Preset access leaves quick-start disabled and reports the error. Start without Preset remains available as a separate action.",
   },
+  createPresetInvalidField: {
+    group: "Pages/Create Agent",
+    name: "Preset with an invalid field",
+    path: create,
+    presetAgent: { executionMode: "turbo" },
+    actions: [
+      { selector: "#agent-preset", value: "pre_00000000-0000-4000-8000-000000000001" },
+      { selector: "#preset-variable-name", value: "Codex assistant" },
+      click("Use Preset"),
+    ],
+    description:
+      "The Preset API saves launch-field errors such as an unknown execution mode. Use Preset names the first field the form cannot use and keeps the chooser open.",
+    gap: "The fixture edits a simulated Preset; Preset CRUD has no console page.",
+  },
+  createCapabilitiesDenied: {
+    group: "Pages/Create Agent",
+    name: "Agent creation needs an administrator",
+    path: create,
+    actions: form,
+    rules: [{ path: "/installation", status: 403, code: "FORBIDDEN" }],
+    description:
+      "A member without Installation access can open the form, but Create Agent stays disabled and the page says an Installation administrator must create the Agent. No retry is offered.",
+    gap: "Namespace IAM cannot grant create; the live check is a member account on a real Installation.",
+  },
+  createCapabilitiesError: {
+    group: "Pages/Create Agent",
+    name: "Capability check failure",
+    path: create,
+    actions: form,
+    rules: [{ path: "/installation", status: 503, code: "DEPENDENCY_UNAVAILABLE" }],
+    description:
+      "A transient capability-read failure keeps Create Agent disabled and offers Retry capability check.",
+  },
   createNoPresets: {
     group: "Pages/Create Agent",
     name: "No Presets",
@@ -2930,6 +2963,41 @@ export const scenarios = {
     steps: [
       "Check that the permission message is visible inside the Logs card and unavailable actions remain disabled.",
     ],
+  },
+  runtimeLogsReaderDownload: {
+    group: "Pages/Agent detail",
+    name: "Runtime logs downloaded by a log reader",
+    path: `${candidateVersion}&tab=logs`,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/rev_00000000-0000-4000-8000-000000000007/runtime",
+        status: 403,
+        code: "FORBIDDEN",
+      },
+    ],
+    actions: [click("Download")],
+    description:
+      "A log reader without Agent operate has no runtime status or Pod picker. Log text still loads from the source's current Pod, and Download names the saved file after that Pod, as the status line does.",
+  },
+  runtimeLogsReaderNoPodDownload: {
+    group: "Pages/Agent detail",
+    name: "Log reader downloads after the Pod disappears",
+    path: `${candidateVersion}&tab=logs`,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    runtimeLogDownloadNoPod: true,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/rev_00000000-0000-4000-8000-000000000007/runtime",
+        status: 403,
+        code: "FORBIDDEN",
+      },
+    ],
+    actions: [click("Download")],
+    description:
+      "Simulated UI: the page retains the last Pod's log text, but the Pod disappears before Download. The fresh download has a valid no-Pod response header, so the saved filename ends in no-pod.log rather than naming the previous Pod.",
   },
   runtimeLogsClusterRbac: {
     group: "Pages/Agent detail",
