@@ -5982,6 +5982,7 @@ export class OpenClawController {
         harnessAuth,
       );
       this.validatePluginPolicies(plugins, pluginApprovers);
+      await this.validateSavedPluginConfiguration(plugins, configuration);
       const agentId = this.nextIdentifier("agent");
       await this.authorizeBindings(
         state,
@@ -6119,6 +6120,7 @@ export class OpenClawController {
         pluginApprovers === null ? undefined : (pluginApprovers ?? agent.pluginApprovers),
         plugins === undefined ? "stored" : "request",
       );
+      await this.validateSavedPluginConfiguration(plugins ?? agent.plugins, configuration);
       const updated = await state.agents.updateConfiguration(
         namespace.id,
         agent.id,
@@ -6458,8 +6460,8 @@ export class OpenClawController {
                 plugins: lockedAgent.plugins,
               } satisfies PluginRevisionState);
             })();
-      // The Agent's plugins and its Configuration are saved separately; deployment is the
-      // first point after provisioning that sees both.
+      // Agent saves check the plugins against the Configuration they name, but a later
+      // Configuration save does not know which Agents use it: check the admitted pair again.
       this.validatePluginConfiguration(pluginState?.plugins, admittedConfiguration);
       const previous = await state.revisions.listRevisions(namespace.id, lockedAgent.id);
       const createdAt = this.timestamp();
@@ -9779,6 +9781,33 @@ export class OpenClawController {
         "The selected Plugin Driver cannot run these plugin selections with this Configuration.",
       );
     }
+  }
+
+  // An Agent save names both its plugins and its Configuration, so it refuses a pair the
+  // Plugin Driver cannot run instead of leaving the refusal to deployment. The values live in
+  // the Configuration Driver: read them only when there is something to check.
+  private async validateSavedPluginConfiguration(
+    plugins: PluginDesiredState | undefined,
+    metadata: Pick<
+      Configuration,
+      "id" | "namespaceId" | "kind" | "generation" | "createdAt" | "secretBindings"
+    >,
+  ): Promise<void> {
+    if (
+      plugins === undefined ||
+      Object.keys(plugins).length === 0 ||
+      this.pluginDriver().validateAgentConfiguration === undefined
+    ) {
+      return;
+    }
+    const driver = this.configurationDriver();
+    const configuration = this.exactConfiguration(
+      await this.driverOperation(() =>
+        driver.read({ id: metadata.id, namespaceId: metadata.namespaceId }),
+      ),
+      metadata,
+    );
+    this.validatePluginConfiguration(plugins, configuration.values);
   }
 
   private pluginDriver(): PluginDriver {

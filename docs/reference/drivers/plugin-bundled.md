@@ -190,7 +190,7 @@ requires current approval policy `on-request` or `granular`. Compute writes the
 policy the Gateway runs into native startup configuration: the configured
 `appServer.approvalPolicy`, with `on-failure` as `on-request`. Omission keeps
 native defaults, so the Codex Driver's `validateAgentConfiguration` refuses
-automatic review at provisioning and deployment unless the policy is
+automatic review at Agent save, provisioning and deployment unless the policy is
 `on-request` or `on-failure`. Human review fails
 if managed `requiredOnModels` includes the current model, or model selection
 cannot be verified against a nonempty requirement. Omitted reviewers do not

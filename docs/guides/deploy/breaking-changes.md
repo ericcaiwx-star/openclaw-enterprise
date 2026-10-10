@@ -10,6 +10,20 @@ you run now, then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-10: Agent saves check the automatic plugin reviewer
+
+**What breaks.** Creating or updating an Agent answers `400` when an enabled
+plugin selection sets `toolDefaults.reviewer` to `auto` and the named
+Configuration's `plugins.entries.codex.config.appServer.approvalPolicy` is
+omitted or `never`. Before, the save succeeded and only deployment refused it.
+
+**Who is affected.** Clients that save such an Agent before fixing its
+Configuration, and any update to an Agent already saved that way.
+
+**How to tell.** The `400` names the setting, as at deployment.
+
+**Steps.** Set the policy to `on-request` first, or choose the human reviewer.
+
 ## 2026-10-10: controller-only releases can restart Agent Pods once
 
 **What breaks.** After a controller-only release, the first time the new worker
