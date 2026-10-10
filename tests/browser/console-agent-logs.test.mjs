@@ -156,7 +156,9 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
       const button = globalThis.document.querySelector('.agent-tabs button[aria-current="page"]');
       const strip = button.closest("nav").getBoundingClientRect();
       const bounds = button.getBoundingClientRect();
-      return bounds.left >= strip.left && bounds.right <= strip.right;
+      // Scroll extents are integer CSS pixels; DOMRects retain subpixels.
+      // Keep the visibility check strict beyond that rounding uncertainty.
+      return bounds.left >= strip.left - 1 && bounds.right <= strip.right + 1;
     });
   }
 

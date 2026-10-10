@@ -266,9 +266,15 @@ test("Docker Compute gateway containers use password auth by default and preserv
   assert.equal(defaultLaunch.revision.configuration.gateway, undefined);
 
   const passwordLaunch = await gatewayContainerLaunch({
-    gateway: { auth: { password: { source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" } } },
+    gateway: {
+      tls: { enabled: false },
+      auth: { password: { source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" } },
+    },
   });
   assert.match(passwordLaunch.environment.OPENCLAW_GATEWAY_PASSWORD ?? "", /^[0-9a-f]{64}$/);
+  assert.deepEqual(JSON.parse(passwordLaunch.environment.OPENCLAW_CONFIG_JSON).gateway.tls, {
+    enabled: false,
+  });
   assert.equal(
     JSON.parse(passwordLaunch.environment.OPENCLAW_CONFIG_JSON).gateway.auth.mode,
     "password",
@@ -324,7 +330,7 @@ test("Docker Compute gateway containers use password auth by default and preserv
   );
 });
 
-test("Docker Compute rejects unsupported native gateway auth before Docker engine access", async () => {
+test("Docker Compute rejects unsupported native gateway settings before Docker engine access", async () => {
   const driver = new DockerComputeDriver({
     images: { gateway: "gateway:local", agent: "agent:local" },
   });
@@ -333,6 +339,13 @@ test("Docker Compute rejects unsupported native gateway auth before Docker engin
     [{ gateway: { auth: { mode: "oauth" } } }, /password or trusted-proxy/i],
     [{ gateway: { auth: { unsupportedField: true } } }, /unsupported field unsupportedField/i],
     [{ gateway: { auth: null } }, /gateway auth must be an object/i],
+    [{ gateway: { tls: { enabled: true } } }, /gateway\.tls\.enabled must be omitted or false/i],
+    [
+      {
+        plugins: { entries: { codex: { config: { appServer: { approvalPolicy: "untrusted" } } } } },
+      },
+      /appServer\.approvalPolicy must not be "untrusted"/,
+    ],
   ]) {
     const revision = dockerGatewayRevision(driver, configuration);
     let networkAccesses = 0;

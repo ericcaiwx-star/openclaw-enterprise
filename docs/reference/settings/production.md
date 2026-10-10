@@ -1,14 +1,14 @@
 # Production controller settings
 
-This reference owns production controller settings. Start with the
-[settings reference](../settings.md) for startup configuration and precedence.
+For startup configuration and precedence, see the
+[settings reference](../settings.md).
 
 ## Required production controller environment
 
 The production API is internal-only by default. Operators must provision an
 internal Kubernetes `ClusterIP` Service and a default-deny ingress
 `NetworkPolicy` that allows only explicitly approved namespace and Pod
-selectors. The cluster must enforce NetworkPolicies. Do not expose the listener
+selectors. Production Helm validates peer label maps. The cluster must enforce NetworkPolicies. Do not expose the listener
 through a `NodePort`, `LoadBalancer`, `hostNetwork`, or public endpoint.
 
 The Helm charts allow DNS egress on UDP/TCP ports `53` and `5353` to their
@@ -229,7 +229,7 @@ before another attempt.
 | Variable                          | Required value or format                                                                                |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `OCC_AUTH_SECRET`                 | Same mounted Better Auth secret used by the API.                                                        |
-| `OCC_AUTH_BASE_URL`               | Same as the API; HTTPS unless the host is `localhost` or `127.0.0.1`.                                   |
+| `OCC_AUTH_BASE_URL`               | Same as the API; HTTPS unless the host is `localhost`, `127.0.0.1`, or `[::1]`.                         |
 | `OCC_BOOTSTRAP_ADMIN_EMAIL`       | Email address for the first administrator account.                                                      |
 | `OCC_BOOTSTRAP_PASSWORD_FILE`     | New file path on protected operator-owned storage for the generated password.                           |
 | `OCC_BOOTSTRAP_INSTALLATION_NAME` | Installation display name; it must follow the API Name rule (`INSTALLATION_NAME_INVALID`).              |

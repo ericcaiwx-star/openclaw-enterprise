@@ -91,7 +91,13 @@ checks the Harness authentication binding (Kubernetes Compute also runs the shar
 `requireOpenClawRoster`, then the dedicated OpenClaw and Codex `main` Agent rules) and, through optional
 `validateGatewaySettings`, the native gateway settings: Kubernetes Compute refuses
 a setting every preparation would refuse with `409`, naming the setting and never
-its value, before a revision exists. OCC freezes
+its value, before a revision exists. Kubernetes also refuses loopback/tailnet binds
+and custom loopback IPv4 listeners: the local readiness check can pass while
+Service Pod-IP traffic is refused. Omitted/auto/lan and nonloopback custom binds
+retain native behavior. Every Compute Driver refuses native TLS and
+the retired Codex `untrusted` approval policy this way. The selected PluginDriver's
+optional `validateAgentConfiguration` then checks plugin selections against the
+admitted values. OCC freezes
 the admitted values, including any remaining inline unresolved SecretRefs, into
 `AgentRevision.configuration`; separate `configurationId`, `configurationKind`,
 and `configurationGeneration` fields pin the selected Configuration metadata.

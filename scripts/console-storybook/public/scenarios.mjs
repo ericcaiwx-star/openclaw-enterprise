@@ -1368,6 +1368,7 @@ export const scenarios = {
     pluginCapabilities,
     pluginCatalog: {
       status: "error",
+      canLoad: true,
       message: "This credential does not have access to the plugin catalog.",
     },
     description:
@@ -1383,6 +1384,7 @@ export const scenarios = {
     pluginCapabilities,
     pluginCatalog: {
       status: "error",
+      canLoad: true,
       message: "The plugin catalog could not be loaded. Try again after restoring connectivity.",
     },
     description: "A simulated catalog failure is shown as an error, not a successful empty result.",
@@ -1395,7 +1397,7 @@ export const scenarios = {
     actions: [click("Configure plugins")],
     pluginCapabilities,
     description:
-      "The component explains that discovery requires an entered service account token with the Codex harness.",
+      "The component explains that discovery requires an entered service account token with the Codex harness. The empty list points to Plugin selections JSON for adding a plugin by ID instead of the unavailable Load plugins.",
   },
   pluginsCapabilitiesUnavailable: {
     group: "Components/Plugins",

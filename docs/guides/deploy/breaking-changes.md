@@ -10,6 +10,87 @@ you run now, then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-10: Agent saves check the automatic plugin reviewer
+
+**What breaks.** Creating or updating an Agent answers `400` when an enabled
+plugin selection sets `toolDefaults.reviewer` to `auto` and the named
+Configuration's `plugins.entries.codex.config.appServer.approvalPolicy` is
+omitted or `never`. Before, the save succeeded and only deployment refused it.
+
+**Who is affected.** Clients that save such an Agent before fixing its
+Configuration, and any update (even of credentials only) to an Agent already
+saved that way.
+
+**How to tell.** The `400` names the setting, as at deployment.
+
+**Steps.** Set the policy to `on-request` (or `on-failure`) first, or choose the
+human reviewer.
+
+## 2026-10-10: controller-only releases can restart Agent Pods once
+
+**What breaks.** After a controller-only release, the first time the new worker
+prepares an existing Kubernetes revision again, it applies the Gateway and
+Harness Pod templates the new controller renders. When they changed (since #1758,
+for example, readiness uses an HTTP probe), both Deployments roll once on the
+same runtime image, and chat is unavailable until the new Pods are ready (about
+17 seconds in one test).
+
+**Who is affected.** Running Agents with repository credentials, within about a
+minute of the controller rollout, while their repository session lasts. Other
+Agents only if their deployment was still finishing when the new worker took
+over.
+
+**How to tell.** The Agent's Gateway and Harness Pods restart after the
+controller rollout under a new ReplicaSet of the same revision.
+
+**Steps.** Before a controller-only release, confirm the new controller supports
+the deployed runtime ([checklist](upgrade-checklist.md)): affected Pods restart
+with its rendering on the existing image. Plan for one short chat interruption
+per affected Agent.
+
+## 2026-10-10: Codex approval policy is checked before deployment
+
+**What breaks.** Provisioning and deployment answer `409` when
+`plugins.entries.codex.config.appServer.approvalPolicy` is `untrusted` (Compute
+Drivers also refuse to prepare it), and `400` when an enabled plugin selection
+sets `toolDefaults.reviewer` to `auto` and that policy is omitted or `never`.
+Native startup checks the automatic reviewer against the policy Compute renders,
+but with the policy omitted the Gateway picks its own, which can be `never`.
+
+**Who is affected.** Custom Codex Configurations with `untrusted` (the Gateway
+already refused them at load, with a `doctor --fix` hint that cannot work), and
+Agents with an automatic plugin reviewer whose Configuration omits the policy.
+With `never`, deployment now refuses what readiness refused before. Every
+bundled Preset sets the policy.
+
+**How to tell.** The `409` or `400` names the setting.
+
+**Steps.** Set the policy to `on-request`, or choose the human reviewer, then
+deploy the Agent again. `on-failure` still works; native startup now gets
+`on-request`, which the Gateway runs for it. An Agent already deployed with the
+policy omitted keeps its current session policy until it is deployed again.
+
+## 2026-10-09: refresh-token source updates need a new Secret
+
+**What breaks.** Since #2016, `PATCH` on an `oauth2-refresh-token` credential
+source answers `409` when it keeps the recorded `refresh_token` Secret. That
+includes `{}` and `occ credential-source update ID` without `--file`, which the
+docs used to suggest after a failed update. The issuer may have replaced the
+token, so the recorded one can be stale, and re-sending it could make the
+issuer revoke the sign-in.
+
+**Who is affected.** Operators and scripts that update such a source in place,
+by changing its Secret's value and then re-sending it. Other source types,
+including `oauth2-client-credentials`, still accept `{}`.
+
+**How to tell.** The `409` says the gateway may already hold a newer
+`refresh_token`.
+
+**Steps.** Complete a new sign-in, store its refresh token in a new Secret, and
+send `{ "secrets": { "refresh_token": <the new Secret's ref> } }`, or
+`occ credential-source update ID --file` with that document. Redeploy Agents
+that use the source.
+
 ## 2026-10-09: released Gateways need an agent database migration
 
 **What breaks.** Gateways deployed by the 2026-09-28 release keep their chat
@@ -19,17 +100,18 @@ state in an OpenClaw agent database at schema 23. Runtimes since #587
 Gateway exits and restarts into the same refusal. Since #1986 the Gateway runs
 that migration itself before OpenClaw starts; see
 [Gateway storage](../../reference/drivers/kubernetes-compute/storage-and-credentials.md#gateway-storage).
+The Docker development gateway does the same since #2009.
 
 **Who is affected.** Installations upgraded from the 2026-09-28 release whose
-Agents are deployed again by a controller before #1986. Gateways without chat
-state are not affected.
+Agents are deployed again by a controller before #1986 (#2009 for the Docker
+development Driver). Gateways without chat state are not affected.
 
 **How to tell.** The Gateway log shows
 `uses schema version 23; stop active agents and run openclaw doctor --fix`.
 
-**Steps.** Upgrade the controller to #1986 or later, then deploy the Agent
-again (`occ agent deploy <id>`). With an older controller, scale the Gateway
-Deployment to zero, run
+**Steps.** Upgrade the controller to #1986 or later (#2009 for Docker
+development), then deploy the Agent again (`occ agent deploy <id>`). With an
+older controller, scale the Gateway Deployment to zero, run
 `OPENCLAW_CONFIG_READONLY=1 openclaw doctor --fix --non-interactive` once in a
 Pod with the Gateway's template and `sleep` as its command, delete that Pod,
 and scale the Deployment back. Doctor logs `v23 -> v24`. Without
