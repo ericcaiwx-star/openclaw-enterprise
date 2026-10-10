@@ -1,20 +1,19 @@
 ---
 created: 2026-08-25
 updated: "2026-10-10"
-last_updated_session: "authoring-run/3cecc2d2-5f5c-4ce3-9901-928542c3d370"
+last_updated_session: "authoring-run/pr1903-peerlabels-sync"
 ---
 
 # Production Startup Flow
 
 ## Overview
 
-The operator prepares a fresh protected bootstrap PVC, installs Helm with
-approved images, PostgreSQL/authentication credentials, trusted Installation
-YAML and network policy inputs, waits for private API and worker readiness, then
-authenticates `/installation` with the retrieved service key. Tenant Agent
-deployment and model-backed TUI proof follow separately.
+Prepare a fresh protected bootstrap PVC; install Helm with approved images,
+PostgreSQL/authentication credentials, trusted Installation YAML and network
+policies. Wait for private API/worker readiness, then authenticate `/installation`
+with the retrieved service key. Tenant deployment/model-backed TUI proof remains separate.
 
-Use the [deployment guide](../guides/deploy.md) for operator commands.
+Commands: [deployment guide](../guides/deploy.md).
 
 ## Entry Points
 
@@ -111,28 +110,29 @@ repairs used claims, retrieves credentials, or changes controller configuration.
 `deploy/helm/openclaw-enterprise/templates/bootstrap-networkpolicies.yaml:1`
 installs initialization isolation before the Job. It and later workload policies
 grant configured DNS peers UDP/TCP `53` and `5353`
-([contract](../reference/settings/production.md#required-production-controller-environment)).
+([Helm DNS contract](../reference/settings/production.md#required-production-controller-environment)).
 
-`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` refuses fractional
-ports and invalid custom hostnames; automatic hostnames bind listeners and certificate SANs.
+`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` refuses
+fractional routing ports and custom hostnames Compute rejects. `database.port`
+must be decimal 1–65535 without leading zeros. Empty hostnames retain Service DNS
+for Gateway listeners and Certificate SANs.
 `deploy/helm/openclaw-enterprise/templates/_network-policies.tpl:openclaw.networkPolicy.matchLabels`
 refuses peer maps Kubernetes rejects, preserving null/empty semantics and accepted labels.
 
-The Helm initialization hook preserves the full release name and shortens its
-suffix to Kubernetes' 63-character limit. Both containers mount
-`database.caSecretName` read-only when configured. Migration uses the migrator
-credential; bootstrap uses the lower-privilege application credential, Better Auth
-settings, administrator email, Installation name, and protected output paths.
+The initialization hook retains the full release name and limits its suffix to
+63 characters. Both containers mount `database.caSecretName` read-only when
+configured. Migration uses the migrator credential; bootstrap uses the
+lower-privilege application credential, Better Auth settings, administrator
+email, Installation name and protected output paths.
 
 `scripts/migrate-production.mjs:1`, `scripts/migration-history.mjs:migrateWithHistory`
 
-The migration command verifies the complete SQL source manifest, checks the
+Migration verifies the complete SQL source manifest, checks the
 dedicated role and canonical receipt/catalog state, and holds one advisory lock
-on the connection used by Drizzle's normal transaction. It accepts a fresh
-database, canonical history through migration 0023, or the completed history
+on the connection used by Drizzle's normal transaction. It accepts fresh
+databases, canonical history through migration 0023, or the completed history
 through 0025. Unsupported or mixed development histories fail before migration
-DDL, preventing bootstrap from running. The same preflight serves development
-and production; see [migration history and recovery](../reference/settings/operations.md#migration-history)
+DDL, preventing bootstrap from running. Development and production share this preflight; see [migration history and recovery](../reference/settings/operations.md#migration-history)
 for the read-only check and developer-selected recreation procedure.
 
 `scripts/bootstrap-installation.mjs:authBaseURL` checks an HTTP(S) origin before
@@ -155,13 +155,12 @@ the Job. Helm failure does not imply database-hook rollback.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:KubernetesComputeDriver.preflight`
 
-After successful initialization, Kubernetes starts separate API and worker
-Deployments. The API validates production listener settings, Better Auth,
-database access, trusted Installation YAML, selected Drivers, Backend
-membership, and Kubernetes Compute preflight before readiness. It serves private
-controller routes, `/healthz`, and database-backed `/readyz` behind the
-operator-managed endpoint. A `/healthz` startup probe (1-second period, 120
-failures) gives the API 2 minutes to listen and lets readiness start within a
+After initialization, separate API/worker Deployments start. Before readiness,
+the API validates production listener settings, Better Auth, database access,
+trusted Installation YAML, selected Drivers, Backend membership and Kubernetes
+Compute preflight. Private controller routes, `/healthz` and database-backed
+`/readyz` use the operator-managed endpoint. The `/healthz` startup probe runs
+every second for 120 failures: 2 minutes to listen, with readiness within a
 second of listening.
 
 `apps/controller/src/index.ts:createFastifyApp`
@@ -219,10 +218,10 @@ minimum versions in its message and continues. An invalid version response,
 unreachable API, or failed Namespace access still fails preflight.
 
 The worker independently validates production settings, opens the same
-application-role database, loads the selected Drivers, validates IAM, runs
-Compute preflight (with the same advisory warning), emits `worker.started`, and
-polls durable Namespace and AgentRevision work. Worker readiness depends on fresh queue-health observations. Neither
-process mounts the bootstrap PVC.
+application-role database, loads selected Drivers, validates IAM, runs Compute
+preflight with the same advisory warning, emits `worker.started`, and polls
+durable Namespace/AgentRevision work. Readiness requires fresh queue-health
+observations; neither process mounts the bootstrap PVC.
 
 `apps/controller/src/composition/repository-credentials/platform.ts:composeRepoDriver`
 
@@ -259,14 +258,13 @@ approved reader path and stores it in an owner-readable file. A completed Job is
 not an exec endpoint, and the API and worker cannot retrieve this file for the
 operator.
 
-From an approved client environment, `occ installation get` uses the protected
-key file through the OCC client and displays the Installation. The production
-startup proof succeeds only when its `ID` matches the key response's
-`meta.installationId`. The operator records that ID in the
-`openclaw.dev/installation-id` annotation on the Installation startup Secret;
-coordinated upgrades use the marker to bind their OCC endpoint to the selected
-Kubernetes Installation. Agent runtime, gateway WebSocket authentication, and
-model calls remain unproven until the tenant deployment and TUI procedures run.
+From an approved client, `occ installation get` reads the protected key file
+and displays the Installation. Startup proof requires its `ID` to match the key
+response's `meta.installationId`. The operator records that ID in the Installation
+startup Secret's `openclaw.dev/installation-id` annotation; coordinated upgrades
+use this marker to bind their OCC endpoint to the selected Installation.
+Agent runtime, Gateway WebSocket authentication and model calls remain unproven
+until tenant deployment/TUI procedures run.
 
 ## Debugging and Verification
 
@@ -320,6 +318,11 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 ## Changelog
 
 - 2026-10-10 08:22: Retain Namespace and bootstrap guidance with peer-map validation. (authoring-run/3cecc2d2-5f5c-4ce3-9901-928542c3d370 - ac237c12f504fd8f49a5e66c05a8d3865b13444e)
+
+- 2026-10-10 07:58: Preserve landed Namespace admission alongside database ports. (authoring-run/cf8f1d6f-c7a3-4864-8ece-9fc5834ac8b5 - c425fbb8a24df83efdfb1615cfb26a609f0749ca)
+
+- 2026-10-10 07:41: Merge hostname/database-CA guidance and bounded database ports. (authoring-run/714d166d-82e8-4e99-a0ae-a49c8ee235c7 - 3bfadece19cdbea1a23574549265953f9d0e54fc)
+- 2026-10-09 22:28: Refuse invalid database ports before rendering NetworkPolicies. (authoring-run/4363ed9a-5724-4d4f-a14d-f1bc0485443e - dc95c2261d4b46cff8aca703e13e43cdd71d153e)
 
 - 2026-10-10 02:11: Validate active production peer matchLabels before submission, preserving accepted values. (authoring-run/e1243091-f075-4ff3-b6e2-0ee47714a472 - dd8bbacc9b974b77f416d48f6783e3e113faa2f9)
 

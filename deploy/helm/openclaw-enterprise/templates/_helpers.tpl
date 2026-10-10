@@ -258,6 +258,10 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if not (hasPrefix "/" (toString .Values.bootstrap.password.mountPath)) -}}
 {{- fail "bootstrap.password.mountPath must be an absolute path" -}}
 {{- end -}}
+{{- /* Database routing uses numeric TCP ports in bootstrap and controller NetworkPolicies. */ -}}
+{{- if or (not (regexMatch "^[1-9][0-9]{0,4}$" (toString .Values.database.port))) (gt (int .Values.database.port) 65535) -}}
+{{- fail "database.port must be an integer TCP port from 1 to 65535" -}}
+{{- end -}}
 {{- /* The server reads OCC_PORT with decimal Number(); Kubernetes YAML reads an unquoted leading zero as octal. */ -}}
 {{- if or (not (regexMatch "^[1-9][0-9]*$" (toString .Values.api.port))) (gt (int .Values.api.port) 65535) -}}
 {{- fail "api.port must be an integer TCP port from 1 to 65535" -}}
