@@ -8,7 +8,7 @@ import {
 } from "@openclaw-enterprise/utils";
 import { createHash, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import { BlockList, isIP } from "node:net";
-import { isAbsolute } from "node:path";
+import { isAbsolute, posix } from "node:path";
 import { isKubernetesNamespaceName, isKubernetesResourceName } from "./resource-name.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -163,6 +163,7 @@ import {
   GATEWAY_RUNTIME_ENTRYPOINT,
   GATEWAY_STOP_TIMEOUT_MS,
   MANAGED_CONFIGURATION_DIRECTORY,
+  NATIVE_HOOK_CREDENTIAL_DIRECTORY,
   NATIVE_WORKER_ENTRYPOINT,
   RUNTIME_READINESS_PATH,
   RUNTIME_WRAPPER_COMMAND,
@@ -1059,6 +1060,8 @@ const NODE_STATE_VOLUME = "openclaw-node-state";
 // Harness kinds that can own a workspace node. Naming refuses any other kind,
 // so Agent deletion removes every node Secret preparation can create.
 const WORKSPACE_NODE_HARNESS_IDS: readonly string[] = ["codex", "openclaw"];
+// HOME of the Compute-owned Harness container; a SandboxDriver declares its own.
+const HARNESS_HOME = "/home/node";
 const NODE_STATE_PATH = "/home/node/.openclaw-node";
 // A Deployment-backed Codex Harness reads its one-shot node setup code from an
 // optional Secret volume, so the Harness can start before the Secret exists.
@@ -10266,9 +10269,16 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         "Dedicated Codex native hook relay is owned by the Compute Driver.",
       );
     }
+    // The Gateway writes each credential into the Harness filesystem through Codex, and
+    // the Harness entrypoint creates this directory under its own HOME.
+    const harnessHome = this.sandboxDriverForRevision(revision)?.harnessHome ?? HARNESS_HOME;
+    // Driver registration (packages/occ driver-contract) refuses a non-normalized HOME.
+    if (!posix.isAbsolute(harnessHome)) {
+      throw new ConfigurationFailure("SandboxDriver Harness HOME must be an absolute path.");
+    }
     appServer.nativeHookRelay = {
       url: `${endpoint.replace(/^wss:/, "https:")}/node/__openclaw__/native-hook`,
-      credentialDirectory: "/home/node/.oce-native-hooks",
+      credentialDirectory: posix.join(harnessHome, NATIVE_HOOK_CREDENTIAL_DIRECTORY),
     };
     return document;
   }
@@ -13260,7 +13270,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         }
       } else {
         variables.push(
-          { name: "HOME", value: "/home/node" },
+          { name: "HOME", value: HARNESS_HOME },
           { name: "OPENCLAW_WORKSPACE_DIR", value: "/home/node/workspace" },
           {
             name: "PATH",
