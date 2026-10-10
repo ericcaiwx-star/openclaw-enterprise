@@ -368,13 +368,21 @@ if (command === "docker" || command === "podman") {
       args[2] === "k3d-" + state.cluster + "-" + suffix)) {
     const node = args[2];
     assert.deepEqual(args.slice(3), ["ctr", "-n", "k8s.io", "images", "import", "--all-platforms", "-"]);
-    // The worker's containerd stops answering during its first import (finding 1006).
+    // The worker's containerd stops answering during its first import (finding 1006). The
+    // other cases pin which failures get the one retry.
     const imports = (state["imports:" + node] ?? 0) + 1;
     state["imports:" + node] = imports;
-    if (scenario === "containerd-restart" && node.endsWith("-agent-0") && imports === 1) {
+    const socket = "/run/k3s/containerd/containerd.sock: connect: ";
+    const refusal = node.endsWith("-agent-0") && {
+      "containerd-restart": imports === 1 && socket + "connection refused",
+      "containerd-socket-missing": imports === 1 && socket + "no such file or directory",
+      "containerd-refuses-imports": socket + "connection refused",
+      "other-socket-refused": imports === 1 && "/run/other.sock: connect: connection refused",
+    }[scenario];
+    if (refusal) {
       commitState();
       process.stderr.write('ctr: connection error: desc = "transport: Error while dialing: dial unix ' +
-        '/run/k3s/containerd/containerd.sock: connect: connection refused"\n');
+        refusal + '"\n');
       process.exit(1);
     }
     // The worker fails before reading, which stops the export early.
@@ -418,8 +426,9 @@ if (command === "docker" || command === "podman") {
       const probes = (state["containerdProbes:" + node] ?? 0) + 1;
       state["containerdProbes:" + node] = probes;
       if (scenario === "hung-containerd-probe" && node.endsWith("-agent-0")) await hang();
-      if (node.endsWith("-agent-0") && (scenario === "containerd-down" ||
-          (scenario === "late-worker" && probes <= 2))) {
+      // In the hung case the server refuses until the worker's hang ends the wait.
+      if ((node.endsWith("-agent-0") && (scenario === "containerd-down" ||
+          (scenario === "late-worker" && probes <= 2))) || scenario === "hung-containerd-probe") {
         commitState();
         process.stderr.write('ctr: connection error: desc = "transport: Error while dialing: dial unix ' +
           '/run/k3s/containerd/containerd.sock: connect: connection refused"\n');
@@ -567,10 +576,15 @@ if (command === "kubectl") {
       finish(JSON.stringify({ clusters: [{ cluster: { server: "https://127.0.0.1:6443" } }] }));
     }
     if (equals(args.slice(4), ["get", "nodes", "-o", "name"])) {
-      // The worker can register after the server (finding 1006).
+      // The worker can register after the server (finding 1006), and the API server can
+      // refuse the first listing.
       state.nodeListings = (state.nodeListings ?? 0) + 1;
       const worker = state.agents > 0 && !(scenario === "late-worker" && state.nodeListings <= 2);
       commitState();
+      if (scenario === "late-worker" && state.nodeListings === 1) {
+        process.stderr.write("The connection to the server 127.0.0.1:6443 was refused\n");
+        process.exit(1);
+      }
       finish("node/k3d-" + state.cluster + "-server-0\n" +
         (worker ? "node/k3d-" + state.cluster + "-agent-0\n" : ""));
     }
