@@ -1,4 +1,4 @@
-import { failureInputLimit } from "./failure-redaction.mjs";
+import { captureFailureText, failureInputLimit } from "./failure-redaction.mjs";
 
 const safeOccErrorCodes = new Set([
   "INVALID_REQUEST",
@@ -610,10 +610,13 @@ function errorText(cause) {
     .filter((line) => /^\s+at\s/u.test(line))
     .map((line) => line.trim());
   return {
-    message: detailMessage ? detailMessage.slice(0, failureInputLimit) : undefined,
+    message: detailMessage ? captureFailureText(detailMessage) : undefined,
+    // Internal transport flags are generated here, never copied from the Error.
+    messageCompleteLines: true,
     frame: frames[0]?.slice(0, failureInputLimit),
     // The whole stack goes only to the failure details in the diagnostics report.
-    stack: frames.length > 0 ? frames.join("\n").slice(0, failureInputLimit) : undefined,
+    stack: frames.length > 0 ? captureFailureText(frames.join("\n")) : undefined,
+    stackCompleteLines: true,
   };
 }
 
@@ -625,13 +628,10 @@ function failureText(error) {
   const ancestors = new Set();
   const append = (path, detail) => {
     if (detail.message) {
-      message = `${message}${message ? "\n" : ""}${path}: ${detail.message}`.slice(
-        0,
-        failureInputLimit,
-      );
+      message = captureFailureText(`${message}${message ? "\n" : ""}${path}: ${detail.message}`);
     }
     if (detail.stack) {
-      stack = `${stack}${stack ? "\n" : ""}${path}:\n${detail.stack}`.slice(0, failureInputLimit);
+      stack = captureFailureText(`${stack}${stack ? "\n" : ""}${path}:\n${detail.stack}`);
     }
   };
   const visit = (value, path, depth) => {
@@ -656,11 +656,7 @@ function failureText(error) {
     children(value, path, depth);
   };
   const children = (value, path, depth) => {
-    if (
-      value === null ||
-      typeof value !== "object" ||
-      (message.length >= failureInputLimit && stack.length >= failureInputLimit)
-    ) {
+    if (value === null || typeof value !== "object") {
       return;
     }
     ancestors.add(value);
@@ -669,9 +665,6 @@ function failureText(error) {
       const cause = readErrorProperty(value, "cause");
       if (cause !== undefined) {
         visit(cause, causePath, depth + 1);
-      }
-      if (message.length >= failureInputLimit && stack.length >= failureInputLimit) {
-        return;
       }
       const errorsPath = path ? `${path}.errors` : "errors";
       const errors = readErrorProperty(value, "errors");
@@ -694,9 +687,6 @@ function failureText(error) {
           const nextPath = `${errorsPath}[${index}]`;
           if (count >= 32) {
             append(nextPath, { message: "[error details omitted: traversal limit]" });
-            break;
-          }
-          if (message.length >= failureInputLimit && stack.length >= failureInputLimit) {
             break;
           }
           visit(readErrorProperty(errors, index), nextPath, depth + 1);

@@ -1782,7 +1782,8 @@ test("failure text is bounded and redacts env values and credential shapes", asy
   // A value split by the cut survives as neither the value nor a prefix of it.
   const long = await render(new Error(`${"x".repeat(16_370)} jobonlyopaque123`));
   assert.ok(long.message.length < 700);
-  assert.match(long.message, /\.\.\. \[truncated\]$/);
+  assert.match(long.message, /^\[\.\.\. \d+ chars cut \.\.\.\]\n$/);
+  assert.doesNotMatch(long.message, /jobonly/);
   const straddle = await render(new Error(`${"y ".repeat(296)}key jobonlyopaque123 tail`));
   assert.doesNotMatch(straddle.message, /jobonly/);
   assert.equal((await render("thrown string")).message, "thrown string");
@@ -2008,6 +2009,17 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
       '  throw new AggregateError(Array.from({ length: 3 }, (_, i) => new Error("ordinary long branch " + i + " " + "x".repeat(10_000))), "ordinary bounded aggregate");',
       "});",
       'test("primitive cause", () => { throw new Error("ordinary primitive wrapper", { cause: "ordinary primitive cause" }); });',
+      'test("multiline tail", () => {',
+      '  const output = Array.from({ length: 300 }, (_, i) => "ordinary progress " + i + " " + "x".repeat(100));',
+      '  throw new Error(["ordinary wrapper failed", ...output, "ordinary wrapper stderr: final dependency failure", `final env ${process.env.CI_RUNNER_FIXTURE_CREDENTIAL}`].join("\\n"));',
+      "});",
+      'test("multiline key boundary", () => {',
+      '  const before = "ordinary before\\n".repeat(500);',
+      '  const body = Array.from({ length: 500 }, (_, i) => "synthetic-pem-body-" + i + " " + "x".repeat(80));',
+      '  const key = ["-----BEGIN RSA PRIVATE KEY-----", ...body, "-----END RSA PRIVATE KEY-----"].join("\\n");',
+      '  const after = "ordinary after\\n".repeat(50);',
+      '  throw new Error(before + key + "\\n" + after + "ordinary final after key");',
+      "});",
       "",
     ].join("\n"),
   );
@@ -2149,8 +2161,22 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
   const bounded = details.get("bounded aggregate text");
   assert.ok(bounded.message.length <= 16_384);
   assert.ok(bounded.stack.length <= 16_384);
-  assert.match(bounded.message, /errors\[0\]: ordinary long branch 0/);
-  assert.doesNotMatch(bounded.message, /ordinary long branch 2/);
+  assert.match(bounded.message, /^ordinary bounded aggregate/);
+  assert.match(bounded.message, /\[\.\.\. \d+ chars cut \.\.\.\]/);
+  assert.match(bounded.message, /errors\[2\]: ordinary long branch 2/);
+  assert.doesNotMatch(bounded.message, /ordinary long branch 0/);
+  const multiline = details.get("multiline tail");
+  assert.match(multiline.message, /^ordinary wrapper failed\n/);
+  assert.match(multiline.message, /\[\.\.\. \d+ chars cut \.\.\.\]/);
+  assert.match(multiline.message, /ordinary wrapper stderr: final dependency failure/);
+  assert.match(multiline.message, /final env \[env:CI_RUNNER_FIXTURE_CREDENTIAL\]$/);
+  assert.ok(multiline.message.length <= 16_384);
+  assert.ok(multiline.stack.length <= 16_384);
+  assert.match(details.get("multiline key boundary").message, /ordinary final after key$/);
+  assert.doesNotMatch(text, /synthetic-pem-body/);
+  assert.doesNotMatch(text, /messageCompleteLines|stackCompleteLines/);
+  assert.doesNotMatch(JSON.stringify(summary), /messageCompleteLines|stackCompleteLines/);
+  assert.doesNotMatch(result.stderr, /messageCompleteLines|stackCompleteLines/);
   assert.match(details.get("primitive cause").message, /cause: ordinary primitive cause/);
   assert.equal(report.failures.length, 1, "passing files still add no diagnostics record");
   for (const entry of summary.files[0].tests) {
