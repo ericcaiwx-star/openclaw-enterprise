@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
 updated: "2026-10-10"
-last_updated_session: "authoring-run/pr1905-maintenance"
+last_updated_session: "authoring-run/3cecc2d2-5f5c-4ce3-9901-928542c3d370"
 ---
 
 # Production Startup Flow
@@ -76,17 +76,17 @@ process keeps running and the next query opens a new connection.
 
 `deploy/helm/openclaw-enterprise/values.yaml:1`
 
-Outside the checkout, the operator prepares production values, Installation YAML,
-and bootstrap PVC. Helm values select images, API endpoint, Secrets, claim,
-selectors, and egress. `openclaw.validate` requires a DNS-1123 release Namespace
-label of at most 63 characters. Installation YAML selects Drivers, Backends,
-identity, and runtime images/networking/storage.
+Outside the checkout, the operator prepares production values, Installation
+YAML and bootstrap PVC. Helm selects controller images, API endpoint, Secrets,
+claim, client/node selectors and egress. `openclaw.validate` requires a DNS-1123
+release Namespace label of at most 63 characters. Installation YAML selects IAM,
+Configuration, Compute, optional Backends, gateway/Agent images, projected
+workload identity and runtime networking/storage.
 
-The operator creates file-backed Kubernetes Secrets for Installation startup,
-database URLs, optional database CA bundles, Better Auth signing material, and
-optional ChatGPT Backend administrator credentials. These are prepared inputs,
-not recurring synchronization targets. The chart does not infer gateway/Agent
-images from Helm values or rewrite Driver configuration.
+File-backed Kubernetes Secrets supply Installation startup, database URLs/optional
+CA, Better Auth signing, and optional ChatGPT administrator credentials. These
+prepared inputs are not synchronization targets. Helm neither rewrites Driver
+configuration nor infers gateway/Agent images.
 
 ### 2. Prepare the fresh bootstrap volume
 
@@ -100,25 +100,23 @@ before WaitForFirstConsumer binding. The helper requires a fresh
 root except for filesystem-owned `lost+found`, sets UID/GID `1000` with mode
 `0700`, and refuses other entries.
 
-If cluster policy forbids the helper Pod, storage administration owns the same
-state transition through an approved storage workflow. A preprepared claim goes
-directly to Helm. The helper does not create the PVC, repair a used claim,
-retrieve generated credentials, or change controller configuration.
+If policy forbids this Pod, storage administration prepares the claim through an
+approved workflow, then hands it to Helm. The helper neither creates PVCs nor
+repairs used claims, retrieves credentials, or changes controller configuration.
 
 ### 3. Run Helm initialization
 
 `deploy/helm/openclaw-enterprise/templates/jobs.yaml:8`
 
 `deploy/helm/openclaw-enterprise/templates/bootstrap-networkpolicies.yaml:1`
-installs initialization isolation before the Job starts. Its scoped DNS grant
-and the later dependency, collector, Slack proxy, and Envoy policies allow
-UDP/TCP ports `53` and `5353` to the configured DNS peer; see the
-[Helm DNS contract](../reference/settings/production.md#required-production-controller-environment).
+installs initialization isolation before the Job. It and later workload policies
+grant configured DNS peers UDP/TCP `53` and `5353`
+([contract](../reference/settings/production.md#required-production-controller-environment)).
 
 `deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` refuses fractional
-routing ports and custom hostnames Compute rejects. Empty
-hostnames keep Service DNS derivation; Gateway listeners and Certificate SANs
-use that hostname.
+ports and invalid custom hostnames; automatic hostnames bind listeners and certificate SANs.
+`deploy/helm/openclaw-enterprise/templates/_network-policies.tpl:openclaw.networkPolicy.matchLabels`
+refuses peer maps Kubernetes rejects, preserving null/empty semantics and accepted labels.
 
 The Helm initialization hook preserves the full release name and shortens its
 suffix to Kubernetes' 63-character limit. Both containers mount
@@ -320,6 +318,10 @@ model calls remain unproven until the tenant deployment and TUI procedures run.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 08:22: Retain Namespace and bootstrap guidance with peer-map validation. (authoring-run/3cecc2d2-5f5c-4ce3-9901-928542c3d370 - ac237c12f504fd8f49a5e66c05a8d3865b13444e)
+
+- 2026-10-10 02:11: Validate active production peer matchLabels before submission, preserving accepted values. (authoring-run/e1243091-f075-4ff3-b6e2-0ee47714a472 - dd8bbacc9b974b77f416d48f6783e3e113faa2f9)
 
 - 2026-10-09 23:51: Refuse custom Gateway hostnames Compute rejects during production configuration loading. (authoring-run/0d8da3d8-474a-4801-9887-230406a6b7bd - 5b9dd76c497c1b552a2651ee4b984978cdef0a93)
 

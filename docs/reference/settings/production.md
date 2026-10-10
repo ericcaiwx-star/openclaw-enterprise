@@ -1,14 +1,14 @@
 # Production controller settings
 
-This reference owns production controller settings. Start with the
-[settings reference](../settings.md) for startup configuration and precedence.
+For startup configuration and precedence, see the
+[settings reference](../settings.md).
 
 ## Required production controller environment
 
 The production API is internal-only by default. Operators must provision an
 internal Kubernetes `ClusterIP` Service and a default-deny ingress
 `NetworkPolicy` that allows only explicitly approved namespace and Pod
-selectors. The cluster must enforce NetworkPolicies. Do not expose the listener
+selectors. Production Helm validates peer label maps. The cluster must enforce NetworkPolicies. Do not expose the listener
 through a `NodePort`, `LoadBalancer`, `hostNetwork`, or public endpoint.
 
 The Helm charts allow DNS egress on UDP/TCP ports `53` and `5353` to their

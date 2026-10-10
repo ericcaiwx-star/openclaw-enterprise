@@ -4169,6 +4169,124 @@ test("Helm renders a values-file worker timeout of 1800000 as digits", tooling, 
   assert.doesNotMatch(rendered.stdout, /OCC_WORKER_CONVERGENCE_TIMEOUT_MS\n\s+value: "1\.8e\+06"/);
 });
 
+test("production peer matchLabels keep the native Kubernetes map contract", tooling, async (t) => {
+  const scrapers = {
+    "metrics.scraperNamespaceLabels.team": "observability",
+    "metrics.scraperPodLabels.app": "prometheus",
+  };
+  const exporter = {
+    ...productionCollectorValues,
+    "logging.collector.exporter.cidr": "",
+    "logging.collector.exporter.namespaceLabels.team": "logs",
+    "logging.collector.exporter.podLabels.app": "loki",
+  };
+  const collectorScrapers = {
+    ...productionCollectorValues,
+    "logging.collector.metrics.scraperNamespaceLabels.team": "observability",
+    "logging.collector.metrics.scraperPodLabels.app": "prometheus",
+  };
+  const sandbox = {
+    ...gatewayRoutingValues,
+    "gatewayRouting.sandbox.enabled": "true",
+    "gatewayRouting.sandbox.domain": "sandbox.example.test",
+    "gatewayRouting.sandbox.tlsSecretName": "sandbox-tls",
+    "gatewayRouting.sandbox.ingressPeers[0].namespaceSelector.matchLabels.team": "public",
+    "gatewayRouting.sandbox.ingressPeers[0].podSelector.matchLabels.app": "edge",
+  };
+  const callers = [
+    ["api.clients[0].podLabels", {}],
+    ["dns.podLabels", {}],
+    ["gatewayRouting.envoyGatewayPodLabels", gatewayRoutingValues],
+    ["metrics.scraperNamespaceLabels", scrapers],
+    ["metrics.scraperPodLabels", scrapers],
+    ["logging.collector.exporter.namespaceLabels", exporter],
+    ["logging.collector.exporter.podLabels", exporter],
+    ["logging.collector.metrics.scraperNamespaceLabels", collectorScrapers],
+    ["logging.collector.metrics.scraperPodLabels", collectorScrapers],
+    ["gatewayRouting.sandbox.ingressPeers[0].namespaceSelector.matchLabels", sandbox],
+    ["gatewayRouting.sandbox.ingressPeers[0].podSelector.matchLabels", sandbox],
+  ];
+  for (const [field, configuration] of callers) {
+    await assert.rejects(
+      render({ ...configuration, [`${field}.probe`]: "true" }),
+      ({ stderr }) => stderr.includes(field),
+      `Must refuse the active caller's boolean label: ${field}`,
+    );
+    await render(configuration, { strings: { [`${field}.probe`]: "true" } });
+  }
+  for (const shape of ["true", "31", "{value}", "value"]) {
+    await assert.rejects(
+      render({ "api.clients[0].podLabels": shape }),
+      /api\.clients\[0\]\.podLabels/,
+    );
+  }
+  for (const value of ["false", "31", "{nested}", "kube/dns", "a".repeat(64)]) {
+    await assert.rejects(
+      render({ "api.clients[0].podLabels.probe": value }),
+      /api\.clients\[0\]\.podLabels/,
+    );
+  }
+  for (const key of ["Example.com/Name", "example.com/", "a/b/c", `${"a".repeat(254)}/Name`]) {
+    await assert.rejects(
+      render(
+        {},
+        { strings: { [`api.clients[0].podLabels.${key.replaceAll(".", "\\.")}`]: "value" } },
+      ),
+      /api\.clients\[0\]\.podLabels/,
+    );
+  }
+  for (const [key, value] of [
+    ["looksTrue", "true"],
+    ["looksFalse", "false"],
+    ["looksNumeric", "31"],
+    ["looksExponent", "1e3"],
+    ["looksNull", "null"],
+    ["empty", ""],
+    ["example.com/Name_1", ""],
+    [`${"a".repeat(253)}/Name`, "x"],
+    ["a".repeat(63), "b".repeat(63)],
+  ]) {
+    const objects = await resources(
+      (
+        await render(
+          {},
+          { strings: { [`api.clients[0].podLabels.${key.replaceAll(".", "\\.")}`]: value } },
+        )
+      ).stdout,
+    );
+    const policy = objects.find(
+      ({ metadata }) => metadata.name === "openclaw-enterprise-api-ingress",
+    );
+    assert.equal(policy.spec.ingress[0].from[0].podSelector.matchLabels[key], value);
+  }
+  await render({ "api.clients[0].podLabels.empty": "null" });
+  await render({ "metrics.scraperNamespaceLabels": "false", "metrics.scraperPodLabels": "false" });
+  const directory = await mkdtemp(join(tmpdir(), "occ-peer-labels-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "values.json");
+  const sandboxOptions = Object.fromEntries(
+    Object.entries(sandbox).filter(([key]) => !key.includes("ingressPeers")),
+  );
+  for (const shape of [null, {}]) {
+    await writeFile(
+      path,
+      JSON.stringify({
+        gatewayRouting: {
+          sandbox: {
+            ingressPeers: [
+              {
+                namespaceSelector: { matchLabels: shape },
+                podSelector: { matchLabels: { app: "edge" } },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    await render(sandboxOptions, { valuesFiles: [path] });
+  }
+});
+
 test("Collector exporter ports preserve decimal meaning in Kubernetes YAML", tooling, async () => {
   const field = "logging.collector.exporter.port";
   for (const value of ["03100", "0443", "010", "00080", "0", "65536", "18446744073709551617"]) {
