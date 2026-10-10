@@ -116,14 +116,14 @@ Results/job logs keep 600-character failure messages. For eight files,
 diagnostic `failures` retain 20 cases, fields captured within 16,384 JavaScript
 UTF-16 units each, and 400 output lines; `omittedFailureFiles` counts the rest.
 Labelled causes/siblings share each cap across 32 values/eight levels; cycles/limits
-are marked. Long fields retain complete leading lines (up to 4,096 units) and
+are marked. Long reported test-failure fields retain complete leading lines (up to 4,096 units) and
 tail lines within the remaining budget, including a counted marker. Oversized
-single lines may be omitted. Controls and multiline key shapes are normalized
-first; private boundary flags never reach artifacts. Existing redaction and
+single lines may be omitted. This reporter path normalizes controls and multiline
+key shapes first; private boundary flags never reach artifacts. Existing redaction and
 credential-line drops apply; unrecognized runtime-minted values can remain,
 so tests must not print secrets. Each record's `reason` distinguishes timeout
 (running tests and output so far, with `omittedLines`) from preparation failure
-(redacted message/stack, possibly quoting command output).
+(redacted message/stack using its unchanged prefix capture and conservative cut guard).
 
 The `k3d-model`, `gateway-routing`, `slack`, `openshell`, and `k3d-otel` lanes prepare the controller image and workspace routing for dedicated Harness node enrollment. Supply an immutable Node 24 `NODE_BASE_IMAGE`; gateway-routing, Slack and OpenShell CI use the repository variable `CONTAINER_NODE_BASE_IMAGE`. Preparation supplies the imported controller digest and private routing CA paths; Slack still requires approved runtime images and credentials.
 
