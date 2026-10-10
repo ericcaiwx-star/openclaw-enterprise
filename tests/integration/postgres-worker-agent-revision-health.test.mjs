@@ -282,9 +282,15 @@ revisionTest(
 // stopped before its failure is published. A runtime that failed by itself (here a held model
 // probe) keeps its Pods for diagnosis on its version's Logs tab. Either way the pointer still
 // names the stopped predecessor: OCC never rolls back, and recovery is a new revision.
-for (const failure of ["revoked", "held"]) {
+for (const { failure, stopFailsOnce = false } of [
+  { failure: "revoked" },
+  // A failed stop must not publish the refusal with the candidate still running: the pass
+  // retries, repeats the refusal and the stop, and the refusal keeps its code.
+  { failure: "revoked", stopFailsOnce: true },
+  { failure: "held" },
+]) {
   revisionTest(
-    `a ${failure} exclusive candidate ${failure === "revoked" ? "is stopped" : "stays for diagnosis"} when its deployment fails`,
+    `a ${failure} exclusive candidate ${failure === "revoked" ? "is stopped" : "stays for diagnosis"} when its deployment fails${stopFailsOnce ? " after a failed stop" : ""}`,
     async (fixture) => {
       const owner = await fixture.agent(`exclusive-failed-${failure}`, {
         executionMode: "dedicated",
@@ -321,7 +327,21 @@ for (const failure of ["revoked", "held"]) {
           }
         },
       });
-      await fixture.start(driver.compute);
+      const events = [];
+      let stopFailures = 0;
+      await fixture.start(
+        {
+          ...driver.compute,
+          async stopRevision(revision) {
+            if (stopFailsOnce && revision.id === candidateId && stopFailures === 0) {
+              stopFailures += 1;
+              throw new Error("Kubernetes API temporarily unavailable");
+            }
+            return driver.compute.stopRevision(revision);
+          },
+        },
+        { emit: (event) => events.push(event) },
+      );
       const first = await fixture.revision(owner, 1);
       await fixture.work(first, "succeeded");
       const replacement = await fixture.revision(owner, 2);
@@ -336,6 +356,16 @@ for (const failure of ["revoked", "held"]) {
       if (failure === "revoked") {
         assert.equal(driver.count(replacement), 1, "the refused candidate is stopped once");
         assert.deepEqual([...driver.running], [], "nothing serves the Agent");
+        const retried = events.filter(
+          ({ event, workId, refusal }) =>
+            event === "worker.completed" &&
+            workId === replacement.idempotencyKey &&
+            refusal === "AUTHORIZATION_DENIED",
+        );
+        assert.deepEqual(
+          retried.map(({ outcome, code }) => [outcome, code]),
+          stopFailsOnce ? [["retry", "DEPENDENCY_UNAVAILABLE"]] : [],
+        );
       } else {
         assert.equal(driver.count(replacement), 0, "the failed runtime stays for diagnosis");
         assert.deepEqual([...driver.running], [replacement.id]);

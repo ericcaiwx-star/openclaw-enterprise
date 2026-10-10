@@ -244,6 +244,20 @@ function revisionFailureLogFields(error: unknown): {
 }
 
 /**
+ * Stopping a refused exclusive candidate failed. The pass retries like any dependency failure,
+ * and its log keeps the refusal code the stop was for.
+ */
+class RefusedCandidateStopError extends Error {
+  readonly refusal: string;
+
+  constructor(refusal: string, cause: unknown) {
+    super("The refused AgentRevision candidate could not be stopped.", { cause });
+    this.name = "RefusedCandidateStopError";
+    this.refusal = refusal;
+  }
+}
+
+/**
  * The pending result of an activation pass that did not finish: a dependency
  * that is converging and a known activation wait keep their own codes (D330);
  * anything else stays REVISION_FINALIZATION_INCOMPLETE.
@@ -3418,22 +3432,33 @@ export class ControllerWorker {
       if (error instanceof WorkClaimLostError) {
         throw error;
       }
-      if (
-        error instanceof RepositoryCredentialAuthorityError ||
-        error instanceof SandboxRevisionUnsupportedError ||
-        error instanceof CredentialSourceRevisionError ||
-        error instanceof ActivationFailedError
-      ) {
-        result = { outcome: "permanent", code: error.code };
-      } else if (error instanceof TransientDependencyError) {
-        // A dependency that recovers by itself must not spend the attempt budget:
-        // five quick retries end long before a Gateway route or an API server
-        // that is converging under load comes back (D28).
-        result = { outcome: "pending", code: error.code, dependencyFailure: error };
+      if (error instanceof RefusedCandidateStopError) {
+        // The refusal stands; only stopping its candidate failed. Retry on the stop's own
+        // dependency terms, so the next pass repeats the refusal and the stop.
+        const cause = error.cause;
+        result =
+          cause instanceof TransientDependencyError
+            ? { outcome: "pending", code: cause.code, dependencyFailure: cause }
+            : { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+        failureLogFields = { ...revisionFailureLogFields(cause), refusal: error.refusal };
       } else {
-        result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+        if (
+          error instanceof RepositoryCredentialAuthorityError ||
+          error instanceof SandboxRevisionUnsupportedError ||
+          error instanceof CredentialSourceRevisionError ||
+          error instanceof ActivationFailedError
+        ) {
+          result = { outcome: "permanent", code: error.code };
+        } else if (error instanceof TransientDependencyError) {
+          // A dependency that recovers by itself must not spend the attempt budget:
+          // five quick retries end long before a Gateway route or an API server
+          // that is converging under load comes back (D28).
+          result = { outcome: "pending", code: error.code, dependencyFailure: error };
+        } else {
+          result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+        }
+        failureLogFields = revisionFailureLogFields(error);
       }
-      failureLogFields = revisionFailureLogFields(error);
     }
     await this.finalizeRevision(claim, result, failureLogFields);
   }
@@ -4063,8 +4088,10 @@ export class ControllerWorker {
     // OCC refused this candidate (its authority, credentials or configuration), so its runtime
     // must not keep serving. A runtime that failed by itself (a held startup failure, the
     // convergence deadline, exhausted retries) stays for diagnosis on its version's Logs tab.
+    // ActivationFailedError also lands here, but no bundled Driver activates before commit, so
+    // it only reaches a published (active) revision, which the stop skips.
     if (resolved.outcome === "permanent" && heldFailureCode === undefined && !expired) {
-      await this.stopRefusedExclusiveCandidate(claim);
+      await this.stopRefusedExclusiveCandidate(claim, resolved.code);
     }
     let activated: Readonly<AgentRevision> | undefined;
     let stoppedCandidate: Readonly<AgentRevision> | undefined;
@@ -4225,13 +4252,16 @@ export class ControllerWorker {
    * so the Agent is unavailable until a new revision activates. A refused active revision is
    * left alone: its workload is the one recorded, and active maintenance owns it.
    */
-  private async stopRefusedExclusiveCandidate(claim: ClaimedWork): Promise<void> {
+  private async stopRefusedExclusiveCandidate(claim: ClaimedWork, refusal: string): Promise<void> {
     const compute = this.compute;
+    // Only the deployment's own work can leave a candidate serving: maintenance exists only for
+    // revisions that activated, and their retirement already stopped them.
     if (
       claim.agentId === undefined ||
       claim.revisionId === undefined ||
       claim.namespaceTarget !== undefined ||
       claim.agentTarget !== undefined ||
+      claim.idempotencyKey !== `agent_revision:${claim.revisionId}:reconcile` ||
       compute.requiresStoppedPredecessors === undefined
     ) {
       return;
@@ -4260,13 +4290,26 @@ export class ControllerWorker {
     ) {
       return;
     }
-    if (compute.bindAgent !== undefined) {
-      await this.withClaimHeartbeat(claim, async () => {
-        await compute.bindAgent!({ namespace, agent });
-      });
+    try {
+      if (compute.bindAgent !== undefined) {
+        await this.withClaimHeartbeat(claim, async () => {
+          await compute.bindAgent!({ namespace, agent });
+        });
+      }
+      await this.closeRevisionCredentials(claim, revision);
+      await this.withClaimHeartbeat(claim, () => compute.stopRevision(revision));
+    } catch (error) {
+      if (error instanceof WorkClaimLostError) {
+        throw error;
+      }
+      throw new RefusedCandidateStopError(refusal, error);
     }
-    await this.closeRevisionCredentials(claim, revision);
-    await this.withClaimHeartbeat(claim, () => compute.stopRevision(revision));
+    // Like a swept predecessor, the next deployment need not stop it again within a lease.
+    this.stoppedPredecessors.delete(revision.id);
+    this.stoppedPredecessors.set(revision.id, {
+      stoppedAt: Date.now(),
+      restopAfterMs: this.leaseDurationMs,
+    });
   }
 
   private async completeStoppedRevisionWork(

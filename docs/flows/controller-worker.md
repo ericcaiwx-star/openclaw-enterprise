@@ -157,7 +157,7 @@ client or admin key; the
 [Backend-managed credential delivery flow](service-account-driver-credential-delivery.md#5-recheck-metadata-and-project-the-account-secret)
 owns these checks.
 
-Revocation and denial fail permanently before Compute effects in that pass. Older revisions
+Revocation and denial fail permanently before the pass prepares a runtime. Older revisions
 complete as superseded; active revisions enter finalization or maintenance.
 When Compute requires stopped predecessors, a newer admission supersedes older
 active maintenance before Compute effects, even after candidate failure.
@@ -301,7 +301,8 @@ Before publishing a permanent refusal of an inactive exclusive candidate (not a
 held runtime failure or the deadline),
 `ControllerWorker.stopRefusedExclusiveCandidate` calls `stopRevision` under the
 claim heartbeat, so a rejected deployment never serves while the pointer names
-its stopped predecessor. A stop failure publishes nothing; the work retries.
+its stopped predecessor. A stop failure publishes nothing: the work retries, and
+`worker.completed` names the refusal in `refusal`.
 
 `ControllerWorker.processRepositoryCleanup` defers every incomplete pass at the
 Driver interval, including closing sessions and failed runtime retirement,
