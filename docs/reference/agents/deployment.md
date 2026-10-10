@@ -228,7 +228,13 @@ activation finishes.
 If a revision fails before the worker sets the pointer, the pointer is
 unchanged. After a failed first deployment, the Agent has no active revision.
 With [exclusive replacement](../drivers/compute.md#production-revision-stages),
-the unchanged pointer names a predecessor that was already stopped.
+the unchanged pointer names a predecessor that was already stopped, so nothing
+serves until a new revision activates. When the worker refuses the candidate,
+for example because its deploying actor lost `deploy` or a credential source
+was revoked, it stops the candidate's workload too. A candidate whose runtime
+failed by itself, such as `RUNTIME_MODEL_PROBE_FAILED` or
+`CONVERGENCE_DEADLINE_EXCEEDED`, keeps its Pods so its version's Logs tab can
+show the cause; the next deployment stops them.
 Kubernetes embedded replacement reports ready while the predecessor still
 serves, so the worker sets the pointer first. Activation then replaces the
 shared gateway, and the new gateway runs the startup model probe. If that

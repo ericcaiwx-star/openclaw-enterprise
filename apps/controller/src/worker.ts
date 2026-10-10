@@ -4060,11 +4060,11 @@ export class ControllerWorker {
     ) {
       return;
     }
-    if (
-      resolved.outcome === "permanent" ||
-      (resolved.outcome === "retry" && claim.attemptCount >= this.maxAttempts)
-    ) {
-      await this.stopFailedExclusiveCandidate(claim);
+    // OCC refused this candidate (its authority, credentials or configuration), so its runtime
+    // must not keep serving. A runtime that failed by itself (a held startup failure, the
+    // convergence deadline, exhausted retries) stays for diagnosis on its version's Logs tab.
+    if (resolved.outcome === "permanent" && heldFailureCode === undefined && !expired) {
+      await this.stopRefusedExclusiveCandidate(claim);
     }
     let activated: Readonly<AgentRevision> | undefined;
     let stoppedCandidate: Readonly<AgentRevision> | undefined;
@@ -4218,14 +4218,14 @@ export class ControllerWorker {
   }
 
   /**
-   * Exclusive replacement stopped every predecessor before this candidate's first pass, so a
-   * candidate that ends without becoming active would otherwise be the only runtime left: it
-   * keeps serving its rejected configuration (for example after its actor lost `deploy`) while
-   * the recorded active revision has no workload (finding 990). Stop it under the live claim
-   * before the failure is published, so the Agent is plainly unavailable until a new revision
-   * activates. A failed active revision is left alone: its workload is the only one recorded.
+   * Exclusive replacement stops every predecessor before a candidate's first pass, so a
+   * candidate that a later pass refuses (for example after its actor lost `deploy`) would be
+   * the only runtime left, serving a deployment OCC rejected while the recorded active revision
+   * has no workload (finding 990). Stop it under the live claim before the failure is published,
+   * so the Agent is unavailable until a new revision activates. A refused active revision is
+   * left alone: its workload is the one recorded, and active maintenance owns it.
    */
-  private async stopFailedExclusiveCandidate(claim: ClaimedWork): Promise<void> {
+  private async stopRefusedExclusiveCandidate(claim: ClaimedWork): Promise<void> {
     const compute = this.compute;
     if (
       claim.agentId === undefined ||

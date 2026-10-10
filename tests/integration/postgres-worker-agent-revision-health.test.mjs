@@ -181,9 +181,7 @@ revisionTest(
     await fixture.work(maintenance, "succeeded");
     assert.equal(prepared.filter((id) => id === first.id).length, firstPreparations);
     await fixture.work(replacement, "failed_permanent");
-    // The failed candidate never became active, so it must not keep running in place of the
-    // stopped predecessor (finding 990).
-    assert.deepEqual([...running], []);
+    assert.deepEqual([...running], [replacement.id]);
     const recovery = await fixture.revision(owner, 3);
     await fixture.work(recovery, "succeeded");
     assert.deepEqual([...running], [recovery.id]);
@@ -279,13 +277,14 @@ revisionTest(
 
 // Finding 990: exclusive replacement stops the active revision before its candidate's first
 // pass. On Kubernetes the candidate then took over the Agent's Gateway, so when a later pass
-// failed it (its actor lost `deploy`, or the runtime held a failed model probe) its Pods kept
-// answering chat with a deployment OCC had rejected, while the recorded active revision had
-// no workload. A failed candidate is stopped before its failure is published; the pointer
-// still names the predecessor, which stays stopped until a new revision activates.
+// refused it because its actor lost `deploy`, its Pods kept answering chat with a deployment
+// OCC had rejected while the recorded active revision had no workload. A refused candidate is
+// stopped before its failure is published. A runtime that failed by itself (here a held model
+// probe) keeps its Pods for diagnosis on its version's Logs tab. Either way the pointer still
+// names the stopped predecessor: OCC never rolls back, and recovery is a new revision.
 for (const failure of ["revoked", "held"]) {
   revisionTest(
-    `a ${failure} exclusive candidate is stopped instead of serving without being active`,
+    `a ${failure} exclusive candidate ${failure === "revoked" ? "is stopped" : "stays for diagnosis"} when its deployment fails`,
     async (fixture) => {
       const owner = await fixture.agent(`exclusive-failed-${failure}`, {
         executionMode: "dedicated",
@@ -334,10 +333,13 @@ for (const failure of ["revoked", "held"]) {
         failure === "revoked" ? "AUTHORIZATION_DENIED" : "RUNTIME_MODEL_PROBE_FAILED",
       );
       assert.equal(driver.count(first), 1, "replacement stopped the predecessor");
-      assert.equal(driver.count(replacement), 1, "the failed candidate is stopped once");
-      assert.deepEqual([...driver.running], [], "nothing serves the Agent");
-      // The pointer still names the stopped predecessor: OCC never rolls back, and recovery
-      // is a new revision (covered by the exclusive replacement test above).
+      if (failure === "revoked") {
+        assert.equal(driver.count(replacement), 1, "the refused candidate is stopped once");
+        assert.deepEqual([...driver.running], [], "nothing serves the Agent");
+      } else {
+        assert.equal(driver.count(replacement), 0, "the failed runtime stays for diagnosis");
+        assert.deepEqual([...driver.running], [replacement.id]);
+      }
       const active = await fixture.activePointer(owner);
       assert.equal(active.rows[0].active_revision_id, first.id);
     },
