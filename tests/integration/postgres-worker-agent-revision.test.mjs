@@ -4871,10 +4871,17 @@ for (const pendingPasses of [0, 1]) {
       );
       const events = [];
       let activations = 0;
+      const stopped = [];
 
       await fixture.start(
         {
           ...fixture.compute,
+          // Exclusive Compute stops a refused candidate, but never the published revision.
+          requiresStoppedPredecessors: () => true,
+          async stopRevision(revision) {
+            stopped.push(revision.id);
+            return fixture.compute.stopRevision(revision);
+          },
           async activateRevision() {
             activations += 1;
             if (activations <= pendingPasses) {
@@ -4906,6 +4913,7 @@ for (const pendingPasses of [0, 1]) {
       );
       // No retry after the refusal: the first refused pass ends the deployment.
       assert.equal(activations, pendingPasses + 1);
+      assert.deepEqual(stopped, [], "the published revision keeps its workload");
       await completion(
         events,
         "the refused activation's terminal completion",
