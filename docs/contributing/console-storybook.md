@@ -123,11 +123,11 @@ IDENTITY.md and clearing USER.md first.
 OpenClaw and unsupported-runtime stories keep the draft workflow: provision
 credentials and deploy from Agent detail.
 
-**Plugins Curated** exercises token-free discovery against simulated Driver responses,
-leaving access unverified. Hosted discovery requires an eligible Codex
+**Plugins Curated** exercises token-free discovery against simulated Driver
+responses, leaving access unverified. Hosted discovery requires an eligible Codex
 service-account token. Workspace and Standard OpenClaw stories preview file and
-harness settings. Preset Secret stories cover existing, pending, denied, and
-empty results while keeping new-token entry.
+harness settings. Preset Secret stories cover existing, pending, denied, and empty
+results while keeping new-token entry.
 
 The [DevDay storyboard](../../scripts/console-storybook/devday-storyboard.md)
 gives presenter actions, expected visible states, and fallbacks for creating an
@@ -135,23 +135,23 @@ Agent from the SWE Agent Preset and opening the deployed `oceclaw` Agent's
 simulated Admin UI, connected to no gateway, Slack, credential, or model.
 
 **Choose provider, harness, and authentication** covers the supported
-combinations. **Enter another model ID**
+combinations; models appear before credentials. **Enter another model ID**
 allows manual entry but does not prove access. Execution mode follows the
 harness; saved tokens require Codex. **Experimental Dedicated OpenClaw** shows
 the runtime-build warning; Embedded OpenClaw does not.
 
 In **Enter another model ID**, switch to **Choose a model from the list** and
 back: listed models survive both switches, focus moves to the active input, and
-other settings persist. A manual ID edited to another listed model is selected on
-return; a custom ID outside the list requires a new selection. After a provider
+other settings persist. Edit the manual ID to another listed model; returning
+selects it. A custom ID outside the list requires a new selection. After a provider
 change through Configuration JSON, the list must match and drop the old
 provider's model.
 
 The fixture supplies a ready Namespace, Preset, and model Secret. Namespace
-provisioning, Preset CRUD, and service-account issuance have no console pages.
-One Secret picker selects or creates new version model Secrets and Slack tokens
-(Credentials tab and Channels drawer).
-See [Create and deploy in the console](../reference/console/create-and-deploy.md)
+provisioning, Preset CRUD, and service-account issuance have no dedicated console
+pages. One Secret picker selects or creates new version model Secrets and Slack
+tokens (Credentials tab and Channels drawer). See
+[Create and deploy in the console](../reference/console/create-and-deploy.md)
 for the supported installation workflow, prerequisites, and Teams deployment limits.
 
 Repository previews cover access levels, empty or pending discovery, unavailable
@@ -168,9 +168,9 @@ In **Return to loaded pages**, Tab to Namespaces and press Enter: its heading
 receives focus, then Tab reaches Refresh. Check retained editors through
 Back/Forward, Refresh, refocus, and Namespace switches.
 
-**Return Backend access denied** checks Installation-wide denial. **Return
-access denied** and **Return session expired** must remove retained private
-content on response. These fixtures prove presentation only; the
+**Return Backend access denied** checks Installation-wide denial.
+**Return access denied** and **Return session expired** must remove retained
+private content on response. These fixtures prove presentation only; the
 [browser suite](../testing/local.md#console-browser-checks) proves authorization.
 Reset story clears retained state.
 
@@ -192,10 +192,10 @@ administrator** shows the denied capability check without retry; **Capability
 check failure** keeps the retry.
 
 Use **Pages/Create Agent → Keep Preset variables** before applying a Preset and
-**Keep an unsaved Preset draft** afterward. Ordinary fields survive; token
-inputs clear. Revisit the Agents list to check its search filter. Denied,
-loading, missing-file, and uncertain-write stories verify retention keeps the
-editor's access and recovery controls.
+**Keep an unsaved Preset draft** afterward. Ordinary fields survive; token inputs
+clear. Revisit the Agents list to check its search filter. Denied, loading,
+missing-file, and uncertain-write stories verify retention never bypasses the
+editor's access or recovery controls.
 
 ### Choose and switch revision Secrets
 
@@ -251,7 +251,7 @@ In **Components/Plugins**, expand a tool to inspect inherited enablement and
 approval. Where per-tool review is unsupported (Codex), the reviewer shortcut
 opens the plugin default. New plugins omit tool defaults; an omitted reviewer
 inherits the Harness reviewer. **Unsupported saved tool reviewer** stays visible
-and clears to inherit. Tool IDs match the JSON keys.
+and can be cleared to inherit. Tool IDs match the JSON keys.
 
 **Create Agent / Edit existing plugin policies** exercises the policy form.
 
@@ -293,8 +293,9 @@ immediately. Native JSON excludes Agent-owned Backend and execution mode.
 defines version deployment and Slack sender access.
 
 **Enable gateway password access** stages a reference. Cancel discards it; Save
-Configuration, then Deploy new version applies it. Compare the **Gateway password**
-access configured, save denied, and save in progress stories; they do not prove credential delivery or login.
+Configuration, then Deploy new version applies it. Compare the
+**Gateway password** access configured, save denied, and save in progress
+stories; they do not prove credential delivery or login.
 
 ### Stop
 
@@ -307,7 +308,8 @@ Resume by deploying a new version; disabling Slack does not stop an Agent. See
 
 ### Delete
 
-Open **Delete Agent** and confirm permanent deletion the same way. The UI enters cleanup state without editing/deployment controls.
+Open **Delete Agent**; inspect, cancel, or confirm permanent deletion. The UI
+enters cleanup state without editing/deployment controls.
 **Refresh deletion status** completes the fixture and returns to the Agent list.
 The console has no detailed cleanup-progress view. Namespace-owned Configurations
 and Secrets remain; manage them separately. See
@@ -324,7 +326,7 @@ seven-day release-age policy, independently of root dependencies.
 
 - `prepare-assets.mjs` copies current console assets and the controller-served
   shared contract modules into ignored `dist/assets/`. Rebuild after source
-  edits; the development server does not recopy them.
+  edits; the development server does not recopy sources.
 - `public/scenarios.mjs` owns story descriptions, initial data options, failure
   responses, automatic setup actions, and workflow instructions.
 - `public/fixtures.mjs` intercepts API calls inside the preview. Unconfigured
