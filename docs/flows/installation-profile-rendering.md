@@ -115,9 +115,9 @@ trailing whitespace and no control characters or line or paragraph separators.
 Preflight applies the downstream contracts for IPv4 CIDRs, native-admin DNS
 hostnames and their shared cookie parent domain (not a public suffix, checked
 with the API's `tldts` list), Google hosted domains (at most 253 characters,
-last label starting with a letter), repository Service names, and paired metrics
-scraper selectors. Invalid values therefore fail before `values.yaml` or
-`installation.yaml` is written.
+last label starting with a letter), the GatewayClass resource name, repository
+Service names, and paired metrics scraper selectors. Invalid values therefore
+fail before `values.yaml` or `installation.yaml` is written.
 
 `scripts/render-installation-profile.mjs:signInProvider` refuses equal client-ID
 and client-secret Secret keys for GitHub, Google and OIDC. It considers the chart's

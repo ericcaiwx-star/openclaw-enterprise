@@ -136,6 +136,10 @@ one `@` and a dotted domain.
 }
 ```
 
+`controlPlane.gatewayClassName` must be a Kubernetes resource name of at most
+253 characters. Use the name of the existing GatewayClass that Envoy Gateway
+serves.
+
 For the `codex` profile, merge the reviewed Codex seccomp profile and model
 discovery egress into the base input:
 

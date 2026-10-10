@@ -1394,7 +1394,10 @@ function buildRendered(profile, parsed, diagnostics) {
     },
     gatewayRouting: {
       enabled: true,
-      gatewayClassName: asString(controlPlane, ["controlPlane", "gatewayClassName"], diagnostics),
+      gatewayClassName: asString(controlPlane, ["controlPlane", "gatewayClassName"], diagnostics, {
+        validate: isKubernetesResourceName,
+        description: "a Kubernetes resource name of at most 253 characters",
+      }),
       apiKeySecretName: asString(
         controlPlane,
         ["controlPlane", "gatewayApiKeySecretName"],
