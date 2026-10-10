@@ -1,7 +1,7 @@
 ---
 created: 2026-09-23
-updated: "2026-09-28"
-last_updated_session: "01a0e6ca-95a4-7e80-aab8-38c5e92a53da"
+updated: "2026-10-10"
+last_updated_session: "authoring-run/35b00357-b0c6-459f-aec1-b4fb63620dff"
 ---
 
 # Production image upgrade flow
@@ -74,10 +74,15 @@ Namespace stops preparation. Stopped and deleting Agents are excluded.
 For repository-enabled releases, the helper requires explicit immutable
 controller and broker images. It inventories every node matching the control
 plane selector, including unready and cordoned nodes, and requires a single
-native architecture. `scripts/upgrade-repository-image-probe.mjs` runs both
-selected images with synthetic inputs and a private receipt listener. It checks
-recovery and refused reservation through the actual Driver and broker, and
-records the selected digest, platform manifest, configuration, requests, and responses.
+native architecture. `scripts/upgrade-image-identity.py:read_platform` first
+reads Docker's native OCI export and resolves the selected manifest's
+configuration. It retains JSON objects within the 2 MiB per-blob and 32 MiB
+total metadata limits, checks their hashes, and verifies the configuration's
+platform. Compressed filesystem layers are outside that metadata budget.
+Then `scripts/upgrade-repository-image-probe.mjs` runs both selected images
+with synthetic inputs and a private receipt listener. It checks recovery and
+refused reservation through the actual Driver and broker, and records the
+selected digest, platform manifest, configuration, requests, and responses.
 The check proves wire compatibility, not Kubernetes image availability, receipt
 durability, or disposal. The
 helper also preserves the live broker hostname; broker restart recovery remains
@@ -97,6 +102,14 @@ Each Pod then checks the stored Installation name from the helper's
 `occ installation get` with the image's `isName`, the check the controller
 applies after it reads the name from the database (`INSTALLATION_NAME_INVALID`);
 an image without the rule skips it.
+On the experimental two-cluster profile, each Pod also runs
+`KubernetesComputeDriver.verifyExecutionTenantGrants` for its component, which
+startup does not run. In each execution tenant Namespace where its identity holds
+the release-era tenant grant, SelfSubjectAccessReviews ask for the newer
+`openclaw-execution` rules (API: Pod and `pods/proxy` reads, plus `pods/log` and
+Event reads with runtime logs; worker: Pod `patch`). A missing rule refuses the
+candidate and points to
+[upgrading the execution chart](../testing/two-cluster-local.md#upgrade-the-execution-chart).
 Because the chart's default-deny NetworkPolicy also selects these Pods, the
 helper first creates a temporary NetworkPolicy carrying the rendered
 `openclaw-enterprise-dependency-egress` (and execution-cluster API) egress rules.
@@ -166,6 +179,10 @@ broker-enabled worker it also accepts a restartable init container, provided
 no worker exists in the ordinary container list. It rejects a non-restartable
 init worker or ambiguous placement. It retries authenticated OCC access and verifies the same Installation ID. A
 controller-only release then ends without requesting Agent deployments.
+Existing revisions keep the Pod specification of the controller that deployed
+them, so controller fixes to Gateway and Agent Pods, such as
+[diagnostics](agent-deployment-diagnostics.md) mappings, reach an Agent only at
+its next deployment.
 
 For a repository-enabled release, it also verifies the ready API and worker
 Pods, their owning ReplicaSets, node architecture, and runtime controller and
@@ -186,7 +203,11 @@ record a verified accepted response and resume.
 
 The script polls each returned deployment through its authorized status
 operation, confirms active revision selection, and waits for all revision Pods
-to be `Running` and `Ready` on the candidate runtime digest. Embedded execution
+to be `Running` and `Ready` on the candidate runtime digest. Before OpenClaw
+starts, `GATEWAY_RUNTIME_ENTRYPOINT` runs `openclaw doctor --fix
+--non-interactive` once when an agent database uses an older schema, such as a
+2026-09-28 release Gateway's; a database still older holds the Gateway unready
+with check `state-migration`. Embedded execution
 requires one runtime container; dedicated execution requires both gateway and
 Agent containers. Each replacement gateway then runs read-only
 `openclaw doctor --lint --json --severity-min error`. Failures retain dispatch,
@@ -201,6 +222,18 @@ For a runtime release it also proves the recorded deployments and Pods reached
 the checked states and Doctor reported no error. The operator next verifies
 model responses, providers, channels, credentials, workspace continuity, native
 access, and required restore behavior.
+
+### Read-only export after a split-layout refusal
+
+The [split-layout export fallback](../guides/deploy/split-layout-upgrade.md#export-and-re-create)
+begins with the read-only `scripts/split-layout-tenants.mjs export --out FILE`.
+Its `createOccApi.expect` requires a data envelope for each successful resource
+response before `exportTenants` assembles the bundle. Malformed JSON, an empty
+body, or a missing data envelope stops export with a nonzero exit before `main`
+writes the bundle; an actual empty collection remains valid. The next owner is
+the operator, who retries the read after restoring the API response path and
+checks the exported inventory before following the recovery procedure. Empty
+204 deletes and explicitly accepted 404 responses retain their existing meaning.
 
 ## Debugging and Verification
 
@@ -234,6 +267,17 @@ access, and required restore behavior.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 02:10: Require complete successful API responses before publishing the split-layout export bundle. (authoring-run/35b00357-b0c6-459f-aec1-b4fb63620dff - 0886f47d05fdeb2fa4359f4840fb77378d643bac)
+
+- 2026-10-09 21:10: Gateways migrate an older agent database with Doctor before OpenClaw starts. (fix-971)
+
+- 2026-10-09 20:10: Point the split-layout export at the split-layout upgrade page, where in-place adoption comes first. (fix-533-adopt)
+- 2026-10-07 21:20: Refuse a two-cluster upgrade before quiescence when the execution chart lacks this release's tenant grants. (fix-758)
+
+- 2026-10-07 12:00: Say that a controller-only release leaves existing revisions on their old Pod specification until the next deployment. (dogfood-r43)
+
+- 2026-10-05 15:01: Keep filesystem layers outside the image identity metadata budget. (authoring-run/0b8bd46b-85c0-4664-8dbd-2ee77cd7b602 - 08248f8dbf227dfb7b73162056b6afd1c33cee0d)
 
 - 2026-10-05 06:00: Save and report every preflight Pod's result before cleanup, not only the first failure.
 

@@ -117,6 +117,10 @@ fresh runtime home, then initializes the image's real Codex app-server through
 the installed plugin's version guard. The smoke runs offline without provider
 credentials. It does not make a model call or establish a Slack connection;
 run the [live Slack test](slack.md#slack) for channel delivery proof.
+The native listener TLS case proves that HTTPS can become ready while Compute's
+HTTP probe fails, then verifies the plaintext control and all three Drivers'
+admission guards. Its loopback provider records zero model calls; it does not
+prove SSH/systemd or an Envoy/Kubernetes deployment.
 
 Build the controller image using the [production prerequisites](../guides/deploy.md#production-prerequisites),
 then set `OCC_TEST_PRODUCTION_IMAGE` to the local tag you built:
@@ -174,6 +178,18 @@ Both startup suites accept `OCC_TEST_IMAGE_TIMEOUT_MULTIPLIER`, an integer from
    unchanged; a timeout still fails the suite.
 
 ## Repository image-pair qualification
+
+Run the identity and node qualification fixtures without model credentials:
+
+```sh
+node --test tests/integration/production-image-qualification.test.mjs
+```
+
+The image identity case runs the production CLI against a synthetic OCI archive
+with 34 small compressed filesystem layers. It verifies that the layers do not
+consume the metadata allowance and that corrupt or excessive metadata is still
+rejected. Docker inspection and export are fixture I/O; this does not establish
+native Docker behavior or a live upgrade.
 
 The qualification test invokes the actual staged controller and broker images
 with synthetic App and TLS material and a disposable receipt listener. On a

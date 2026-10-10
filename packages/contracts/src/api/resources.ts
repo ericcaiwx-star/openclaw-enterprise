@@ -2,6 +2,7 @@ import { Type } from "typebox";
 
 import {
   AgentId,
+  AgentProvisioningWorkId,
   PresetId,
   PresetTemplateSchema,
   ConfigurationGeneration,
@@ -15,6 +16,7 @@ import {
   CredentialSourceType,
   HarnessExecutionModeSchema,
   HarnessAuthBindingSchema,
+  AgentCredentialSourcesSchema,
   InstallationId,
   KubernetesNamespaceName,
   Meta,
@@ -311,6 +313,7 @@ export const AgentSchema = Type.Object(
     configurationId: ConfigurationId,
     backendId: Type.Union([BackendId, Type.Null()]),
     harnessAuth: Type.Union([HarnessAuthBindingSchema, Type.Null()]),
+    credentialSources: Type.Optional(AgentCredentialSourcesSchema),
     executionMode: HarnessExecutionModeSchema,
     plugins: Type.Optional(Type.Ref("PluginDesiredState")),
     pluginApprovers: Type.Optional(Type.Ref("PluginApprovers")),
@@ -333,6 +336,7 @@ const ConfigurationReadErrorSchema = Type.Object(
       Type.Literal("repositoryBindings"),
       Type.Literal("repositoryAccess"),
       Type.Literal("harnessAuth"),
+      Type.Literal("credentialSources"),
       Type.Literal("secretBindings"),
       Type.Literal("repositoryCredentials"),
       Type.Literal("configuration"),
@@ -342,7 +346,7 @@ const ConfigurationReadErrorSchema = Type.Object(
 );
 
 const agentReadDescription =
-  "An Agent with readable saved settings, or Agent metadata with configurationReadError (code SAVED_CONFIGURATION_UNREADABLE and the unreadable field). The error variant omits plugins, pluginApprovers, repositoryBindings, repositoryAccess, and harnessAuth.";
+  "An Agent with readable saved settings, or Agent metadata with configurationReadError (code SAVED_CONFIGURATION_UNREADABLE and the unreadable field). The error variant omits plugins, pluginApprovers, repositoryBindings, repositoryAccess, harnessAuth, and credentialSources.";
 
 export const AgentReadSchema = Type.Union(
   [
@@ -355,6 +359,7 @@ export const AgentReadSchema = Type.Union(
           "repositoryBindings",
           "repositoryAccess",
           "harnessAuth",
+          "credentialSources",
         ]).properties,
         configurationReadError: ConfigurationReadErrorSchema,
       },
@@ -449,6 +454,77 @@ export const SecretSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Mirrors `SECRET_CONSUMER_LIMIT` in OCC: the most references one read examines. */
+const SECRET_CONSUMER_LIMIT = 50;
+
+export const SecretConsumersSchema = Type.Object(
+  {
+    agents: Type.Array(AgentId, {
+      maxItems: SECRET_CONSUMER_LIMIT,
+      description:
+        "Readable Agents whose draft, active revision, or pending deployment references the Secret. Each needs a new deployment to receive a rotated value.",
+    }),
+    configurations: Type.Array(ConfigurationId, {
+      maxItems: SECRET_CONSUMER_LIMIT,
+      description: "Readable Configurations whose `secretBindings` reference the Secret.",
+    }),
+    credentialSources: Type.Array(CredentialSourceId, {
+      maxItems: SECRET_CONSUMER_LIMIT,
+      description: "Readable credential sources that hold the Secret.",
+    }),
+    provisioningRequests: Type.Array(AgentProvisioningWorkId, {
+      maxItems: SECRET_CONSUMER_LIMIT,
+      description:
+        "Work IDs of queued or running Agent provisioning requests that reference the Secret, listed only for the actor that started them.",
+    }),
+    unreadable: Type.Integer({
+      minimum: 0,
+      maximum: SECRET_CONSUMER_LIMIT,
+      description:
+        "Examined references to resources the caller may not read. They are counted, never named.",
+    }),
+    truncated: Type.Boolean({
+      description: `\`true\` when the Secret has more than ${SECRET_CONSUMER_LIMIT} references; only the first ${SECRET_CONSUMER_LIMIT}, ordered by kind and ID, are examined.`,
+    }),
+  },
+  {
+    additionalProperties: false,
+    description:
+      "Current references that block deletion of the Secret. Returned by the exact Secret read only.",
+  },
+);
+
+export const SecretDetailSchema = Type.Object(
+  {
+    ...SecretSchema.properties,
+    consumers: SecretConsumersSchema,
+  },
+  { additionalProperties: false },
+);
+
+export const CredentialRefreshStatusSchema = Type.Object(
+  {
+    state: Type.Union([Type.Literal("pending"), Type.Literal("ready"), Type.Literal("failed")]),
+    expiresAt: Type.Optional(Type.String({ format: "date-time" })),
+    nextRefreshAt: Type.Optional(Type.String({ format: "date-time" })),
+    lastRefreshAt: Type.Optional(Type.String({ format: "date-time" })),
+    failureCode: Type.Optional(Type.String({ maxLength: 128 })),
+    recoveryAction: Type.Optional(
+      Type.Union([
+        Type.Literal("retry"),
+        Type.Literal("reauthorize"),
+        Type.Literal("fix_configuration"),
+        Type.Literal("investigate"),
+      ]),
+    ),
+  },
+  {
+    additionalProperties: false,
+    description:
+      "Token refresh status reported by the selected Credential Refresh Driver for a refresh-type source. It never contains tokens or refresh material.",
+  },
+);
+
 export const CredentialSourceStatusSchema = Type.Object(
   {
     state: Type.Union([
@@ -458,6 +534,7 @@ export const CredentialSourceStatusSchema = Type.Object(
       Type.Literal("absent"),
     ]),
     reason: Type.Optional(Type.String({ maxLength: 512 })),
+    refresh: Type.Optional(CredentialRefreshStatusSchema),
   },
   {
     additionalProperties: false,
@@ -591,6 +668,18 @@ export const IAMAccessBindingSchema = Type.Union([
   ),
 ]);
 
+export const IAMServicePrincipalSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1, maxLength: 200 }),
+    namespaceId: NamespaceId,
+  },
+  {
+    additionalProperties: false,
+    description:
+      "A non-Agent automation identity fixed to one Namespace. It holds only the grants of AccessBindings that name it.",
+  },
+);
+
 export const ServiceAccountSchema = Type.Object(
   {
     id: ServiceAccountId,
@@ -690,6 +779,11 @@ export const SecretResponse = Type.Object(
   },
 );
 
+export const SecretDetailResponse = Type.Object(
+  { data: SecretDetailSchema, meta: Meta },
+  { additionalProperties: false },
+);
+
 export const CredentialSourceResponse = Type.Object(
   { data: CredentialSourceSchema, meta: Meta },
   {
@@ -702,7 +796,11 @@ export const CredentialWithdrawalSchema = Type.Object(
   {
     namespaceId: NamespaceId,
     agentId: AgentId,
-    revisionId: RevisionId,
+    revisionId: Type.String({
+      ...RevisionId,
+      description:
+        "The revision whose withdrawal is reported: the active one, unless an earlier revision not yet retired or a later admitted one still has a `pending` withdrawal of the source (one with no attempt queued first). So `revoked` means every revision that may run with the source confirmed it.",
+    }),
     credentialSourceId: CredentialSourceId,
     state: Type.Union([Type.Literal("pending"), Type.Literal("revoked")], {
       description:
@@ -750,6 +848,29 @@ export const SecretListResponse = Type.Object(
 export const ServiceAccountResponse = Type.Object(
   { data: ServiceAccountSchema, meta: Meta },
   { additionalProperties: false },
+);
+
+export const ServiceAccountForceDeletionResponse = Type.Object(
+  {
+    data: Type.Object(
+      {
+        id: ServiceAccountId,
+        namespaceId: NamespaceId,
+        revocation: Type.Literal("skipped", {
+          description:
+            "The account's issued access token was not revoked: no ChatGPT Backend can revoke it. Revoke it at the provider; the audit event names its Backend and credential ID.",
+        }),
+        backendId: Type.Optional(BackendId),
+      },
+      { additionalProperties: false },
+    ),
+    meta: Meta,
+  },
+  {
+    additionalProperties: false,
+    description:
+      "A forced deletion removed the account and its credential Secret but could not revoke its issued access token.",
+  },
 );
 
 export const ServiceAccountListResponse = Type.Object(
@@ -802,6 +923,16 @@ export const IAMRoleListResponse = Type.Object(
 
 export const IAMAccessBindingResponse = Type.Object(
   { data: IAMAccessBindingSchema, meta: Meta },
+  { additionalProperties: false },
+);
+
+export const IAMServicePrincipalResponse = Type.Object(
+  { data: IAMServicePrincipalSchema, meta: Meta },
+  { additionalProperties: false },
+);
+
+export const IAMServicePrincipalListResponse = Type.Object(
+  { data: Type.Array(IAMServicePrincipalSchema), meta: Meta },
   { additionalProperties: false },
 );
 
@@ -894,6 +1025,7 @@ export const AgentRevisionSchema = Type.Object(
     ),
     pluginApprovers: Type.Optional(Type.Ref("PluginApprovers")),
     harnessAuth: HarnessAuthBindingSchema,
+    credentialSources: Type.Optional(AgentCredentialSourcesSchema),
     repositoryCredentials: Type.Optional(RepositoryRevisionStateSchema),
     createdAt: Timestamp,
   },
@@ -1385,6 +1517,7 @@ export type NamespaceResponse = Type.Static<typeof NamespaceResponse>;
 export type NamespaceListResponse = Type.Static<typeof NamespaceListResponse>;
 export type ConfigurationResponse = Type.Static<typeof ConfigurationResponse>;
 export type SecretResponse = Type.Static<typeof SecretResponse>;
+export type SecretDetailResponse = Type.Static<typeof SecretDetailResponse>;
 export type CredentialSourceWire = Type.Static<typeof CredentialSourceSchema>;
 export type CredentialSourceResponse = Type.Static<typeof CredentialSourceResponse>;
 export type CredentialSourceListResponse = Type.Static<typeof CredentialSourceListResponse>;
@@ -1392,6 +1525,9 @@ export type CredentialWithdrawalWire = Type.Static<typeof CredentialWithdrawalSc
 export type CredentialWithdrawalResponse = Type.Static<typeof CredentialWithdrawalResponse>;
 export type SecretListResponse = Type.Static<typeof SecretListResponse>;
 export type ServiceAccountResponse = Type.Static<typeof ServiceAccountResponse>;
+export type ServiceAccountForceDeletionResponse = Type.Static<
+  typeof ServiceAccountForceDeletionResponse
+>;
 export type ServiceAccountListResponse = Type.Static<typeof ServiceAccountListResponse>;
 export type AgentResponse = Type.Static<typeof AgentResponse>;
 export type AgentRuntimeCredentialResponse = Type.Static<typeof AgentRuntimeCredentialResponse>;
@@ -1399,6 +1535,8 @@ export type IAMRoleResponse = Type.Static<typeof IAMRoleResponse>;
 export type IAMRoleListResponse = Type.Static<typeof IAMRoleListResponse>;
 export type IAMAccessBindingResponse = Type.Static<typeof IAMAccessBindingResponse>;
 export type IAMAccessBindingListResponse = Type.Static<typeof IAMAccessBindingListResponse>;
+export type IAMServicePrincipalResponse = Type.Static<typeof IAMServicePrincipalResponse>;
+export type IAMServicePrincipalListResponse = Type.Static<typeof IAMServicePrincipalListResponse>;
 export type AgentListResponse = Type.Static<typeof AgentListResponse>;
 export type BackendListResponse = Type.Static<typeof BackendListResponse>;
 export type AgentProvisioningResponse = Type.Static<typeof AgentProvisioningResponse>;

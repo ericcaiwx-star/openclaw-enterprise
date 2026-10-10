@@ -22,7 +22,9 @@ incorporating it into a release.
 
 The command supports the production Helm and Kubernetes Compute path. It does
 not build images, create backups, provision infrastructure, or prove model and
-external integration behavior.
+external integration behavior. It upgrades only the `openclaw-enterprise` chart:
+on the experimental two-cluster profile, first
+[upgrade the execution chart](../../testing/two-cluster-local.md#upgrade-the-execution-chart).
 
 ## Prepare the release
 
@@ -345,8 +347,8 @@ becomes ready. This workflow replaces immutable images instead of running
 `openclaw update`, so the command then runs
 `openclaw doctor --lint --json --severity-min error` inside every replacement
 gateway. Doctor is read-only here; a reported error fails the upgrade and is
-saved under `status/*.doctor.*`. The command never runs `doctor --fix` across
-the fleet.
+saved under `status/*.doctor.*`. Gateways run `doctor --fix` themselves only
+for [older state](../../reference/drivers/kubernetes-compute/storage-and-credentials.md#gateway-storage).
 
 Success looks like:
 

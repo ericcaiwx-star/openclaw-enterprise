@@ -37,7 +37,7 @@ import {
   githubProviderId,
   googleProviderId,
   type GitHubLoginConfiguration,
-  MEMBERSHIP_DENIALS,
+  CALLBACK_DENIALS,
   PASSWORD_DENIAL_AUDIT_UNAVAILABLE,
 } from "./github.ts";
 import type { ExternalProviderName } from "./github.ts";
@@ -172,6 +172,11 @@ const LOCAL_PASSWORD_MAX_LENGTH = 128;
 export const OCC_SHARED_AUTH_COOKIE_PREFIX = "openclaw_occ_shared";
 export const OCC_SERVICE_KEY_HEADER = "x-api-key";
 const SERVICE_KEY_CONFIG = "occ-service";
+// The createServiceKey schema allows 1 to 32 characters, which Ajv counts in code points.
+// Better Auth counts UTF-16 units, so its own cap is twice that: a 32-emoji name is 64 units.
+// The schema stays the authority; storage is unbounded text.
+export const SERVICE_KEY_NAME_MAX_LENGTH = 32;
+const SERVICE_KEY_NAME_MAX_UTF16_UNITS = SERVICE_KEY_NAME_MAX_LENGTH * 2;
 const SAFE_COOKIE_DOMAIN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 type ControllerPlugins = (
@@ -528,6 +533,19 @@ function authFailure(error: unknown): { readonly status: number; readonly code: 
   return { status: 503, code: "DEPENDENCY_UNAVAILABLE" };
 }
 
+/** Better Auth refused a service-key name's length; the route answers 400, not a 503. */
+export class ServiceKeyNameRefused extends Error {
+  constructor(cause: unknown) {
+    super("The service-key name was refused.", { cause });
+    this.name = "ServiceKeyNameRefused";
+  }
+}
+
+function serviceKeyNameRefusal(error: unknown): boolean {
+  const code = (error as { readonly body?: { readonly code?: unknown } } | null)?.body?.code;
+  return error instanceof Error && error.name === "APIError" && code === "INVALID_NAME_LENGTH";
+}
+
 /**
  * A rejected password whose denial audit could not be written. The response is 503 (audit
  * outages fail closed), yet admission still counts it as a credential failure.
@@ -539,15 +557,16 @@ class DenialAuditUnavailable extends Error {
   }
 }
 
-// The Console reason for each GitHub allowlist refusal (RFC-0061). No other value reaches
-// the redirect.
-const membershipReasons: Readonly<Record<(typeof MEMBERSHIP_DENIALS)[number], string>> = {
+// The Console reason for each GitHub allowlist refusal (RFC-0061) and for an attached identity
+// whose account is disabled. No other value reaches the redirect.
+const callbackReasons: Readonly<Record<(typeof CALLBACK_DENIALS)[number], string>> = {
   MEMBERSHIP_REQUIRED: "membership",
   MEMBERSHIP_UNAVAILABLE: "membership-unavailable",
+  ACCOUNT_DISABLED: "account-disabled",
 };
 
-/** An audited allowlist refusal whose Console reason the callback redirect carries. */
-class MembershipRefusal extends AdmissionFailure {
+/** An audited callback refusal whose Console reason the callback redirect carries. */
+class CallbackRefusal extends AdmissionFailure {
   readonly consoleReason: string;
   constructor(consoleReason: string) {
     super(401, "UNAUTHENTICATED", "Authentication was not accepted.");
@@ -555,11 +574,11 @@ class MembershipRefusal extends AdmissionFailure {
   }
 }
 
-async function membershipRefusal(response: Response): Promise<MembershipRefusal | undefined> {
+async function callbackRefusal(response: Response): Promise<CallbackRefusal | undefined> {
   try {
     const body = (await response.json()) as { readonly code?: unknown } | null;
-    const code = MEMBERSHIP_DENIALS.find((denial) => denial === body?.code);
-    return code === undefined ? undefined : new MembershipRefusal(membershipReasons[code]);
+    const code = CALLBACK_DENIALS.find((denial) => denial === body?.code);
+    return code === undefined ? undefined : new CallbackRefusal(callbackReasons[code]);
   } catch {
     return undefined;
   }
@@ -865,6 +884,7 @@ export class ControllerAdmissionVerifier implements AdmissionVerifier {
         },
         decisionId: `adm_${randomUUID()}`,
         method: "api_key",
+        serviceKeyId: key.id,
       };
     }
 
@@ -1013,6 +1033,7 @@ export function createControllerAuth(options: ControllerAuthOptions): Controller
         enableMetadata: true,
         enableSessionForAPIKeys: false,
         requireName: true,
+        maximumNameLength: SERVICE_KEY_NAME_MAX_UTF16_UNITS,
         rateLimit: { enabled: false },
         keyExpiration: { defaultExpiresIn: 30 * 24 * 60 * 60 },
       }),
@@ -1292,7 +1313,7 @@ export function createControllerAuth(options: ControllerAuthOptions): Controller
         }
         throw failure;
       }
-      const refusal = path.endsWith("/callback") ? await membershipRefusal(response) : undefined;
+      const refusal = path.endsWith("/callback") ? await callbackRefusal(response) : undefined;
       throw (
         refusal ?? new AdmissionFailure(401, "UNAUTHENTICATED", "Authentication was not accepted.")
       );
@@ -1339,7 +1360,7 @@ export function createControllerAuth(options: ControllerAuthOptions): Controller
           reply.redirect("/console/");
         } catch (error) {
           reply.redirect(
-            error instanceof MembershipRefusal
+            error instanceof CallbackRefusal
               ? `/console/?authError=${name}&authReason=${error.consoleReason}`
               : `/console/?authError=${name}`,
           );
@@ -1616,18 +1637,25 @@ export function createControllerAuth(options: ControllerAuthOptions): Controller
     async createServiceKey({ principal, name, expiresIn }) {
       // The server-only userId parameter is the plugin's referenceId; no human
       // account or session is created for this existing IAM automation identity.
-      const created = await api.createApiKey({
-        body: {
-          configId: SERVICE_KEY_CONFIG,
-          userId: principal.id,
-          name,
-          ...(expiresIn === undefined ? {} : { expiresIn }),
-          metadata: {
-            installationId: options.installationId,
-            ...(principal.namespaceId === undefined ? {} : { namespaceId: principal.namespaceId }),
+      let created;
+      try {
+        created = await api.createApiKey({
+          body: {
+            configId: SERVICE_KEY_CONFIG,
+            userId: principal.id,
+            name,
+            ...(expiresIn === undefined ? {} : { expiresIn }),
+            metadata: {
+              installationId: options.installationId,
+              ...(principal.namespaceId === undefined
+                ? {}
+                : { namespaceId: principal.namespaceId }),
+            },
           },
-        },
-      });
+        });
+      } catch (error) {
+        throw serviceKeyNameRefusal(error) ? new ServiceKeyNameRefused(error) : error;
+      }
       return { ...serviceKeyDetails(created, options.installationId)!, key: created.key };
     },
     async getServiceKey(id) {

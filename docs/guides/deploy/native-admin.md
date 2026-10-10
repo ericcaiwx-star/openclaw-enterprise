@@ -208,6 +208,7 @@ may try the Agent hostname on port 8081 and report a refused connection.
 Provision a wildcard HTTPS certificate and DNS for a separate preview domain,
 for example `*.previews.example.net`. This domain must be outside
 `agentNativeAdmin.sharedCookieDomain`; it must not receive OCE session cookies.
+Keep it to 214 characters or fewer so each `agent-<32 hex>.` hostname fits.
 Store the wildcard certificate in a TLS Secret in the Helm release namespace.
 Enable a separate Envoy listener with explicit public ingress peers:
 
@@ -250,6 +251,13 @@ Compute derives each Agent's hostname, renders `mcp.apps.sandboxOrigin` and
 hostname mapping. Remove conflicting tenant overrides of those two native
 fields rather than redirecting the sandbox to the admin origin.
 
+With or without preview routing, OpenClaw binds its MCP Apps sandbox listener on
+an Agent's `mcp.apps.sandboxPort`, else the Gateway port plus one. TCP/18791 is
+the private runtime status port, so Compute refuses a `sandboxPort` of 18791,
+and enabled MCP Apps without a `sandboxPort` when `network.gatewayPort` is
+`18790`. With that Gateway port, set `sandboxPort` for canvas and board
+previews too.
+
 Open a generated HTML file from the native chat. Verify it renders on the preview
 domain, the request carries no OCE session cookie, and the preview host cannot
 serve `/console/`, Gateway RPCs or workspace data. A successful shell request
@@ -267,6 +275,7 @@ Full runtime proof still requires a real browser test that loads native assets t
 | Symptom                                             | Check                                                                                                                                                                                 |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Helm render fails                                   | `agentNativeAdmin.enabled` requires `gatewayRouting.enabled`, a DNS-only `agentNativeAdmin.domain`, and a valid `agentNativeAdmin.sharedCookieDomain` parent.                         |
+| Helm render fails on `auth.baseUrl`                 | With native admin, `auth.baseUrl` must be HTTPS and its host inside `agentNativeAdmin.sharedCookieDomain`.                                                                            |
 | API startup fails with `AUTH_BASE_URL_INVALID`      | `auth.baseUrl` is an HTTPS origin whose host is inside `agentNativeAdmin.sharedCookieDomain`, which must not be a public suffix. Better Auth checks these first.                      |
 | API startup fails with `AUTH_SECRET_INVALID`        | The `auth.secretKey` value in the `auth.secretName` Secret has at least 32 characters.                                                                                                |
 | API startup fails with `AGENT_NATIVE_ADMIN_INVALID` | `agentNativeAdmin.domain`, `agentNativeAdmin.sharedCookieDomain`, `OCC_AUTH_BASE_URL`, cookie-scope compatibility, auth secret length, and gateway routing.                           |

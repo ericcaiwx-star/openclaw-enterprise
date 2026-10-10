@@ -1,7 +1,7 @@
 ---
 created: 2026-09-21
-updated: 2026-09-28
-last_updated_session: authoring-run/c140c47a-799b-48c8-929a-5d1a37eb31d1
+updated: 2026-10-10
+last_updated_session: authoring-run/5b89726f-4b6c-43e9-8cfb-ad77c9f3a320
 ---
 
 # Agent Presets flow
@@ -15,11 +15,10 @@ continues through [revision admission](configuration-driver/persistence-and-revi
 
 ## Entry Points
 
-- [Installation loader](../../apps/controller/src/composition/installation-config.ts):
-  `loadInstallationConfiguration` reads `presets.includeDefaults` and `presets.files`.
+- [Preset file loader](../../apps/controller/src/composition/installation-presets.ts):
+  `loadInstallationPresets` reads `presets.includeDefaults` and `presets.files` before Driver composition.
   Bundled defaults are `default-codex`, **Standard Codex**, and **Standard OpenClaw**; the custom SWE Agent
-  file is loaded only when explicitly listed. Production and PostgreSQL development composition pass generic
-  name/template definitions to OCC and call `initializeDefaultPresets`.
+  file is loaded only when explicitly listed.
 
 - Source: `packages/contracts/src/api/routes.ts:occApiRoutes`.
 - [Preset routes](../../packages/contracts/src/api/routes.ts): authenticated
@@ -70,12 +69,11 @@ administrator Role. Its guarded update preserves customized Roles; the exact
 
 ### 1. Include configured defaults
 
-`apps/controller/src/composition/installation-config.ts:loadInstallationConfiguration`
+`apps/controller/src/composition/installation-presets.ts:loadInstallationPresets`
 
-The loader validates the opt-in boolean and file list. It loads bundled JSON
-when enabled, resolves explicit JSON paths beside the startup YAML, validates
-each name/template definition, and rejects missing, malformed, invalid, or
-duplicate-name files before composition; a file named like a bundled default
+The loader validates the opt-in boolean and file list, reads bundled JSON, and
+resolves explicit paths beside the startup YAML. It validates names/templates and rejects missing,
+malformed, invalid, or duplicate-name files; a file named like a bundled default
 replaces it, and API composition warns `presets.bundled-default-shadowed`. API and worker share the startup
 snapshot and source path (files are not watched), but only the API applies
 defaults and logs Preset warnings. [Production composition](../../apps/controller/src/composition/production.ts)
@@ -118,6 +116,11 @@ helper before queuing provisioning, so denied or invalid defaults also roll back
 the new Namespace. Disabling defaults leaves persisted copies alone.
 
 ### 2. Admit and store a template
+
+`apps/controller/src/index.ts:createFastifyApp` gives Preset POST/PATCH a
+transport budget for 1 MiB templates, JSON escapes and the envelope; overflow
+returns 413. Their `onRequest` hook runs `authorizePresetWrite`: callers without
+the grant get 403 before any body is read.
 
 `packages/occ/src/index.ts:OpenClawController.createPreset`
 
@@ -229,22 +232,17 @@ variables remain confined to the credential field. User-edited workspace bytes
 follow the existing private workspace setup path in both regular and provisioning
 creation. The form keeps Secret bindings internally and exposes channel-specific
 Secret controls rather than a raw bindings editor.
-Selected model Secret metadata and references survive draft navigation; raw
-passwords do not. Provider or authentication-method changes clear the selection.
-For an existing selection or a Secret reference already bound in the Preset,
-Save uses the reference without creating another Secret. Ordinary creation grants
-the new Agent's service principal exact Secret `operate` access and retains the
-reference through Agent-conflict and grant retries. The caller needs permission to
-manage the grant; if it fails, the saved Agent remains and the form offers a retry.
-Provisioning derives the grant from `harnessAuth.source`.
-For a password input, Save first creates a same-Namespace Secret, clears the
-credential input, and retains the returned reference. It then creates a
-Configuration and an Agent that refers to the Configuration and Secret, and
-grants the Agent access. Dedicated provisioning uses the existing provisioning
-flow after Secret creation. Password bytes are sent only to the Secret creation
-endpoint, never as Agent or Configuration fields. Each server
-request owns full schema, native credential, and authorization admission before
-its persistence boundary; browser validation is not that boundary.
+Model Secret references survive draft navigation; passwords do not. Provider or
+authentication-method changes clear the selection. Existing or Preset-bound
+references are reused. Ordinary creation grants the Agent service principal
+exact Secret `operate` access; Agent-conflict and grant retries retain the
+reference. The caller needs grant-management permission. A failed grant keeps
+the saved Agent and offers retry. Provisioning derives it from `harnessAuth.source`.
+Password inputs first create a same-Namespace Secret, clear the input, and
+retain the reference. Save then creates Configuration and Agent resources and
+grants access; dedicated provisioning follows its existing flow. Password bytes
+reach only Secret creation. Each API request performs schema, native credential
+and authorization admission before persistence.
 
 If Secret creation fails, the masked input remains for correction or retry.
 If a later save fails, its saved Secret reference is reused.
@@ -294,6 +292,11 @@ or an immutable admitted revision.
 
 ## Changelog
 
+- 2026-10-09 19:46: Authorize Preset writes before reading the body. (authoring-run/5b89726f-4b6c-43e9-8cfb-ad77c9f3a320 - deeb84b5e)
+
+- 2026-10-10 02:23: Admit contract-sized Preset writes at the HTTP boundary; template limits and mutation checks remain unchanged. (authoring-run/6f54c753-eb8a-4e11-b078-b178ba613240 - 5bf37b274fcdfefb49dfa99984a15d99b757dc8e)
+
+- 2026-10-06 22:22: Locate Preset file loading in its adjacent composition module; initialization remains unchanged. (authoring-run/a45c48cd-bde3-41b1-8e3d-57bf774df237 - 17e10b6d34cc2c805b3910fddfef191d3dd1b3f8)
 - 2026-10-05 05:30: Only the API logs Preset warnings.
 - 2026-10-05 03:30: A file named like a bundled default replaces it and warns.
 - 2026-10-05 02:30: Skip and warn on a default creation a deny Restriction refuses.
