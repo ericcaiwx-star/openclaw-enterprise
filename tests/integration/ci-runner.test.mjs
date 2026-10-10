@@ -3461,7 +3461,9 @@ test("run publishes a failed wait's followed container log, redacted, beside Age
       '} else if (args.includes("get") && args.includes("events")) {',
       `  process.stdout.write(JSON.stringify({ items: [${JSON.stringify(event)}] }));`,
       "} else {",
+      '  if (process.env.CI_RUNNER_STALLED_WATCH !== "1") {',
       '  process.stdout.write(JSON.stringify({ type: "BOOKMARK", object: { metadata: { annotations: { "k8s.io/initial-events-end": "true" } } } }) + "\\n");',
+      "  }",
       "  setTimeout(() => {}, 60_000);",
       "}",
       "",
@@ -3587,4 +3589,47 @@ test("run publishes a failed wait's followed container log, redacted, beside Age
     (await readdir(clusterDirectory)).filter((name) => name.startsWith("container-logs-")),
     [],
   );
+
+  // A live observer that never sends its bookmark must not disable the independent
+  // failed-wait log, snapshots or the file's original failure result.
+  const stalledState = join(root, "state/k3d-stalled-wait.json");
+  const stalledResults = join(root, "results/k3d-stalled-wait.json");
+  await writeJson(stalledState, JSON.parse(await readFile(statePath, "utf8")));
+  const stalled = run(
+    root,
+    [
+      "run",
+      "k3d-lane",
+      "--manifest",
+      join(root, "scripts/ci/suites.json"),
+      "--root",
+      root,
+      "--state",
+      stalledState,
+      "--results",
+      stalledResults,
+    ],
+    {
+      OCC_KUBECTL_BIN: kubectl,
+      PATH: `${bin}:${process.env.PATH}`,
+      CI_RUNNER_STALLED_WATCH: "1",
+    },
+  );
+  assert.equal(stalled.status, 1, stalled.stderr);
+  assert.match(stalled.stderr, /Agent namespace activity unavailable/);
+  const stalledSummary = JSON.parse(await readFile(stalledResults, "utf8"));
+  assert.equal(stalledSummary.counts.failed, 1);
+  assert.equal(stalledSummary.counts.passed, 1);
+  const stalledText = await readFile(`${stalledState}.diagnostics.json`, "utf8");
+  const stalledReport = JSON.parse(stalledText);
+  assert.equal(stalledReport.agentNamespaces, undefined);
+  assert.equal(stalledReport.containerLogs?.length, 1);
+  const [stalledLog] = stalledReport.containerLogs;
+  assert.equal(stalledLog.reason, log.reason);
+  assert.deepEqual(stalledLog.lines, log.lines);
+  assert.deepEqual(stalledLog.snapshots[0].pods, snapshot.pods);
+  assert.deepEqual(stalledLog.snapshots[0].events, snapshot.events);
+  assert.equal(stalledLog.snapshots[1].unavailable, true);
+  assert.doesNotMatch(stalledText, /do-not-publish|secretauthvalue|childonlysecret/);
+  assert.deepEqual(await readdir(clusterDirectory), []);
 });

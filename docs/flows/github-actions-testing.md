@@ -1,7 +1,7 @@
 ---
 created: 2026-09-04
 updated: 2026-10-10
-last_updated_session: authoring-run/1daba808-076b-48c2-a2ef-79a5f6149f31
+last_updated_session: authoring-run/c7f52e93-d02d-497c-b146-43640cef1418
 ---
 
 # GitHub Actions testing flow
@@ -105,8 +105,9 @@ The [CI guide](../testing/ci.md) describes the retained evidence.
 Tests delete namespaces and events before exit. `scripts/ci/run-tests.mjs:runFile`
 calls `scripts/ci/k3d-diagnostics.mjs:startAgentNamespaceCapture` before each file.
 It requests initial Pod/Event streams and waits up to 10 seconds per watch for
-the initial-state bookmark. A failed start stops every owned watch and logs
-`Agent namespace activity unavailable`; the test still runs.
+the initial-state bookmark. Watch failure stops observers, removes streams and
+logs `Agent namespace activity unavailable`. The independent log directory and
+`finish` still retain failed-wait logs and snapshots.
 `projectAgentNamespaceActivity` retains transitions and namespace events under
 `agentNamespaces` on pass or failure: 200 Pod and 200 event records per file,
 40 files per report. Messages are redacted/truncated; Pod specs dropped. Raw
@@ -190,6 +191,8 @@ Per-file cleanup releases its disposable database; job cleanup removes only stat
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 09:04: Preserve failed-wait container evidence when optional watch startup fails. (authoring-run/c7f52e93-d02d-497c-b146-43640cef1418 - acb84f827e22218bdb8432c48cbb22d644503cfb)
 
 - 2026-10-10 06:28: Await initial Agent watch synchronization before each test file. (authoring-run/1daba808-076b-48c2-a2ef-79a5f6149f31 - 792304b6a09b5df4f46e3889066f231610b294cf)
 

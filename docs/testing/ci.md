@@ -103,7 +103,8 @@ Diagnostics explain setup failures without establishing coverage.
 
 Before each k3d file, the runner awaits initial Pod/Event synchronization
 ([flow](../flows/github-actions-testing.md#2-prepare-resources-under-the-job-owner)).
-It supplies a private `OPENCLAW_CI_CONTAINER_LOG_DIR`. On failed waits,
+The independent private `OPENCLAW_CI_CONTAINER_LOG_DIR` remains available when
+watch startup fails. On failed waits,
 `tests/helpers/container-log-capture.mjs` records markers, Pod/event snapshots
 and logs, waiting up to 60 s for container exit.
 `scripts/ci/k3d-diagnostics.mjs:projectContainerLog` keeps at most 1,500 lines,
