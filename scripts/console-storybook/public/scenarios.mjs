@@ -546,6 +546,25 @@ export const scenarios = {
     description:
       "A rejected Google callback shows the generic sign-in error and keeps password recovery available.",
   },
+  googleAccountDisabled: {
+    group: "Pages/Sign in",
+    name: "Google account disabled",
+    path: "/console/?authError=google&authReason=account-disabled",
+    signedOut: true,
+    googleEnabled: true,
+    description:
+      "Google authenticated an identity attached to a disabled account, so the page says the account is disabled and names an administrator, not a retry, password or identity attach.",
+  },
+  recoveryOnlyAccountDisabled: {
+    group: "Pages/Sign in",
+    name: "Recovery-only account disabled",
+    path: "/console/?authError=github&authReason=account-disabled",
+    signedOut: true,
+    githubEnabled: true,
+    passwordRecoveryOnly: true,
+    description:
+      "With recovery-only password sign-in, a disabled account's GitHub sign-in gives the same administrator advice.",
+  },
   googleResultRejected: {
     group: "Pages/Sign in",
     name: "Google result not confirmed",
