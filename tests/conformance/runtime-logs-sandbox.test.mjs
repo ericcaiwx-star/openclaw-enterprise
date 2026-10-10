@@ -1276,3 +1276,114 @@ for (const wideIdentity of [false, true]) {
     assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
   });
 }
+
+test("sandbox follows a growing full wire-cut tail without replaying its delivered prefix", async () => {
+  const fixture = await sandboxFixture();
+  const start = Date.now() - 120_000;
+  const row = (index) => ({
+    sandboxId: SANDBOX_ID,
+    time: new Date(start + index * 1000).toISOString().replace("Z", "000000Z"),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; ${"ordinary diagnostic ".repeat(350)}`,
+    fields: {},
+  });
+  fixture.gateway.state.lines = Array.from({ length: 100 }, (_, index) => row(index));
+  let cursor;
+  const seen = [];
+  const counts = [];
+  for (let poll = 0; poll < 6; poll += 1) {
+    if (poll > 0) {
+      const offset = fixture.gateway.state.lines.length;
+      fixture.gateway.state.lines.push(
+        ...Array.from({ length: 3 }, (_, index) => row(offset + index)),
+      );
+    }
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(
+        `source=sandbox&tailLines=100${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    counts.push(lines.length);
+    if (poll === 0) {
+      assert.equal(response.data.truncated, true);
+    }
+    cursor = response.data.cursor;
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 115 }, (_, index) => index),
+  );
+  assert.deepEqual(counts.slice(2), [3, 3, 3, 3]);
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=100&cursor=${cursor}`),
+  );
+  assert.deepEqual(
+    replay.data.records.filter(({ type }) => type === "line"),
+    [],
+  );
+});
+
+test("sandbox full wire-cut pages retain already-delivered untimed prefixes", async () => {
+  const start = Date.now() - 120_000;
+  const rows = Array.from({ length: 100 }, (_, index) => ({
+    sandboxId: SANDBOX_ID,
+    time: index === 0 ? null : new Date(start + index * 1000).toISOString().replace("Z", "000000Z"),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; ${"ordinary diagnostic ".repeat(350)}`,
+    fields: {},
+  }));
+  // This supported raw-null-time response cannot be ordered by the request floor.
+  // Keep the observed unknown row alongside the matching timed rows.
+  const gatewayClient = {
+    async getSandboxLogs(request) {
+      const tail = rows.slice(-request.lines);
+      return {
+        lines: tail.filter(
+          (line) =>
+            line.time === null || request.sinceTime === undefined || line.time >= request.sinceTime,
+        ),
+        bufferTotal: tail.length,
+      };
+    },
+  };
+  const fixture = await createRuntimeLogFixture({
+    computeDriver: createRuntimeLogComputeDriver({ sandboxNamespace: SANDBOX_NAMESPACE }),
+    sandboxDriver: openShellSandboxDriver(gatewayClient),
+  });
+  const target = await fixture.deployAgent("full-mixed-wire-tail");
+  const seen = [];
+  let cursor;
+  for (let poll = 0; poll < 3; poll += 1) {
+    const response = await fixture.request(
+      "GET",
+      target.logsPath(
+        `source=sandbox&tailLines=100${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    if (poll === 0) {
+      assert.equal(response.data.truncated, true);
+    }
+    if (poll === 2) {
+      assert.equal(lines.length, 0, "the drained snapshot does not replay its untimed prefix");
+    }
+    cursor = response.data.cursor;
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 100 }, (_, index) => index),
+  );
+});

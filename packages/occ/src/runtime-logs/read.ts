@@ -343,8 +343,17 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
     checkpoint.seen <= completeLines.length &&
     checkpoint.hash === containerPrefixHash(completeLines, checkpoint.seen);
   const checkpointLost = checkpoint !== undefined && !replacedDuringRead && !checkpointValid;
+  // A moving timed window resumes from delivered progress, not the pre-cut baseline.
+  // A changed tail or ambiguous single-time replacement still takes a fresh snapshot.
+  const recoverDelivered =
+    checkpointLost &&
+    checkpoint.tailLines === query.tailLines &&
+    prior?.lastTime != null &&
+    completeLines.some(
+      (line) => line.time !== null && compareRuntimeLogTime(line.time, prior.lastTime!) !== 0,
+    );
   const baseline =
-    checkpoint === undefined
+    checkpoint === undefined || recoverDelivered
       ? prior
       : {
           ...prior!,

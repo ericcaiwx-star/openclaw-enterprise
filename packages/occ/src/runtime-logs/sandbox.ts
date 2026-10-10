@@ -350,10 +350,6 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
             : 0
           : remaining[end - 1]!.index + 1;
     const consumedLines = eligible.filter(({ index }) => index < consumed).map(({ line }) => line);
-    const retainCheckpoint =
-      pageCut ||
-      (checkpoint !== undefined &&
-        (consumedLines.some((line) => line.time === null) || lines.length === 0));
     const sanitized = sanitizeSandboxLogLines(stream, delivered);
     const window = overlapWindow(
       [
@@ -367,11 +363,40 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
       // cursor poll without `sinceSeconds` (after an empty page) reads nothing older.
       gapFloor ?? (continuing ? baseTime : (sinceTime ?? null)),
     );
+    // A full moving tail invalidates positional checkpoints on every append. Use
+    // the normal delivered overlap when it still covers every undelivered time.
+    // Untimed rows, or a cut timestamp group beyond the bounded hash history,
+    // require the signed snapshot position until that observed window drains.
+    const newestDelivered = delivered.reduce<string | null>(
+      (newest, line) =>
+        line.time !== null && (newest === null || compareRuntimeLogTime(line.time, newest) > 0)
+          ? line.time
+          : newest,
+      null,
+    );
+    const retainCheckpoint =
+      (pageCut &&
+        (chunk.bufferTotal < tailLines ||
+          consumedLines.some((line) => line.time === null) ||
+          window.since === null ||
+          newestDelivered === null ||
+          lines
+            .slice(end)
+            .some(
+              (line) =>
+                line.time === null ||
+                compareRuntimeLogTime(line.time, window.since!) < 0 ||
+                compareRuntimeLogTime(line.time, newestDelivered) <= 0,
+            ))) ||
+      (checkpoint !== undefined &&
+        (consumedLines.some((line) => line.time === null) || lines.length === 0));
     const unobservableTail =
       (retainCheckpoint || checkpoint !== undefined) && chunk.bufferTotal >= tailLines;
     const records = [
       ...leading,
-      ...(unobservableTail && window.overflow === null
+      ...(unobservableTail &&
+      window.overflow === null &&
+      !leading.some((record) => record.type === "gap" && record.reason === "window_exceeded")
         ? [runtimeLogGap("window_exceeded", stream)]
         : []),
       ...sanitized.records,

@@ -2848,3 +2848,58 @@ test("container wire continuation retains fetched JSON withholding decisions", a
     assert.equal(cut, true);
   }
 });
+
+test("container follows a growing full wire-cut tail without replaying its delivered prefix", async () => {
+  const { createRuntimeLogFixture } = await import("../helpers/runtime-logs.mjs");
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent("full-growing-wire-tail");
+  const start = Date.now() - 120_000;
+  const row = (index) => ({
+    time: new Date(start + index * 1000).toISOString(),
+    raw: JSON.stringify({
+      level: "info",
+      subsystem: "gateway",
+      message: `row=${index}; ${"ordinary diagnostic ".repeat(350)}`,
+    }),
+  });
+  fixture.computeDriver.state.lines = Array.from({ length: 100 }, (_, index) => row(index));
+  let cursor;
+  const seen = [];
+  const counts = [];
+  for (let poll = 0; poll < 6; poll += 1) {
+    if (poll > 0) {
+      const offset = fixture.computeDriver.state.lines.length;
+      fixture.computeDriver.state.lines.push(
+        ...Array.from({ length: 3 }, (_, index) => row(offset + index)),
+      );
+    }
+    const response = await fixture.request(
+      "GET",
+      target.logsPath(
+        `source=gateway&tailLines=100${cursor === undefined ? "" : `&cursor=${cursor}`}`,
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+    const lines = response.data.records.filter(({ type }) => type === "line");
+    seen.push(...lines.map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])));
+    counts.push(lines.length);
+    if (poll === 0) {
+      assert.equal(response.data.truncated, true);
+    }
+    cursor = response.data.cursor;
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 115 }, (_, index) => index),
+  );
+  assert.deepEqual(counts.slice(2), [3, 3, 3, 3]);
+  const replay = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=100&cursor=${cursor}`),
+  );
+  assert.deepEqual(
+    replay.data.records.filter(({ type }) => type === "line"),
+    [],
+  );
+});

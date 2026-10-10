@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/e28bad2a-a77a-4033-aa7c-174ac006a870
+last_updated_session: authoring-run/8a9638ae-99ab-4dca-9759-92fe81e8d280
 ---
 
 # Agent runtime logs flow
@@ -168,16 +168,17 @@ batches them, and filters `since_time` by that stamp, so a resume sends a time
 keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
 Signed cut checkpoints retain the raw-prefix digest/count, query floor and pre-cut
-baseline. Container requests keep the two-second overlap, then filter to the saved floor. Sandbox checkpoints reuse outer time/hashes for the baseline. Fixed-width hashes
-and window tuples retain occurrences within response and query cursor limits. All-untimed byte-cut prefixes retain consumed progress; mixed prefixes advance
-through delivered time with an explicit `window_exceeded` reset, which may replay
-untimed rows. Known container times retain
-the captured floor; empty checkpoints persist. A matching checkpoint retains
-observed positional proof across append-only growth and later cuts. Stable windows
-drain, including untimed lines and over-capacity timestamp groups. Changed values, tails or clipped windows emit gaps before fresh snapshots;
-UID/restarts reset container progress,
-and PEM recovery clears inconsistent time boundaries while preserving masking. Timed windows resume overlap. Value-identical replacements remain unobservable; full checkpoints report gaps. Missing remembered lines or over-capacity timestamps also emit
-gaps. gRPC `NOT_FOUND` (absent
+baseline. Container keeps its two-second overlap and saved floor. A changed timed
+window with the same tail resumes from the outer delivered frontier; changed tails
+and ambiguous single-time replacements take fresh snapshots. Sandbox pins short
+windows, untimed rows and unfinished timestamp groups. Full timed windows use normal
+overlap when every undelivered time is later than the newest delivery and remains
+inside its floor. Sandbox checkpoints reuse outer baseline time/hashes. All-untimed Driver byte cuts retain progress;
+mixed cuts advance through time with an explicit reset that may replay untimed rows.
+Matching checkpoints retain positional proof across growth. Stable windows drain,
+including over-capacity timestamp groups. UID/restarts reset progress; PEM recovery
+keeps masking. Identical replacements remain unobservable; full checkpoints, missing
+anchors or overflowing timestamp groups report gaps. gRPC `NOT_FOUND` (absent
 Sandbox, or concealed from a non-member) maps to
 `RUNTIME_LOGS_SANDBOX_NOT_FOUND`, never to an empty page. Lines naming two
 Sandbox IDs are refused; a new Sandbox ID emits `stream_replaced`.
@@ -239,6 +240,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 09:27: Follow moving full byte-cut windows through delivered time. (authoring-run/8a9638ae-99ab-4dca-9759-92fe81e8d280 - 8741e9f5e2a915ac5c2dcb076479cc9e23d8c5cb)
 
 - 2026-10-10 08:12: Retain overlap and Sandbox gaps. (authoring-run/e28bad2a-a77a-4033-aa7c-174ac006a870 - a2911f897dfdd9d748f8e65065da5196b7749eff)
 
