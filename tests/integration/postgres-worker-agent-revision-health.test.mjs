@@ -854,6 +854,7 @@ async function refusedStopRestarts(context, shape, restart) {
   let candidatePasses = 0;
   let stopCalls = 0;
   let release;
+  const events = [];
   const compute = {
     ...fixture.compute,
     ...(shape === "exclusive" ? { requiresStoppedPredecessors: () => true } : {}),
@@ -892,7 +893,7 @@ async function refusedStopRestarts(context, shape, restart) {
     },
     async retireRevision() {},
   };
-  await fixture.start(compute);
+  await fixture.start(compute, { emit: (event) => events.push(event) });
   if (shape === "exclusive") {
     await fixture.work(await fixture.revision(owner, 1), "succeeded");
   }
@@ -933,7 +934,7 @@ async function refusedStopRestarts(context, shape, restart) {
       assert.equal(status.progress.lastAttempt.code, "LEASE_EXPIRED");
       assert.equal(
         status.progress.lastAttempt.message,
-        "Deployment refused (AUTHORIZATION_DENIED); the previous worker claim expired while stopping the refused version. The controller will retry.",
+        "Deployment refused (AUTHORIZATION_DENIED); the previous worker claim expired before the refused version was stopped. The controller will retry.",
       );
     } else {
       // The shutdown released the claim with its refusal; on main it stayed claimed.
@@ -951,7 +952,7 @@ async function refusedStopRestarts(context, shape, restart) {
       // A claim that main left behind is recovered like a lost one.
       await expireLease();
     }
-    await fixture.start(compute);
+    await fixture.start(compute, { emit: (event) => events.push(event) });
   }
   await fixture.work(candidate, "failed_permanent", 30_000);
   const result = await fixture.workResult(candidate);
@@ -960,6 +961,11 @@ async function refusedStopRestarts(context, shape, restart) {
     stopCalls,
     failedStops + restarts + 1,
     "the refusal was recorded after the stop succeeded",
+  );
+  // A shutdown's deferral logs why the stop ended, not a lost claim.
+  assert.deepEqual(
+    refusedStopWaits(events, candidate).map(({ cause }) => cause),
+    restart === "lost" ? ["Error"] : Array.from({ length: restarts }, () => "WorkerStopping"),
   );
   const evidence = await fixture.observerPool.query(
     `SELECT details->>'reasonCode' AS code, details->>'refusal' AS refusal FROM occ.audit_events

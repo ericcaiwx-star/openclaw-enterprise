@@ -4417,7 +4417,12 @@ export class ControllerWorker {
         if (!this.stopping) {
           throw error;
         }
-        throw new RefusedCandidateStopError(refusal, 0, error);
+        // Its log names the shutdown, not a lost claim.
+        const stopping = new Error("The controller stopped during the refused candidate's stop.", {
+          cause: error,
+        });
+        stopping.name = "WorkerStopping";
+        throw new RefusedCandidateStopError(refusal, 0, stopping);
       }
       throw new RefusedCandidateStopError(refusal, Date.now() - started, error);
     }
