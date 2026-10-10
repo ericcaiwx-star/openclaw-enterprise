@@ -5231,6 +5231,68 @@ test(
   },
 );
 
+test(
+  "a deploy denial during repository admission leaves a first deployment's runtime untouched",
+  requiresPostgres,
+  async (context) => {
+    // On Compute that does not declare exclusive replacement, a refused candidate without an
+    // active revision is stopped only if Compute may have prepared it. Here the actor loses
+    // deploy while the first pass opens its repository session; the repository lifecycle's
+    // authority recheck, as it records the opened session, refuses it before Compute is asked to
+    // prepare, with no earlier evidence: nothing may stop it.
+    const repository = repositoryBoundary();
+    const fixture = await setup(context, { repoDriver: repository.driver });
+    const { owner, candidate } = await fixture.admitInitialRevision("repository-denied", {
+      revision: { repositoryCredentials: repository.snapshot },
+    });
+    const open = repository.driver.open;
+    repository.driver.open = async (input, signal) => {
+      const result = await open(input, signal);
+      await fixture.observerPool.query(
+        `INSERT INTO occ.iam_restrictions
+           (id, namespace_id, action, resource_kind, resource_id, effect)
+         VALUES ($1, $2, 'deploy', 'agent', $3, 'deny')`,
+        [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
+      );
+      return result;
+    };
+    const effects = [];
+    await fixture.start({
+      ...fixture.compute,
+      async prepareRevision(revision, deploymentContext) {
+        effects.push("prepare");
+        return fixture.compute.prepareRevision(revision, deploymentContext);
+      },
+      async stopRevision(revision) {
+        // The failed work's repository cleanup retires the runtime afterwards. Only a stop while
+        // the deployment work is unfinished would be the refused-candidate stop.
+        const work = await fixture.observerPool.query(
+          "SELECT state FROM occ.controller_work WHERE idempotency_key = $1",
+          [candidate.idempotencyKey],
+        );
+        effects.push(`stop:${work.rows[0].state}`);
+        return fixture.compute.stopRevision(revision);
+      },
+    });
+    await fixture.work(candidate, "failed_permanent");
+    const failure = await fixture.observerPool.query(
+      `SELECT details->>'reasonCode' AS code FROM occ.audit_events
+       WHERE resource_id = $1 AND action = 'reconcile' AND outcome = 'failure'`,
+      [candidate.id],
+    );
+    assert.deepEqual(failure.rows, [{ code: "AUTHORIZATION_DENIED" }]);
+    assert.equal(repository.calls.filter(({ operation }) => operation === "open").length, 1);
+    await waitFor("the repository cleanup to retire the runtime", async () =>
+      effects.includes("stop:failed_permanent") ? true : undefined,
+    );
+    assert.ok(
+      effects.every((effect) => effect === "stop:failed_permanent"),
+      effects.join(","),
+    );
+    assert.equal((await fixture.currentAgent(owner)).activeRevisionId, undefined);
+  },
+);
+
 revisionTest(
   "one worker reconciles embedded OpenClaw and dedicated Codex but rejects unapproved pinned Harnesses",
   async (fixture) => {

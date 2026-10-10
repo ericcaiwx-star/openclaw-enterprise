@@ -219,9 +219,12 @@ if (tool === 'helm') {
   if (args.includes('deployment-inventory')) {
     out({installationId: 'ins_test', namespaces: state.inventoryNamespaces ?? [{id: 'ns_test', status: 'ready', agents: state.agent ? [{id: 'agt_test', status: 'active', desiredRuntimeState: 'running', executionMode: 'embedded', activeRevisionId: 'rev_old', deploymentInProgress: false}] : []}]});
   } else if (state.names && args.includes('get') && (args.includes('agent') || args.includes('namespace'))) {
-    // Reads a scripted resource name; an unlisted ID stands for a denied read.
+    // Reads a scripted resource name; an unlisted ID stands for a denied read, and so does an
+    // Agent read outside its own Namespace. Like a CLI that can take input, it drains stdin.
+    fs.readFileSync(0);
     log('read ' + args.at(-1));
-    const name = state.names[args.at(-1)];
+    const home = (state.inventoryNamespaces ?? []).find((ns) => ns.agents.some((a) => a.id === args.at(-1)));
+    const name = args.includes('agent') && (!args.includes('--namespace') || fileArg('--namespace') !== home?.id) ? undefined : state.names[args.at(-1)];
     if (name === undefined) { process.stderr.write('permission denied\\n'); process.exit(1); }
     out({id: args.at(-1), name});
   } else if (args.includes('deploy')) {
@@ -1116,58 +1119,70 @@ test("an unchecked repository image pair cannot start an upgrade", async (t) => 
   assert.deepEqual(await f.events(), []);
 });
 
-test("a running Agent without an active revision is named with its remedy before mutation", async (t) => {
-  const agent = (id, fields = {}) => ({
-    id,
-    status: "active",
-    desiredRuntimeState: "running",
-    executionMode: "dedicated",
-    deploymentInProgress: false,
-    ...fields,
-  });
-  const stranded = Array.from({ length: 12 }, (_, index) => `agt_stranded_${index + 1}`);
-  const f = await fixture(t, {
-    inventoryNamespaces: [
-      {
-        id: "ns_alpha",
-        status: "ready",
-        agents: [
-          agent("agt_healthy", { activeRevisionId: "rev_old" }),
-          agent("agt_stopped", { desiredRuntimeState: "stopped" }),
-          ...stranded.slice(0, 2).map((id) => agent(id)),
-        ],
+// Twelve stranded Agents list ten plus "and 2 more"; exactly ten list all of them, with no
+// "and N more" line.
+for (const count of [12, 10]) {
+  test(`${count} running Agents without an active revision are named with their remedy before mutation`, async (t) => {
+    const agent = (id, fields = {}) => ({
+      id,
+      status: "active",
+      desiredRuntimeState: "running",
+      executionMode: "dedicated",
+      deploymentInProgress: false,
+      ...fields,
+    });
+    const stranded = Array.from({ length: count }, (_, index) => `agt_stranded_${index + 1}`);
+    const f = await fixture(t, {
+      inventoryNamespaces: [
+        {
+          id: "ns_alpha",
+          status: "ready",
+          agents: [
+            agent("agt_healthy", { activeRevisionId: "rev_old" }),
+            agent("agt_stopped", { desiredRuntimeState: "stopped" }),
+            ...stranded.slice(0, 2).map((id) => agent(id)),
+          ],
+        },
+        { id: "ns_beta", status: "ready", agents: stranded.slice(2).map((id) => agent(id)) },
+      ],
+      // agt_stranded_2 and ns_beta have no readable name, and agt_stranded_3's is not a string;
+      // agt_stranded_1's name carries a quote, a newline, DEL, and a C1 control.
+      names: {
+        ns_alpha: "Team Alpha",
+        agt_stranded_1: 'Mail "triage"\nbot\u007f\u009b',
+        agt_stranded_3: 42,
       },
-      { id: "ns_beta", status: "ready", agents: stranded.slice(2).map((id) => agent(id)) },
-    ],
-    // agt_stranded_2 and ns_beta have no readable name; agt_stranded_1's name
-    // carries a quote, a newline, DEL, and a C1 control.
-    names: { ns_alpha: "Team Alpha", agt_stranded_1: 'Mail "triage"\nbot\u007f\u009b' },
+    });
+    const failure = await f.run().then(
+      () => assert.fail("the upgrade must refuse"),
+      (error) => error,
+    );
+    const lines = failure.stderr.trimEnd().split("\n");
+    assert.deepEqual(lines, [
+      "upgrade-production-images: the deployment inventory contains a running Agent without an active revision; resolve its initial deployment first. No cluster changes were made.",
+      '  - Agent agt_stranded_1 "Mail \\"triage\\"\\nbot\\u007f?" in Namespace ns_alpha "Team Alpha"',
+      '  - Agent agt_stranded_2 (name unavailable) in Namespace ns_alpha "Team Alpha"',
+      ...stranded
+        .slice(2, 10)
+        .map((id) => `  - Agent ${id} (name unavailable) in Namespace ns_beta (name unavailable)`),
+      ...(count > 10
+        ? [
+            `  - and ${count - 10} more; see ${join(f.evidence, "inventory/deployment-inventory.json")}`,
+          ]
+        : []),
+      "Stop or delete each running Agent without an active revision (occ --namespace NAMESPACE_ID agent stop AGENT_ID), or deploy it until it succeeds (occ --namespace NAMESPACE_ID agent deploy AGENT_ID), then start again with a new evidence directory. See docs/guides/deploy/production-upgrade.md#upgrade-agent-runtimes.",
+    ]);
+    // Only name reads: one per listed Agent and one per Namespace, nothing beyond the first ten.
+    assert.deepEqual(await f.events(), [
+      "read ns_alpha",
+      "read agt_stranded_1",
+      "read agt_stranded_2",
+      "read ns_beta",
+      ...stranded.slice(2, 10).map((id) => `read ${id}`),
+    ]);
+    assert.equal((await f.state()).dispatches, 0);
   });
-  const failure = await f.run().then(
-    () => assert.fail("the upgrade must refuse"),
-    (error) => error,
-  );
-  const lines = failure.stderr.trimEnd().split("\n");
-  assert.deepEqual(lines, [
-    "upgrade-production-images: the deployment inventory contains a running Agent without an active revision; resolve its initial deployment first. No cluster changes were made.",
-    '  - Agent agt_stranded_1 "Mail \\"triage\\"\\nbot\\u007f?" in Namespace ns_alpha "Team Alpha"',
-    '  - Agent agt_stranded_2 (name unavailable) in Namespace ns_alpha "Team Alpha"',
-    ...stranded
-      .slice(2, 10)
-      .map((id) => `  - Agent ${id} (name unavailable) in Namespace ns_beta (name unavailable)`),
-    `  - and 2 more; see ${join(f.evidence, "inventory/deployment-inventory.json")}`,
-    "Stop or delete each running Agent without an active revision (occ --namespace NAMESPACE_ID agent stop AGENT_ID), or deploy it until it succeeds (occ --namespace NAMESPACE_ID agent deploy AGENT_ID), then start again with a new evidence directory. See docs/guides/deploy/production-upgrade.md#upgrade-agent-runtimes.",
-  ]);
-  // Only name reads: one per listed Agent and one per Namespace, nothing beyond the first ten.
-  assert.deepEqual(await f.events(), [
-    "read ns_alpha",
-    "read agt_stranded_1",
-    "read agt_stranded_2",
-    "read ns_beta",
-    ...stranded.slice(2, 10).map((id) => `read ${id}`),
-  ]);
-  assert.equal((await f.state()).dispatches, 0);
-});
+}
 
 test("a changed eligible node stops the upgrade before mutation", async (t) => {
   const f = await fixture(t, {

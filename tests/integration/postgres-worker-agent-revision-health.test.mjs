@@ -460,14 +460,20 @@ for (const { declares, shape, stopFailures = 0, refusal = "revoked" } of [
       const retires = new Map();
       const counted = (counts, revision) => counts.get(revision.id) ?? 0;
       const events = [];
+      const effects = [];
       await fixture.start(
         {
           ...fixture.compute,
+          async bindAgent(binding) {
+            effects.push("bind");
+            await fixture.compute.bindAgent?.(binding);
+          },
           // Kubernetes declares exclusive replacement only for dedicated Harnesses.
           ...(declares
             ? { requiresStoppedPredecessors: (revision) => revision.harness.mode === "dedicated" }
             : {}),
           async prepareRevision(revision) {
+            effects.push("prepare");
             running.add(revision.id);
             const observed = await fixture.compute.prepareRevision(revision);
             if (revision.id !== candidateId) {
@@ -491,6 +497,7 @@ for (const { declares, shape, stopFailures = 0, refusal = "revoked" } of [
             return { ...observed, ready: false };
           },
           async stopRevision(revision) {
+            effects.push("stop");
             if (revision.id === candidateId && failedStops < stopFailures) {
               failedStops += 1;
               throw new Error("Kubernetes API temporarily unavailable");
@@ -521,6 +528,12 @@ for (const { declares, shape, stopFailures = 0, refusal = "revoked" } of [
         assert.equal(active.rows[0].active_revision_id, null);
         assert.equal(counted(stops, candidate), 1, "the refused first deployment is stopped once");
         assert.deepEqual([...running], [], "nothing runs for the Agent");
+        // Like Agent stop and retirement, each try binds the Agent first, even when this pass
+        // refused before Compute and never bound it.
+        assert.ok(
+          effects.every((effect, index) => effect !== "stop" || effects[index - 1] === "bind"),
+          effects.join(","),
+        );
         // A failed stop publishes nothing: the work waits and keeps the refusal's code.
         const waited = events.filter(
           ({ event, workId, refusal }) =>
