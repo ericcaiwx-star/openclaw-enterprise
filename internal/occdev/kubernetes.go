@@ -232,9 +232,7 @@ func (r *runner) importRuntime(ctx context.Context, s *developmentState) (string
 
 func (r *runner) importDevelopmentImage(ctx context.Context, s *developmentState, image string) (result string, resultErr error) {
 	selected := image
-	staged := false
 	if strings.Contains(image, "@") {
-		staged = true
 		digest := sha256.Sum256([]byte(image))
 		selected = fmt.Sprintf("openclaw-development/import-%x:%s", digest[:6], s.Cluster)
 		if _, err := r.output(ctx, r.engine, "image", "inspect", selected); err == nil {
@@ -258,33 +256,31 @@ func (r *runner) importDevelopmentImage(ctx context.Context, s *developmentState
 		return "", err
 	}
 	selected = recorded
-	if staged {
-		platformData, err := r.output(ctx, r.engine, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", selected)
-		if err != nil {
-			return "", err
+	// Export the selected platform explicitly for every image. Tag-based k3d
+	// imports can report success without registering the built image in the node.
+	platformData, err := r.output(ctx, r.engine, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", selected)
+	if err != nil {
+		return "", err
+	}
+	platform := string(platformData)
+	if !strings.HasPrefix(platform, "linux/") {
+		return "", fmt.Errorf("development image must contain a Linux platform: %s", image)
+	}
+	archive := filepath.Join(s.directory, "development-import.tar")
+	defer func() {
+		if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove development image archive: %w", err))
 		}
-		platform := string(platformData)
-		if !strings.HasPrefix(platform, "linux/") {
-			return "", fmt.Errorf("development image must contain a Linux platform: %s", image)
-		}
-		archive := filepath.Join(s.directory, "development-import.tar")
-		defer func() {
-			if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
-				resultErr = errors.Join(resultErr, fmt.Errorf("remove development image archive: %w", err))
-			}
-		}()
-		saveArgs := []string{"image", "save"}
-		if r.engine == "docker" {
-			saveArgs = append(saveArgs, "--platform", platform)
-		}
-		saveArgs = append(saveArgs, "--output", archive, selected)
-		if err := r.run(ctx, r.engine, saveArgs...); err != nil {
-			return "", err
-		}
-		if err := r.importArchiveDirect(ctx, archive, s.Cluster); err != nil {
-			return "", err
-		}
-	} else if err := r.run(ctx, "k3d", "image", "import", selected, "-c", s.Cluster); err != nil {
+	}()
+	saveArgs := []string{"image", "save"}
+	if r.engine == "docker" {
+		saveArgs = append(saveArgs, "--platform", platform)
+	}
+	saveArgs = append(saveArgs, "--output", archive, selected)
+	if err := r.run(ctx, r.engine, saveArgs...); err != nil {
+		return "", err
+	}
+	if err := r.importArchiveDirect(ctx, archive, s.Cluster); err != nil {
 		return "", err
 	}
 	server := "k3d-" + s.Cluster + "-server-0"

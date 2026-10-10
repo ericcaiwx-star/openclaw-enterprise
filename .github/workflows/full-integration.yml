@@ -526,6 +526,9 @@ jobs:
     timeout-minutes: 240
     environment: integration-qa
     env:
+      OCC_TEST_QA_INSTALLATION: all
+      OCC_TEST_QA_PRESET: all
+      OCC_TEST_QA_SCENARIOS: all
       OCC_TEST_QA_OPENAI_MODEL: ${{ vars.OCC_TEST_QA_OPENAI_MODEL }}
       OCC_TEST_QA_CODEX_MODEL: ${{ vars.OCC_TEST_QA_CODEX_MODEL }}
       OCC_TEST_QA_SLACK_CHANNEL_ID: ${{ vars.OCC_TEST_QA_SLACK_CHANNEL_ID }}

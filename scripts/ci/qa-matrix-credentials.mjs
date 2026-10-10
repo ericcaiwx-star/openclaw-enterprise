@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { selectQaMatrix, validateQaInputs } from "../../tests/helpers/qa-selection.mjs";
+
+const selection = selectQaMatrix();
 
 // A workflow-scoped materializer: no secrets are written into the checkout,
 // test results, command arguments, or the environment file itself.
@@ -16,21 +19,35 @@ const mapping = {
 };
 const entries = [];
 for (const [source, [filename, target]] of Object.entries(mapping)) {
+  if (!selection.requiredEnv.includes(target)) {
+    continue;
+  }
   assert.ok(process.env[source], `${source} is required`);
   const path = join(directory, filename);
   await writeFile(path, process.env[source], { mode: 0o600, flag: "wx" });
   entries.push(`${target}=${path}`);
 }
-const repository = join(directory, "repository");
-await mkdir(repository, { mode: 0o700 });
-for (const [source, name] of [
-  ["REPOSITORY_REGISTRY_JSON", "registry.json"],
-  ["REPOSITORY_APP_KEY", "private-key.pem"],
-  ["REPOSITORY_UPSTREAM_CIDRS_JSON", "upstream-cidrs.json"],
-]) {
-  assert.ok(process.env[source], `${source} is required`);
-  await writeFile(join(repository, name), process.env[source], { mode: 0o600, flag: "wx" });
+if (selection.repository) {
+  const repository = join(directory, "repository");
+  await mkdir(repository, { mode: 0o700 });
+  for (const [source, name] of [
+    ["REPOSITORY_REGISTRY_JSON", "registry.json"],
+    ["REPOSITORY_APP_KEY", "private-key.pem"],
+    ["REPOSITORY_UPSTREAM_CIDRS_JSON", "upstream-cidrs.json"],
+  ]) {
+    assert.ok(process.env[source], `${source} is required`);
+    await writeFile(join(repository, name), process.env[source], { mode: 0o600, flag: "wx" });
+  }
+  entries.push(`OCC_TEST_QA_REPOSITORY_INPUT_DIRECTORY=${repository}`);
 }
-entries.push(`OCC_TEST_QA_REPOSITORY_INPUT_DIRECTORY=${repository}`);
 entries.push(`OCC_TEST_QA_ARTIFACTS=${join(process.env.RUNNER_TEMP, "qa-matrix-evidence")}`);
+validateQaInputs(selection, {
+  ...process.env,
+  ...Object.fromEntries(
+    entries.map((entry) => {
+      const separator = entry.indexOf("=");
+      return [entry.slice(0, separator), entry.slice(separator + 1)];
+    }),
+  ),
+});
 await appendFile(process.env.GITHUB_ENV, entries.join("\n") + "\n");
