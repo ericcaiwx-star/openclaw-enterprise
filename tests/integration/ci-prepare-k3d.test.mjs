@@ -448,3 +448,99 @@ test("ordinary k3d preparation forwards an immutable K3s override and retains th
     assert.equal(cleanup.status, 0, cleanup.stderr);
   }
 });
+
+test("fixture preparation waits for a late worker and its containerd before importing", async (t) => {
+  const commands = await fixtureImageCommands(t, "late-worker");
+  const result = commands.prepare();
+  assert.equal(result.status, 0, result.stderr);
+  assertStderrMatch(
+    result.stderr,
+    /containerd on k3d-\S+-agent-0 is not answering yet \(attempt 2\)/,
+  );
+  const calls = await commands.commands();
+  const index = (predicate) => calls.findIndex(predicate);
+  const lastIndex = (predicate) => calls.findLastIndex(predicate);
+  const listings = calls.filter(({ args }) => args.slice(-4).join(" ") === "get nodes -o name");
+  assert.equal(listings.length, 3);
+  // The Ready wait starts only once the worker is registered.
+  assert.ok(
+    lastIndex(({ args }) => args.slice(-4).join(" ") === "get nodes -o name") <
+      index(({ args }) => args.includes("--for=condition=Ready")),
+  );
+  // The worker import starts only after its containerd answers.
+  const agentProbe = lastIndex(
+    ({ args }) => args[0] === "exec" && args[1].endsWith("-agent-0") && args.at(-1) === "version",
+  );
+  const agentImport = index(
+    ({ args }) => args[0] === "exec" && args[1] === "-i" && args[2].endsWith("-agent-0"),
+  );
+  assert.ok(agentProbe >= 0 && agentImport > agentProbe);
+  const cleanup = commands.cleanup();
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("fixture preparation names the node whose containerd never answers and imports nothing", async (t) => {
+  const commands = await fixtureImageCommands(t, "containerd-down", undefined, {
+    OPENCLAW_CI_K3D_CONTAINERD_WAIT_MS: "2000",
+  });
+  const result = commands.prepare();
+  assert.equal(result.status, 1);
+  assertStderrMatch(
+    result.stderr,
+    /containerd on k3d-\S+-agent-0 did not answer within 2000 ms: .*connect: connection refused/,
+  );
+  assert.equal(
+    (await commands.commands()).some(({ args }) => args[0] === "exec" && args[1] === "-i"),
+    false,
+  );
+  const state = JSON.parse(await readFile(commands.statePath, "utf8"));
+  assert.equal(state.env, undefined);
+  // The failure keeps node diagnostics for the outage.
+  const evidence = JSON.parse(await readFile(`${commands.statePath}.diagnostics.json`, "utf8"));
+  assert.match(
+    evidence.failure,
+    /image import into k3d nodes failed: containerd on k3d-\S+-agent-0 did not answer/,
+  );
+  const cleanup = commands.cleanup();
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("fixture preparation fails on a hung containerd probe without polling again", async (t) => {
+  const commands = await fixtureImageCommands(t, "hung-containerd-probe", undefined, {
+    OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000",
+  });
+  const result = commands.prepare();
+  assert.equal(result.status, 1);
+  assertStderrMatch(
+    result.stderr,
+    /containerd on k3d-\S+-agent-0 did not answer within 3000 ms \(ctr -n k8s\.io version\)\./,
+  );
+  const calls = await commands.commands();
+  assert.equal(
+    calls.filter(
+      ({ args }) => args[0] === "exec" && args[1].endsWith("-agent-0") && args.at(-1) === "version",
+    ).length,
+    1,
+  );
+  assert.equal(
+    calls.some(({ args }) => args[0] === "exec" && args[1] === "-i"),
+    false,
+  );
+  const cleanup = commands.cleanup();
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("fixture preparation imports once more after containerd refuses an import", async (t) => {
+  const commands = await fixtureImageCommands(t, "containerd-restart");
+  const result = commands.prepare();
+  assert.equal(result.status, 0, result.stderr);
+  assertStderrMatch(result.stderr, /containerd refused the image import; waiting for it/);
+  const imports = (await commands.commands()).filter(
+    ({ args }) => args[0] === "exec" && args[1] === "-i" && args[2].endsWith("-agent-0"),
+  );
+  assert.equal(imports.length, 2);
+  // A recovered import writes no failure diagnostics.
+  await assert.rejects(() => stat(`${commands.statePath}.diagnostics.json`), { code: "ENOENT" });
+  const cleanup = commands.cleanup();
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
