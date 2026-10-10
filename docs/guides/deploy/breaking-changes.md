@@ -17,18 +17,20 @@ prepares an existing Kubernetes revision again, it applies the Gateway and
 Harness Pod templates the new controller renders. When they changed (since #1758,
 for example, readiness uses an HTTP probe), both Deployments roll once on the
 same runtime image, and chat is unavailable until the new Pods are ready (about
-17 seconds in one test). Earlier docs said existing revisions keep their Pod
-specification until their next deployment.
+17 seconds in one test).
 
-**Who is affected.** Agents with repository credentials, whose maintenance pass
-runs every 30 seconds, within a minute of the controller rollout. Other Agents
-when the worker recovers or retries their active deployment.
+**Who is affected.** Running Agents with repository credentials, within about a
+minute of the controller rollout, while their repository session lasts. Other
+Agents only if their deployment was still finishing when the new worker took
+over.
 
 **How to tell.** The Agent's Gateway and Harness Pods restart after the
 controller rollout under a new ReplicaSet of the same revision.
 
-**Steps.** None. Plan controller-only releases for a window where one short chat
-interruption per affected Agent is acceptable.
+**Steps.** Before a controller-only release, confirm the new controller supports
+the deployed runtime ([checklist](upgrade-checklist.md)): affected Pods restart
+with its rendering on the existing image. Plan for one short chat interruption
+per affected Agent.
 
 ## 2026-10-10: Codex approval policy is checked before deployment
 

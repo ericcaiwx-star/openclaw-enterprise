@@ -320,7 +320,8 @@ Keep the evidence directory private. For every release, inspect the before/live
 configuration, rendered chart, server dry run, Helm status, and final API and
 worker images.
 
-For a controller-only release, confirm unaffected gateways remain ready and
+For a controller-only release, confirm gateways are ready again (affected Agents
+restart once) and
 verify any repository-bound Agents that required replacement revisions. For a runtime release, inspect
 `deployments.jsonl`, `status/*.doctor.json`, and the before/after workload
 inventories. Then follow

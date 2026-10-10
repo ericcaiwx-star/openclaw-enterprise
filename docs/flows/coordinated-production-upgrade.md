@@ -182,12 +182,15 @@ controller-only release then ends without requesting Agent deployments.
 An existing revision keeps the Pod specification of the controller that
 deployed it only until the worker prepares it again. Agents with repository
 credentials get a maintenance pass every 30 seconds (the repository Driver's
-`maintenanceIntervalMs`), and any Agent's active revision is prepared again when the worker
-recovers or retries its deployment. Kubernetes Compute applies the Gateway and
-Harness Deployments as the new controller renders them, with the Installation's
-current images, so a changed Pod template (for example new entrypoint arguments
-or readiness probes) rolls those Pods once on the unchanged runtime image. Chat
-is unavailable until the new Pods are ready, about 17 seconds in one test.
+`maintenanceIntervalMs`) until their repository session deadline. Other Agents
+are prepared again only when their deployment was still finishing as the new
+worker took over (the helper checks for unfinished deployments only before a
+runtime release).
+Kubernetes Compute applies the Gateway and, for dedicated Harnesses, Harness
+Deployments as the new controller renders them, with the Installation's current
+images, so a changed Pod template (for example new entrypoint arguments or
+readiness probes) rolls those Pods once on the unchanged runtime image. Chat is
+unavailable until the new Pods are ready, about 17 seconds in one test.
 Controller fixes to Gateway and Agent Pods, such as
 [diagnostics](agent-deployment-diagnostics.md) mappings, reach an Agent then or
 at its next deployment.
@@ -254,7 +257,8 @@ checks the exported inventory before following the recovery procedure. Empty
   `status/*.doctor.json` and `status/*.doctor.error`.
 - Compare `before-workloads.json` and `after-workloads.json` for unexpected
   workload changes. The controller-only helper requests no Agent deployments;
-  separately check repository-bound revisions affected by broker restart.
+  one same-image Pod template rollout per affected Agent is expected. Separately
+  check repository-bound revisions affected by broker restart.
   Runtime proof should show the intended replacements.
 - Use the credentialed production Kubernetes integration with distinct baseline
   and candidate images for end-to-end proof. Mocked commands prove only script

@@ -157,7 +157,8 @@ Agent. Existing RWO-backed Agents need no recreation.
       contain the expected IDs, accounting for recorded legacy RWX deletions and
       newly created replacement Agents. IAM, Backend, service-account, deployment-work,
       and audit-record inventories also reconcile. The controller-only helper
-      requests no deployments; check for revisions affected by broker restart.
+      requests no deployments, but affected Agents' Pods can restart once on the
+      same image; check for revisions affected by broker restart.
 - [ ] Persisted Preset templates match the intended source definitions. Missing
       defaults were created, intended same-name copies were updated in place,
       and obsolete copies were handled deliberately.
