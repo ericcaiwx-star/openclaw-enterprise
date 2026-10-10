@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
 updated: 2026-10-10
-last_updated_session: authoring-run/52a975bb-0283-40ba-9126-2c2f6eb8992c
+last_updated_session: authoring-run/9c1f0e85-9f16-436e-900f-b3d0e6e8cdd9
 ---
 
 # Console Agent editing and runtime requests
@@ -280,6 +280,7 @@ admission, not completed Compute shutdown. When stopped,
 **Request Stop again** confirms a new stop intent through the same authorized route.
 It remains available without a selected revision because history/candidate cleanup
 is not exposed, and an uncertain write blocks it until readback succeeds.
+Cancelling confirmation restores its invoking button; submitted requests focus status refresh.
 
 **Refresh stop status** reads the exact Agent again. It displays desired runtime
 state and selected revision without inferring live health or completion from a
@@ -340,6 +341,8 @@ worker cleanup and the Namespace-owned resources it preserves.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 08:46: Trace keyboard focus after Stop confirmation cancellation. (authoring-run/9c1f0e85-9f16-436e-900f-b3d0e6e8cdd9 - b8783d7942e875c6eb751222329c63fac5c028a1)
 
 - 2026-10-10 00:08: Trace explicit repeated Stop recovery in the accompanying change. (authoring-run/52a975bb-0283-40ba-9126-2c2f6eb8992c - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)
 

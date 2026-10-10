@@ -213,19 +213,26 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
     }
   }
 
-  function openConfirmation() {
+  function openConfirmation(event) {
     if (state.pending || state.needsRefresh) {
       return;
     }
+    const invoker = event.currentTarget;
+    let submitted = false;
     const dialog = element("dialog", {
       className: "agent-stop-dialog",
       "aria-labelledby": "agent-stop-confirm-title",
       "aria-describedby": "agent-stop-confirm-description",
     });
     const cancel = button("Cancel", () => dialog.close());
-    const confirm = button("Stop Agent", () => void stopAgent(dialog, cancel, confirm), {
-      className: "danger",
-    });
+    const confirm = button(
+      "Stop Agent",
+      () => {
+        submitted = true;
+        void stopAgent(dialog, cancel, confirm);
+      },
+      { className: "danger" },
+    );
     dialog.append(
       element("h2", { id: "agent-stop-confirm-title" }, `Stop ${state.agent.name}?`),
       element(
@@ -244,11 +251,15 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
       "close",
       () => {
         dialog.remove();
-        if (context.isCurrent() && !state.pending) {
-          (state.needsRefresh || state.agent.desiredRuntimeState === "stopped"
-            ? refresh
-            : stop
-          ).focus();
+        if (context.isCurrent() && !state.pending && !submitted) {
+          if (invoker.isConnected && !invoker.disabled) {
+            invoker.focus();
+          } else {
+            (state.needsRefresh || state.agent.desiredRuntimeState === "stopped"
+              ? refresh
+              : stop
+            ).focus();
+          }
         }
       },
       { once: true },

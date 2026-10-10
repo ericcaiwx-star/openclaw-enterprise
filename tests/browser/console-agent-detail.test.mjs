@@ -4937,10 +4937,17 @@ test("Console can repeat Stop without treating the selected version as cleanup c
   const repeat = page.getByRole("button", { name: "Request Stop again", exact: true });
   assert.equal(await repeat.count(), 1, "the existing Stop API permits another authorized intent");
   assert.equal(await repeat.isEnabled(), true);
-  await repeat.click();
+  await repeat.focus();
+  await repeat.press("Enter");
   let dialog = page.getByRole("dialog", { name: "Stop Repeat Stop?" });
   await dialog.getByRole("button", { name: "Cancel" }).click();
-  await dialog.waitFor({ state: "hidden" });
+  await page.locator(".agent-stop-dialog").waitFor({ state: "detached" });
+  assert.equal(await repeat.evaluate((node) => node === node.ownerDocument.activeElement), true);
+  await repeat.press("Enter");
+  await dialog.waitFor();
+  await page.keyboard.press("Escape");
+  await page.locator(".agent-stop-dialog").waitFor({ state: "detached" });
+  assert.equal(await repeat.evaluate((node) => node === node.ownerDocument.activeElement), true);
   assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 0);
   await repeat.click();
   dialog = page.getByRole("dialog", { name: "Stop Repeat Stop?" });
@@ -4950,6 +4957,13 @@ test("Console can repeat Stop without treating the selected version as cleanup c
   );
   await dialog.getByRole("button", { name: "Stop Agent", exact: true }).click();
   assert.equal((await result).status(), 202);
+  await page.locator(".agent-stop-dialog").waitFor({ state: "detached" });
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Refresh stop status" })
+      .evaluate((node) => node === node.ownerDocument.activeElement),
+    true,
+  );
   assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 1);
   const after = await fixture.request("GET", path);
   assert.equal(after.data.activeRevisionId, active.revision.id);
