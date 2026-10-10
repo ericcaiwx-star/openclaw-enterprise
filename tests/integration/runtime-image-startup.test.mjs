@@ -139,7 +139,7 @@ test("runtime image seccomp option requires the CI-prepared profile record", asy
   t.after(() => rm(directory, { recursive: true, force: true }));
   const contents = Buffer.from(`${JSON.stringify({ defaultAction: "SCMP_ACT_ERRNO" })}\n`);
   const digest = createHash("sha256").update(contents).digest("hex");
-  const profile = join(directory, `codex-0.163.0-alpha.1-${digest}.json`);
+  const profile = join(directory, `codex-0.163.0-alpha.2-${digest}.json`);
   const statePath = join(directory, "state.json");
   await writeFile(profile, contents);
   await writeFile(
@@ -2132,7 +2132,7 @@ const timeout = setTimeout(() => {
 );
 
 test(
-  "runtime image shares Codex 0.163.0-alpha.1 between the plugin and Dedicated command",
+  "runtime image shares Codex 0.163.0-alpha.2 between the plugin and Dedicated command",
   imageTestOptions,
   async () => {
     const defaultPluginPolicy = codexRuntimeArtifact({}, []).configuration.plugins;
@@ -2145,19 +2145,19 @@ const { realpathSync, readFileSync } = require("node:fs");
 const { execFileSync } = require("node:child_process");
 const plugin = createRequire("/app/dist/extensions/codex/package.json");
 const installed = plugin.resolve("@openai/codex/package.json");
-assert.equal(JSON.parse(readFileSync(installed, "utf8")).version, "0.163.0-alpha.1");
+assert.equal(JSON.parse(readFileSync(installed, "utf8")).version, "0.163.0-alpha.2");
 const bundledCommand = plugin.resolve("@openai/codex/bin/codex.js");
 assert.equal(realpathSync("/app/node_modules/.bin/codex"), realpathSync(bundledCommand));
-assert.equal(execFileSync("codex", ["--version"], {encoding: "utf8"}).trim(), "codex-cli 0.163.0-alpha.1");
-assert.equal(execFileSync(process.execPath, [bundledCommand, "--version"], {encoding: "utf8"}).trim(), "codex-cli 0.163.0-alpha.1");
+assert.equal(execFileSync("codex", ["--version"], {encoding: "utf8"}).trim(), "codex-cli 0.163.0-alpha.2");
+assert.equal(execFileSync(process.execPath, [bundledCommand, "--version"], {encoding: "utf8"}).trim(), "codex-cli 0.163.0-alpha.2");
 const provenance = JSON.parse(readFileSync("/opt/oce/runtime/provenance.json", "utf8"));
 assert.equal(provenance.source, "https://github.com/openclaw/openclaw");
 assert.equal(provenance.commit, "90d30a1178a79dddd92e6190b66b95d89dfb3ca8");
 assert.equal(provenance.sourceArchiveSha256, "c56ea921a033efd95c2c9e43e4255c675939b0aa927c6aaf5bbdb51d5b693a8b");
 assert.equal(provenance.openclawBridgePatchSha256, "1d8b670e7029872262375a21da7222768c2fe2390ff7a159ed1616ee9c9de1ca");
 assert.equal(provenance.openclawConnectPatchSha256, "c57722da9a88ec4295577ab9a9ba6e2ca37fceda11ce8b51b08ee1425e00851f");
-assert.equal(provenance.codexDependencyPinPatchSha256, "00d44f40352fa9c5a7ae80b986eb25baf014d26f892b8849646c1922ef8c7a9c");
-assert.equal(provenance.codex.version, "0.163.0-alpha.1");
+assert.equal(provenance.codexDependencyPinPatchSha256, "7bb0ae29bf3259b245d7675b2c6a3abe521c8139095f75ce0c532188162de5e9");
+assert.equal(provenance.codex.version, "0.163.0-alpha.2");
 assert.equal(Object.hasOwn(provenance, "codexPatchSha256"), false);
 assert.equal(Object.hasOwn(provenance, "codexVersion"), false);
 const contents = readFileSync("/opt/oce/runtime/contents.json");
@@ -2311,7 +2311,7 @@ const deadline = setTimeout(() => {
       assert.deepEqual(fixtureSkills.sort((a, b) => a.name.localeCompare(b.name)),
         enabledNames.map((name) => ({ name: name + ":inspect", pluginId: name + "@marketplace" })));
     }
-    process.stdout.write("shared-codex-0.163.0-alpha.1-ready\n");
+    process.stdout.write("shared-codex-0.163.0-alpha.2-ready\n");
   } finally {
     clearTimeout(deadline);
     lines.close();
@@ -2332,7 +2332,7 @@ const deadline = setTimeout(() => {
       script,
       JSON.stringify(defaultPluginPolicy),
     ]);
-    assert.match(stdout, /shared-codex-0.163.0-alpha.1-ready/);
+    assert.match(stdout, /shared-codex-0.163.0-alpha.2-ready/);
   },
 );
 
