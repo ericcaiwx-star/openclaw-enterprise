@@ -133,6 +133,7 @@ import {
   OAUTH_VOLUME_ANNOTATION,
 } from "../../kubernetes/oauth-seal.ts";
 import {
+  computeStopShouldYield,
   computeWorkWaiting,
   currentComputeAbortSignal,
   withComputeAbortSignal,
@@ -6407,6 +6408,13 @@ export class KubernetesComputeDriver implements ComputeDriver {
       if (Date.now() >= deadline) {
         throw new DependencyUnavailableError(
           "The AgentRevision workload Pods did not terminate before the deadline.",
+        );
+      }
+      // A refused candidate's stop does not hold the serial worker while its Pods terminate:
+      // other Work runs, and the next pass repeats the stop (finding 1022).
+      if (await computeStopShouldYield()) {
+        throw new DependencyUnavailableError(
+          "The AgentRevision workload Pods are still terminating; other work is waiting.",
         );
       }
       await new Promise<void>((resolve) => setTimeout(resolve, WORKLOAD_TERMINATION_POLL_MS));

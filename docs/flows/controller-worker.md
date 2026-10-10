@@ -300,11 +300,11 @@ terminates work. See [outcomes](../reference/controller.md) and
 Before publishing a permanent refusal of an inactive candidate that is exclusive,
 or prepared while its Agent has no active revision (not a held runtime failure,
 the deadline or exhausted retries), `ControllerWorker.stopRefusedCandidate`
-stops it under the claim heartbeat, so a rejected deployment never serves. A stop failure publishes nothing: the work defers as
+stops it under the claim heartbeat, so a rejected deployment never serves. Its Pod-termination wait
+ends once other work is due (`withYieldingComputeStop`). A failed or ended stop publishes nothing: the work defers as
 `REFUSED_CANDIDATE_STOP_PENDING` past the attempt budget, deadline, in-lease shutdowns and,
-once recorded, lost claims until the stop succeeds, after the readiness cadence doubled per failed stop up to 5 minutes
-but at least four times the stop's duration, interrupted or not (`refusedStopRecheckMs`
-counts failures from evidence, surviving restarts), so other Agents' work runs. Each deferral records evidence with the refusal
+once recorded, lost claims until the stop succeeds, after the readiness cadence doubled per failure (counted from evidence) up to 5 minutes
+but at least four times the stop's duration. Each deferral records evidence with the refusal
 (`repeatEvidence`) for deployment status and `worker.completed`'s `refusal`. A pass
 superseded by a newer exclusive revision first retries a stop its work waited on.
 
@@ -408,6 +408,6 @@ failed retry keeps the active runtime.
 
 ## Changelog
 
-- 2026-10-10 14:10: Keep a refused-candidate stop's backoff across restarts. (fix-1022-1019)
+- 2026-10-10 14:10: Yield refused-candidate stops to due work; persist their backoff. (fix-1022-1019)
 
 [Controller worker documentation history](controller-worker/history.md) preserves the older dated entries.

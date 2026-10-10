@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 const operationSignals = new AsyncLocalStorage<AbortSignal>();
 const workWaitingChecks = new AsyncLocalStorage<() => Promise<boolean>>();
+const yieldingStops = new AsyncLocalStorage<true>();
 
 export function currentComputeAbortSignal(): AbortSignal | undefined {
   return operationSignals.getStore();
@@ -44,4 +45,21 @@ export async function computeWorkWaiting(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Runs a stop whose workload termination wait may end early when other Work is
+ * waiting: the caller retries the stop later (a refused candidate's stop, whose
+ * serving path is already removed when the wait starts). Other stops keep their
+ * full bounded wait.
+ */
+export async function withYieldingComputeStop<Result>(
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  return yieldingStops.run(true, operation);
+}
+
+/** Whether a stop's termination wait should end now because other Work is waiting. */
+export async function computeStopShouldYield(): Promise<boolean> {
+  return yieldingStops.getStore() === true && (await computeWorkWaiting());
 }

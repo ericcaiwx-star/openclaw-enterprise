@@ -4,6 +4,7 @@ import { createControlledClock } from "../fixtures/repository-credentials/clock.
 import test, { after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { SandboxRevisionUnsupportedError } from "../../packages/occ/src/index.ts";
+import { computeStopShouldYield } from "../../apps/controller/src/drivers/compute/operation-context.ts";
 import { requiresPostgres } from "../helpers/postgres-backend-state.mjs";
 import { waitFor } from "../helpers/wait-for.mjs";
 import { createWorkerRevisionFixtures } from "../helpers/postgres-worker-revision-fixture.mjs";
@@ -812,6 +813,48 @@ revisionTest(
     stopping = true;
     await fixture.work(replacement, "failed_permanent", 30_000);
     assert.deepEqual([...driver.running], [], "the refused candidate was stopped");
+  },
+  { timeout: 90_000 },
+);
+
+// Finding 1022: a refused candidate's stop held the serial worker for its whole Pod-termination
+// wait. Its stop now yields: Compute ends the wait once other Work is due, and the work waits on
+// the stop as if it had failed. Kubernetes' wait is covered in the Compute conformance tests.
+revisionTest(
+  "a refused candidate's stop may yield to another Agent's due work",
+  async (fixture) => {
+    const events = [];
+    let other;
+    let yielded = false;
+    let stopping = false;
+    const { replacement, driver } = await startRefusedCandidate(fixture, "refused-yield", {
+      emit: (event) => events.push(event),
+      stopRevision: () =>
+        stopping
+          ? undefined
+          : (async () => {
+              const owner = await fixture.agent("refused-yield-other", {
+                executionMode: "dedicated",
+              });
+              other = await fixture.revision(owner, 1);
+              yielded = await waitFor("the stop to see the due work", async () =>
+                (await computeStopShouldYield()) ? true : undefined,
+              );
+              stopping = true;
+              throw new Error("The workload Pods are still terminating; other work is waiting.");
+            })(),
+    });
+    await fixture.work(replacement, "failed_permanent", 30_000);
+    assert.equal(yielded, true);
+    assert.deepEqual(
+      refusedStopWaits(events, replacement).map(({ code }) => code),
+      ["REFUSED_CANDIDATE_STOP_PENDING"],
+    );
+    assert.deepEqual(
+      [...driver.running].filter((id) => id === replacement.id),
+      [],
+    );
+    await fixture.work(other, "succeeded", 30_000);
   },
   { timeout: 90_000 },
 );

@@ -83,6 +83,7 @@ import { resolveApprovedHarness } from "./composition/production-harness.ts";
 import {
   withComputeAbortSignal,
   withComputeWorkWaiting,
+  withYieldingComputeStop,
 } from "./drivers/compute/operation-context.ts";
 import type { OccMetrics, WorkKind, WorkOutcome } from "./metrics/index.ts";
 import {
@@ -4392,7 +4393,11 @@ export class ControllerWorker {
         });
       }
       await this.closeRevisionCredentials(claim, revision);
-      await this.withClaimHeartbeat(claim, () => compute.stopRevision(revision));
+      // Its Pod-termination wait ends when other Work is waiting; the stop then waits like a
+      // failed one, for as long as it ran (finding 1022).
+      await this.withClaimHeartbeat(claim, () =>
+        withYieldingComputeStop(() => compute.stopRevision(revision)),
+      );
     } catch (error) {
       if (error instanceof WorkClaimLostError) {
         // A graceful shutdown aborts a slow stop (a Pod-termination wait) like a lost claim.
