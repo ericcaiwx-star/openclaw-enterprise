@@ -10,6 +10,26 @@ you run now, then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-10: controller-only releases can restart Agent Pods once
+
+**What breaks.** After a controller-only release, the first time the new worker
+prepares an existing Kubernetes revision again, it applies the Gateway and
+Harness Pod templates the new controller renders. When they changed (since #1758,
+for example, readiness uses an HTTP probe), both Deployments roll once on the
+same runtime image, and chat is unavailable until the new Pods are ready (about
+17 seconds in one test). Earlier docs said existing revisions keep their Pod
+specification until their next deployment.
+
+**Who is affected.** Agents with repository credentials, whose maintenance pass
+runs every 30 seconds, within a minute of the controller rollout. Other Agents
+when the worker recovers or retries their active deployment.
+
+**How to tell.** The Agent's Gateway and Harness Pods restart after the
+controller rollout under a new ReplicaSet of the same revision.
+
+**Steps.** None. Plan controller-only releases for a window where one short chat
+interruption per affected Agent is acceptable.
+
 ## 2026-10-10: Codex approval policy is checked before deployment
 
 **What breaks.** Provisioning and deployment answer `409` when

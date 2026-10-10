@@ -179,10 +179,18 @@ broker-enabled worker it also accepts a restartable init container, provided
 no worker exists in the ordinary container list. It rejects a non-restartable
 init worker or ambiguous placement. It retries authenticated OCC access and verifies the same Installation ID. A
 controller-only release then ends without requesting Agent deployments.
-Existing revisions keep the Pod specification of the controller that deployed
-them, so controller fixes to Gateway and Agent Pods, such as
-[diagnostics](agent-deployment-diagnostics.md) mappings, reach an Agent only at
-its next deployment.
+An existing revision keeps the Pod specification of the controller that
+deployed it only until the worker prepares it again. Agents with repository
+credentials get a maintenance pass every 30 seconds (the repository Driver's
+`maintenanceIntervalMs`), and any Agent's active revision is prepared again when the worker
+recovers or retries its deployment. Kubernetes Compute applies the Gateway and
+Harness Deployments as the new controller renders them, with the Installation's
+current images, so a changed Pod template (for example new entrypoint arguments
+or readiness probes) rolls those Pods once on the unchanged runtime image. Chat
+is unavailable until the new Pods are ready, about 17 seconds in one test.
+Controller fixes to Gateway and Agent Pods, such as
+[diagnostics](agent-deployment-diagnostics.md) mappings, reach an Agent then or
+at its next deployment.
 
 For a repository-enabled release, it also verifies the ready API and worker
 Pods, their owning ReplicaSets, node architecture, and runtime controller and
@@ -267,6 +275,8 @@ checks the exported inventory before following the recovery procedure. Empty
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 03:30: Say that the worker's next preparation of an existing revision applies the new controller's Pod templates and rolls changed Pods once. (fix-990-991)
 
 - 2026-10-10 02:10: Require complete successful API responses before publishing the split-layout export bundle. (authoring-run/35b00357-b0c6-459f-aec1-b4fb63620dff - 0886f47d05fdeb2fa4359f4840fb77378d643bac)
 
