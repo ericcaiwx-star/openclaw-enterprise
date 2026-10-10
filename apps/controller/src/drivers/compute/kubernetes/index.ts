@@ -133,6 +133,7 @@ import {
   OAUTH_VOLUME_ANNOTATION,
 } from "../../kubernetes/oauth-seal.ts";
 import {
+  ComputeStopYieldedError,
   computeStopShouldYield,
   computeWorkWaiting,
   currentComputeAbortSignal,
@@ -6440,7 +6441,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       ) {
         yieldCheckedAt = Date.now();
         if (await computeStopShouldYield()) {
-          throw new DependencyUnavailableError(
+          throw new ComputeStopYieldedError(
             "The AgentRevision workload Pods are still terminating; other work is waiting.",
           );
         }

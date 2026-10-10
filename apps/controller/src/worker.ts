@@ -81,6 +81,7 @@ import {
 import type { InstallationRuntimeDrivers } from "./composition/installation-config.ts";
 import { resolveApprovedHarness } from "./composition/production-harness.ts";
 import {
+  ComputeStopYieldedError,
   withComputeAbortSignal,
   withComputeWorkWaiting,
   withYieldingComputeStop,
@@ -261,12 +262,15 @@ class RefusedCandidateStopError extends Error {
   readonly refusal: string;
   /** How long the failed stop held the worker. */
   readonly durationMs: number;
+  /** The stop yielded to other Work rather than failing, so it does not double the backoff. */
+  readonly yielded: boolean;
 
   constructor(refusal: string, durationMs: number, cause: unknown) {
     super("The refused AgentRevision candidate could not be stopped.", { cause });
     this.name = "RefusedCandidateStopError";
     this.refusal = refusal;
     this.durationMs = durationMs;
+    this.yielded = cause instanceof ComputeStopYieldedError;
   }
 
   /**
@@ -283,6 +287,7 @@ class RefusedCandidateStopError extends Error {
         code: "REFUSED_CANDIDATE_STOP_PENDING",
         refusedCandidate: this.refusal,
         refusedStopMs: this.durationMs,
+        ...(this.yielded ? { refusedStopYielded: true } : {}),
       },
       logFields: { ...revisionFailureLogFields(this.cause), refusal: this.refusal },
     };
@@ -344,6 +349,8 @@ interface RevisionDispatchResult extends DispatchResult {
   readonly refusedCandidate?: string;
   /** How long the refused candidate's failed stop took; it lengthens the recheck. */
   readonly refusedStopMs?: number;
+  /** That stop yielded to other Work; later rechecks do not count it as a failure. */
+  readonly refusedStopYielded?: boolean;
   readonly data?: Readonly<Record<string, unknown>>;
   readonly resultData?: Readonly<Record<string, unknown>>;
   readonly revision?: Readonly<AgentRevision>;
@@ -4232,7 +4239,11 @@ export class ControllerWorker {
         // backoff bounds them to one per few minutes.
         await queue.defer(
           claim,
-          { code: resolved.code, refusal: resolved.refusedCandidate },
+          {
+            code: resolved.code,
+            refusal: resolved.refusedCandidate,
+            ...(resolved.refusedStopYielded === true ? { stopYielded: true } : {}),
+          },
           { delayMs: refusedStopRecheckMs!, repeatEvidence: true },
         );
       } else if (resolved.outcome === "pending") {
@@ -4446,7 +4457,8 @@ export class ControllerWorker {
    * doubled for each earlier consecutive failure up to REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS, and
    * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the failed stop took. The
    * earlier failures are counted from the work's evidence, so a restart keeps the backoff
-   * (finding 1022); if that read fails, the backoff starts again.
+   * (finding 1022); if that read fails, the backoff starts again. A stop that yielded to other
+   * Work is not a failure, so a busy queue does not double it (finding 1025).
    */
   private async refusedStopRecheckMs(claim: ClaimedWork, stopMs: number): Promise<number> {
     const earlier = await this.queue.countRefusedStopWaits(claim.idempotencyKey).catch(() => 0);

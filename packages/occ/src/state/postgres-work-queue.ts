@@ -592,7 +592,7 @@ const INSERT_EVIDENCE_SQL = `${INSERT_EVIDENCE_CTE_SQL}
  * The lookup matches the `audit_events_work_attempt_idx` partial index, which covers revision
  * work only; other callers that know a deferral repeats one already recorded pass `$9` false.
  * `$11` true records a repeat too, so its time shows the work is still retrying; `$10` names the
- * refusal a refused-candidate stop waits to publish.
+ * refusal a refused-candidate stop waits to publish, and `$12` marks a stop that yielded.
  */
 const INSERT_DEFER_EVIDENCE_SQL = `${insertEvidenceCteSql(
   `
@@ -613,7 +613,8 @@ const INSERT_DEFER_EVIDENCE_SQL = `${insertEvidenceCteSql(
         WHERE latest.outcome = $3::text AND latest.reason_code = $4::text
       ))`,
   "$4::text",
-  "CASE WHEN $10::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('refusal', $10::text) END",
+  `CASE WHEN $10::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('refusal', $10::text) END
+     || CASE WHEN $12::boolean THEN jsonb_build_object('stopYielded', true) ELSE '{}'::jsonb END`,
 )}
   SELECT transitioned.* FROM transitioned`;
 const SETTLE_PROVISIONING_FAILURE_SQL = `
@@ -1026,15 +1027,17 @@ export class PostgresWorkQueue {
   }
 
   /**
-   * How many `REFUSED_CANDIDATE_STOP_PENDING` deferrals this work item recorded since its latest
-   * evidence without a refusal, reading its latest 64 evidence rows. A recovered lost claim
-   * (`LEASE_EXPIRED` with a refusal) continues that run without adding to it.
+   * How many `REFUSED_CANDIDATE_STOP_PENDING` deferrals for a failed stop this work item recorded
+   * since its latest evidence without a refusal, reading its latest 64 evidence rows. A stop that
+   * yielded to other Work (`stopYielded`) and a recovered lost claim (`LEASE_EXPIRED` with a
+   * refusal) continue that run without adding to it.
    */
   async countRefusedStopWaits(idempotencyKey: string): Promise<number> {
     // The same work-bound evidence as findWorkAttempt, newest first.
     const found = await this.client.query(
       `SELECT event.details->>'reasonCode' AS reason_code,
-         event.details->>'refusal' AS refusal
+         event.details->>'refusal' AS refusal,
+         event.details->>'stopYielded' AS stop_yielded
        FROM occ.controller_work AS work
        JOIN occ.audit_events AS event
          ON event.namespace_id = work.namespace_id AND event.actor_id = work.actor_id
@@ -1047,11 +1050,15 @@ export class PostgresWorkQueue {
       [nonempty(idempotencyKey, "Controller work idempotency key")],
     );
     let waits = 0;
-    for (const row of found.rows as { reason_code: string | null; refusal: string | null }[]) {
+    for (const row of found.rows as {
+      reason_code: string | null;
+      refusal: string | null;
+      stop_yielded: string | null;
+    }[]) {
       if (row.refusal === null) {
         break;
       }
-      if (row.reason_code === "REFUSED_CANDIDATE_STOP_PENDING") {
+      if (row.reason_code === "REFUSED_CANDIDATE_STOP_PENDING" && row.stop_yielded === null) {
         waits += 1;
       }
     }
@@ -1171,6 +1178,7 @@ export class PostgresWorkQueue {
         options.recordEvidence ?? true,
         pending.refusal === undefined ? null : safeFailureCode(pending.refusal),
         options.repeatEvidence ?? false,
+        pending.refusal !== undefined && pending.stopYielded === true,
       ],
     );
     if (deferred.rows.length === 0) {

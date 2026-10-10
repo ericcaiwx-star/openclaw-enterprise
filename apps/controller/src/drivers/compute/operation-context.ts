@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
+
 const operationSignals = new AsyncLocalStorage<AbortSignal>();
 const workWaitingChecks = new AsyncLocalStorage<() => Promise<boolean>>();
 const yieldingStops = new AsyncLocalStorage<true>();
@@ -68,4 +70,15 @@ export function isYieldingComputeStop(): boolean {
 /** Whether a stop's termination wait should end now because other Work is waiting. */
 export async function computeStopShouldYield(): Promise<boolean> {
   return yieldingStops.getStore() === true && (await computeWorkWaiting());
+}
+
+/**
+ * A yielding stop ended its termination wait because other Work is waiting. The caller retries
+ * the stop; unlike a failed stop, a yield does not lengthen the next one's backoff.
+ */
+export class ComputeStopYieldedError extends DependencyUnavailableError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ComputeStopYieldedError";
+  }
 }
