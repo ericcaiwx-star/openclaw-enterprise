@@ -127,9 +127,10 @@ process.exit(child.status ?? 1);
       });
     });
     // All supervisor proofs: environment and file-delivered node setup, the
-    // file-delivered Gateway CA for Codex hooks, a failed saved-identity probe
-    // that is retried, and a stop with no child.
-    assert.match(stdout, /\bpass 5\b/);
+    // file-delivered Gateway CA for Codex hooks, the hook directory rebuilt
+    // without following a planted link and cleared of earlier credentials, a
+    // failed saved-identity probe that is retried, and a stop with no child.
+    assert.match(stdout, /\bpass 7\b/);
     assert.match(stdout, /\bfail 0\b/);
     assert.match(stdout, /skipped 0/);
   },
