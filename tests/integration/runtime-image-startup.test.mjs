@@ -2449,7 +2449,9 @@ test(
     await runDocker(["network", "create", "--internal", network]);
     const runtimeCleanups = [];
     t.after(async () => {
-      for (const cleanup of runtimeCleanups.reverse()) await cleanup();
+      for (const cleanup of runtimeCleanups.reverse()) {
+        await cleanup();
+      }
       await runDocker(["network", "rm", network]);
     });
     const directory = await mkdtemp(join(tmpdir(), "oce-native-bind-"));
