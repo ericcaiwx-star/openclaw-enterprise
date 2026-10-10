@@ -455,12 +455,14 @@ async function startRefusedCandidate(
   return { owner, first, replacement, driver };
 }
 
+/** Passes that could not stop the refused candidate: their log names the refusal. */
 function refusedStopWaits(events, candidate) {
   return events.filter(
-    ({ event, workId, code }) =>
+    ({ event, workId, outcome, refusal }) =>
       event === "worker.completed" &&
       workId === candidate.idempotencyKey &&
-      code === "REFUSED_CANDIDATE_STOP_PENDING",
+      outcome === "pending" &&
+      refusal !== undefined,
   );
 }
 
@@ -595,8 +597,10 @@ test(
           ({ event, workId }) =>
             event === "worker.completed" && workId === replacement.idempotencyKey,
         );
-    await waitFor("two candidate passes after the newer admission", async () =>
-      passes().length >= 2 ? true : undefined,
+    await waitFor("two candidate passes after the newer admission, or its end", async () =>
+      passes().length >= 2 || passes().some(({ outcome }) => outcome !== "pending")
+        ? true
+        : undefined,
     );
     assert.deepEqual(
       passes().map(({ outcome, code, refusal }) => [outcome, code, refusal]),
