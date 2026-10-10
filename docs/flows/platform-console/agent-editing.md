@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
 updated: 2026-10-10
-last_updated_session: authoring-run/04605df7-b242-47e5-9f05-3c9ab4fcc55b
+last_updated_session: authoring-run/e7a3732e-75b5-45fa-a494-d76cdcc5c731
 ---
 
 # Console Agent editing and runtime requests
@@ -252,11 +252,11 @@ revision, the Agent gets an unavailable explanation without file requests.
 
 The editor GETs each supported filename. `renderWorkspaceFiles` compares its
 baseline with the textarea's LF representation, so CRLF reads stay clean without
-rewriting the live file. Only an explicit edit enables Save. A successful response reauthorizes file
+rewriting the live file. For a successfully loaded file, only an explicit edit enables Save. A successful response reauthorizes file
 access before restoring retained text,
 including empty edits. Drafts keep their original baseline; Reload replaces them
-with the current file. `404` permits an explicit create attempt, and other
-failures leave it disabled. Save sends `{ content }` to the same exact-Agent PUT
+with the current file. `404` without an unknown write permits an explicit create attempt,
+including an empty file; other failures leave Save disabled. Save sends `{ content }` to the same exact-Agent PUT
 route. It neither patches Configuration nor admits a revision. The existing
 [workspace flow](../workspace-files.md) owns authorization and native file transport.
 Results are per file. Unknown write outcomes require a successful reload before
@@ -339,6 +339,8 @@ worker cleanup and the Namespace-owned resources it preserves.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 09:01: Qualify Save eligibility after successful reads and preserve missing-file creation. (authoring-run/e7a3732e-75b5-45fa-a494-d76cdcc5c731 - de067066dc5ba544c764a0ae741a5c9edd7a3137)
 
 - 2026-10-10 05:46: Keep untouched CRLF workspace reads clean in the editor. (authoring-run/04605df7-b242-47e5-9f05-3c9ab4fcc55b - cd30d20a297fdb0f2b712122b705aa4c168564ff)
 
