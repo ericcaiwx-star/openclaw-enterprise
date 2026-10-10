@@ -302,8 +302,9 @@ held runtime failure or the deadline),
 `ControllerWorker.stopRefusedExclusiveCandidate` calls `stopRevision` under the
 claim heartbeat, so a rejected deployment never serves while the pointer names
 its stopped predecessor. A stop failure publishes nothing: the work stays pending
-past the attempt budget and the deadline until the stop succeeds or a newer
-revision supersedes it, and `worker.completed` names the refusal in `refusal`.
+past the attempt budget and the deadline until the stop succeeds (a newer
+deployment's exclusive sweep may perform it), and `worker.completed` names the
+refusal in `refusal`.
 
 `ControllerWorker.processRepositoryCleanup` defers every incomplete pass at the
 Driver interval, including closing sessions and failed runtime retirement,
