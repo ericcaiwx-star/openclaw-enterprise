@@ -3437,8 +3437,10 @@ test("Agent plugin reviewer selection preserves omission and rejects unsupported
   const controller = await configuredController();
   await bootstrap(controller);
   const namespace = await createNamespace(controller, "plugin-reviewer-api");
+  // The automatic reviewer below needs an explicit on-request session policy at save.
   const configuration = await createConfiguration(controller, namespace.id, {
     agents: { defaults: { model: "codex/gpt-6-astra" } },
+    plugins: { entries: { codex: { config: { appServer: { approvalPolicy: "on-request" } } } } },
   });
   const pluginDriver = new CodexPluginDriver();
   controller.fixture.controller.registerDriver(pluginDriver);
@@ -3505,7 +3507,7 @@ test("Agent plugin reviewer selection preserves omission and rejects unsupported
   assert.deepEqual(replaced.data.plugins, inherited);
 });
 
-test("the Codex Plugin Driver refuses an automatic reviewer without an on-request session policy at deployment", async () => {
+test("the Codex Plugin Driver refuses an automatic reviewer without an on-request session policy at save and deployment", async () => {
   const configurationDriver = createTestConfigurationDriver();
   const controller = await configuredController({ configurationDriver });
   await bootstrap(controller);
@@ -3520,12 +3522,46 @@ test("the Codex Plugin Driver refuses an automatic reviewer without an on-reques
     }
     return configuration;
   };
-  // Configuration saves do not know the Agent's plugins, so an omitted policy still saves.
-  const configuration = await createConfiguration(controller, namespace.id, values(undefined));
+  // Configuration saves do not know the Agents' plugins, so an omitted or never policy saves.
+  const omitted = await createConfiguration(controller, namespace.id, values(undefined));
+  const never = await createConfiguration(controller, namespace.id, values("never"));
+  const configuration = await createConfiguration(controller, namespace.id, values("on-request"));
   const pluginDriver = new CodexPluginDriver();
   controller.fixture.controller.registerDriver(pluginDriver);
   controller.fixture.controller.selectDriver("plugin", pluginDriver.id);
   const automatic = { [linearPluginId]: { enabled: true, toolDefaults: { reviewer: "auto" } } };
+  const assertRefused = (refused, fix, label) => {
+    assert.equal(refused.status, 400, `${label}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.error.code, "INVALID_REQUEST");
+    assert.equal(
+      refused.body.error.message,
+      `An automatic plugin reviewer requires Configuration setting ${setting} "on-request"; ${fix} or choose the human reviewer.`,
+    );
+  };
+  const refusals = [
+    [omitted, "set it explicitly"],
+    [never, "change it"],
+  ];
+  // Native startup checks the automatic reviewer against the policy Compute renders. When the
+  // policy is omitted, the Gateway picks its own session policy, which can be never, so the
+  // check would pass on a policy the sessions do not run (finding 988). An Agent save sees
+  // both the plugins and the Configuration it names, so it refuses the pair before any
+  // deployment (finding 995).
+  for (const [named, fix] of refusals) {
+    const refused = await controller.request("POST", `/namespaces/${namespace.id}/agents`, {
+      body: {
+        name: "approval-policy-agent",
+        executionMode: "dedicated",
+        configurationId: named.id,
+        plugins: automatic,
+      },
+    });
+    assertRefused(refused, fix, `create with ${fix}`);
+  }
+  assert.deepEqual(
+    (await controller.request("GET", `/namespaces/${namespace.id}/agents`)).data,
+    [],
+  );
   const created = await controller.request("POST", `/namespaces/${namespace.id}/agents`, {
     body: {
       name: "approval-policy-agent",
@@ -3536,6 +3572,28 @@ test("the Codex Plugin Driver refuses an automatic reviewer without an on-reques
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   const agentPath = `/namespaces/${namespace.id}/agents/${created.data.id}`;
+  // An update is checked with the plugins it leaves in place as well as the ones it sends.
+  for (const [named, fix] of refusals) {
+    for (const body of [
+      { configurationId: named.id },
+      { configurationId: named.id, plugins: automatic },
+    ]) {
+      const refused = await controller.request("PATCH", agentPath, { body });
+      assertRefused(refused, fix, `update ${JSON.stringify(body)}`);
+    }
+  }
+  const unchanged = await controller.request("GET", agentPath);
+  assert.equal(unchanged.data.configurationId, configuration.id);
+  assert.deepEqual(unchanged.data.plugins, automatic);
+  // Clearing the plugins leaves nothing to check against that Configuration.
+  const cleared = await controller.request("PATCH", agentPath, {
+    body: { configurationId: omitted.id, plugins: {} },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  const restored = await controller.request("PATCH", agentPath, {
+    body: { configurationId: configuration.id, plugins: automatic },
+  });
+  assert.equal(restored.status, 200, JSON.stringify(restored.body));
   await controller.fixture.controller.handleNamespaceLifecycle(
     controller.fixture.principal.id,
     namespace.id,
@@ -3549,21 +3607,14 @@ test("the Codex Plugin Driver refuses an automatic reviewer without an on-reques
   const deploy = () => controller.request("POST", `${agentPath}/deploy`);
   const revisions = async () =>
     (await controller.request("GET", `${agentPath}/revisions`)).data.length;
-  // Native startup checks the automatic reviewer against the policy Compute renders. When the
-  // policy is omitted, the Gateway picks its own session policy, which can be never, so the
-  // check would pass on a policy the sessions do not run (finding 988).
+  // A later Configuration save can still drop the policy under a saved Agent, so deployment
+  // checks the admitted pair again.
   for (const [approvalPolicy, fix] of [
     [undefined, "set it explicitly"],
     ["never", "change it"],
   ]) {
     await store(approvalPolicy);
-    const refused = await deploy();
-    assert.equal(refused.status, 400, `${approvalPolicy}: ${JSON.stringify(refused.body)}`);
-    assert.equal(refused.body.error.code, "INVALID_REQUEST");
-    assert.equal(
-      refused.body.error.message,
-      `An automatic plugin reviewer requires Configuration setting ${setting} "on-request"; ${fix} or choose the human reviewer.`,
-    );
+    assertRefused(await deploy(), fix, `deploy with ${approvalPolicy}`);
     assert.equal(await revisions(), 0);
   }
   // The Gateway runs on-failure as on-request; Compute renders on-request for both.

@@ -1450,7 +1450,7 @@ export interface PluginDriver extends Driver {
   validatePolicies(selections: PluginDesiredState, defaultApprovers?: PluginApprovers): void;
   /**
    * Side-effect-free check of admitted selections against the Agent's Configuration values,
-   * at provisioning and deployment. Throws ConfigurationHarnessError, naming the setting but
+   * at Agent save, provisioning and deployment. Throws ConfigurationHarnessError, naming the setting but
    * never its value, for a combination the Driver's runtime cannot enforce.
    */
   validateAgentConfiguration?(
