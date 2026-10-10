@@ -356,6 +356,15 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     ? eligible.filter(({ index }) => index >= checkpoint.count)
     : eligible;
   const lines = remaining.map(({ line }) => line);
+  // A later ordered tail cannot establish order in this observed snapshot.
+  // Keep its positional baseline when delayed batches made its times uncertain.
+  const orderedSnapshot = chunk.lines.every(
+    (line, index) =>
+      line.time !== null &&
+      (index === 0 ||
+        (chunk.lines[index - 1]!.time !== null &&
+          compareRuntimeLogTime(line.time, chunk.lines[index - 1]!.time!) >= 0)),
+  );
   const issuedAt = now();
   const observedAt = new Date(issuedAt).toISOString();
   return boundedRuntimeLogPage(lines.length, (end) => {
@@ -397,7 +406,8 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     );
     const retainCheckpoint =
       (pageCut &&
-        (chunk.bufferTotal < tailLines ||
+        (!orderedSnapshot ||
+          chunk.bufferTotal < tailLines ||
           consumedLines.some((line) => line.time === null) ||
           window.overflow !== null ||
           window.since === null ||

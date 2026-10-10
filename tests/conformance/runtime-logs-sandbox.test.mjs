@@ -1704,3 +1704,71 @@ test("sandbox cut witnesses retain copies arriving after a distinct partial grou
   );
   assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
 });
+
+test("sandbox cut recovery does not infer history order from a surviving ordered tail", async () => {
+  const fixture = await sandboxFixture();
+  const start = Date.now() - 1000;
+  const line = (index, offset = 0, large = true) => ({
+    sandboxId: SANDBOX_ID,
+    time: new Date(start + offset).toISOString(),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; ${large ? '"'.repeat(8000) : "ordinary diagnostic"}`,
+    fields: {},
+  });
+  const original = Array.from({ length: 100 }, (_, index) =>
+    line(index, index === 20 ? -10_000 : 0),
+  );
+  fixture.gateway.state.lines = [...original];
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=100"),
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  const delivered = first.data.records.filter(({ type }) => type === "line").length;
+  assert.ok(delivered > 21 && delivered < 48);
+  // The out-of-order delivered prefix rolls into a currently ordered tail.
+  // That surviving order does not identify the new copy of an evicted row.
+  fixture.gateway.state.lines.push(
+    original[0],
+    ...Array.from({ length: 19 }, (_, index) => line(100 + index, 0, false)),
+  );
+  fixture.gateway.state.bufferTotal = fixture.gateway.state.lines.length;
+  const seen = [];
+  const gaps = [];
+  let cursor = first.data.cursor;
+  for (let page = 0; page < 5; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=100&cursor=${cursor}`),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(Buffer.byteLength(response.text) <= 512 * 1024);
+    seen.push(
+      ...response.data.records
+        .filter(({ type }) => type === "line")
+        .map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])),
+    );
+    gaps.push(...response.data.records.filter(({ type }) => type === "gap"));
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+  }
+  assert.equal(
+    seen.filter((index) => index === 0).length,
+    1,
+    "the late copy remains unread even if the current tail is ordered",
+  );
+  for (let index = delivered; index < 100; index += 1) {
+    assert.equal(seen.filter((value) => value === index).length, 1);
+  }
+  assert.ok(gaps.some(({ reason }) => reason === "window_exceeded"));
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=100&cursor=${cursor}`),
+  );
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+});
