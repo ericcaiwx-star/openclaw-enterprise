@@ -1644,3 +1644,63 @@ test("sandbox retains witnesses for unread copies of incoming overlap hashes", a
   );
   assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
 });
+
+test("sandbox cut witnesses retain copies arriving after a distinct partial group rolls", async () => {
+  const fixture = await sandboxFixture();
+  const start = Date.now() - 1000;
+  const line = (index, offset, large = false) => ({
+    sandboxId: SANDBOX_ID,
+    time: new Date(start + offset).toISOString(),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `row=${index}; ${large ? '"'.repeat(8000) : "ordinary diagnostic"}`,
+    fields: {},
+  });
+  const original = [
+    ...Array.from({ length: 40 }, (_, index) => line(index, 0, true)),
+    line(40, 1),
+    line(41, 1),
+  ];
+  fixture.gateway.state.lines = [...original];
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=42"),
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  const delivered = first.data.records.filter(({ type }) => type === "line").length;
+  assert.ok(delivered > 0 && delivered < 40);
+  // All delivered originals roll out, then one late identical copy arrives.
+  // The original fetched suffix had no equal hash, so only retained window
+  // evidence can disclose the changed snapshot and keep this new occurrence.
+  fixture.gateway.state.lines.push(
+    original[0],
+    ...Array.from({ length: delivered - 1 }, (_, index) => line(42 + index, 2)),
+  );
+  fixture.gateway.state.bufferTotal = fixture.gateway.state.lines.length;
+  const second = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=42&cursor=${first.data.cursor}`),
+  );
+  assert.equal(second.status, 200);
+  assert.ok(Buffer.byteLength(second.text) <= 512 * 1024);
+  assert.deepEqual(
+    second.data.records
+      .filter(({ type }) => type === "line")
+      .map(({ message }) => Number(/^row=(\d+);/.exec(message)[1])),
+    [
+      ...Array.from({ length: 42 - delivered }, (_, index) => delivered + index),
+      0,
+      ...Array.from({ length: delivered - 1 }, (_, index) => 42 + index),
+    ],
+  );
+  assert.ok(
+    second.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+  );
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=42&cursor=${second.data.cursor}`),
+  );
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+});

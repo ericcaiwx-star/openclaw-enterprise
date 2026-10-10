@@ -356,7 +356,6 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     ? eligible.filter(({ index }) => index >= checkpoint.count)
     : eligible;
   const lines = remaining.map(({ line }) => line);
-  const lineHashes = lines.map(sandboxLogLineHash);
   const issuedAt = now();
   const observedAt = new Date(issuedAt).toISOString();
   return boundedRuntimeLogPage(lines.length, (end) => {
@@ -396,18 +395,6 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
           : newest,
       null,
     );
-    const deliveredHashes = pageCut
-      ? new Set([...baseHashes, ...lineHashes.slice(0, end)])
-      : undefined;
-    // Equal hashes across the cut do not identify which occurrences survive a
-    // rolling tail. Retain its witness beside resumable timed overlap.
-    const ambiguousOccurrences =
-      pageCut &&
-      lines
-        .slice(end)
-        .some(
-          (line, index) => line.time !== null && deliveredHashes!.has(lineHashes[end + index]!),
-        );
     const retainCheckpoint =
       (pageCut &&
         (chunk.bufferTotal < tailLines ||
@@ -422,7 +409,9 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
             ))) ||
       (checkpoint !== undefined &&
         (consumedLines.some((line) => line.time === null) || lines.length === 0));
-    const saveCheckpoint = retainCheckpoint || ambiguousOccurrences;
+    // Every wire cut needs a witness: a late identical copy may arrive after
+    // this read, even when its current suffix has no repeated hash.
+    const saveCheckpoint = pageCut || retainCheckpoint;
     // Identical occurrences in a full single-time tail can roll without visible change.
     const firstTime = chunk.lines[0]?.time;
     const fullSingleTime =
