@@ -407,6 +407,12 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
       }
       const active = await fixture.activePointer(owner);
       assert.equal(active.rows[0].active_revision_id, first.id);
+      if (failure === "unsupported") {
+        // The refused stop counts as a sweep: the next deployment does not repeat it.
+        const recovery = await fixture.revision(owner, 3);
+        await fixture.work(recovery, "succeeded");
+        assert.equal(driver.count(replacement), 1, "the next sweep skips the stopped candidate");
+      }
     },
   );
 }
@@ -652,6 +658,36 @@ test(
     // Its sweep retried on the queue's growing backoff while the stop failed.
     await fixture.work(newer, "succeeded", 75_000);
   },
+);
+
+// A superseded pass skips the refused stop when this process stopped the candidate within the
+// last lease, here the newer revision's sweep.
+revisionTest(
+  "a superseded refused candidate that the newer sweep stopped is not stopped again",
+  async (fixture) => {
+    const events = [];
+    let stopping = false;
+    const { owner, replacement, driver } = await startRefusedCandidate(fixture, "refused-swept", {
+      refuse: "unsupported",
+      emit: (event) => events.push(event),
+      stopRevision: () =>
+        stopping ? undefined : Promise.reject(new Error("Kubernetes API temporarily unavailable")),
+    });
+    // After three failed stops the candidate's next pass is at least 2 s away, so the newer
+    // revision's first pass sweeps it first.
+    await waitFor("three failed refused stops", async () =>
+      refusedStopWaits(events, replacement).length >= 3 ? true : undefined,
+    );
+    stopping = true;
+    const newer = await fixture.revision(owner, 3);
+    await fixture.work(newer, "succeeded");
+    assert.equal(driver.count(replacement), 1, "the newer sweep stopped the candidate");
+    await fixture.work(replacement, "succeeded", 30_000);
+    const result = await fixture.workResult(replacement);
+    assert.equal(result.rows[0].reason_code, "REVISION_SUPERSEDED");
+    assert.equal(driver.count(replacement), 1, "the superseded pass did not repeat the stop");
+  },
+  { timeout: 60_000 },
 );
 
 test(
