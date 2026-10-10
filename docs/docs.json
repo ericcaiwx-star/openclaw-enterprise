@@ -463,12 +463,20 @@
                     "label": "Upgrade Checklist"
                   },
                   {
+                    "page": "guides/deploy/upgrade-dispositions",
+                    "label": "Upgrade Dispositions"
+                  },
+                  {
                     "page": "guides/deploy/upgrade-baseline",
                     "label": "Upgrade Baseline"
                   },
                   {
                     "page": "guides/deploy/production-upgrade",
                     "label": "Image Upgrades"
+                  },
+                  {
+                    "page": "guides/deploy/production-installation-changes",
+                    "label": "Installation Changes"
                   },
                   {
                     "page": "guides/deploy/production-upgrade-recovery",
