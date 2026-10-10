@@ -351,7 +351,7 @@ export async function reviewedCodexSeccompSecurityOptions({
   const expected = basename(profile).match(reviewedCodexSeccompProfileFilePattern)?.[1];
   assert.ok(
     expected,
-    "OCC_TEST_CODEX_SECCOMP_PROFILE must point to codex-0.163.0-alpha.1-<profile-sha256>.json.",
+    "OCC_TEST_CODEX_SECCOMP_PROFILE must point to codex-0.163.0-alpha.2-<profile-sha256>.json.",
   );
 
   let contents;
@@ -368,7 +368,7 @@ export async function reviewedCodexSeccompSecurityOptions({
   assert.equal(
     actual,
     expected,
-    `OCC_TEST_CODEX_SECCOMP_PROFILE digest ${actual} did not match the Codex 0.163.0-alpha.1 profile filename digest ${expected}.`,
+    `OCC_TEST_CODEX_SECCOMP_PROFILE digest ${actual} did not match the Codex 0.163.0-alpha.2 profile filename digest ${expected}.`,
   );
 
   const prepared = await ciPreparedCodexSeccompProfile(ciStatePath);

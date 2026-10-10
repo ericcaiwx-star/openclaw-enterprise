@@ -92,7 +92,7 @@ source commit. BuildKit rewrites image and filesystem timestamps to that epoch,
 so wall-clock time does not change the image manifests on a cold-cache rebuild.
 
 `deploy/runtime/Dockerfile:openclaw-source` verifies the pinned OpenClaw main source archive,
-applies the stock Codex 0.163.0-alpha.1 dependency pin before extracting frozen
+applies the stock Codex 0.163.0-alpha.2 dependency pin before extracting frozen
 installation inputs, and applies the temporary
 OpenClaw read-only-paths compatibility patch and the `connect --ephemeral`
 expired-setup patch. The build verifies all three patch hashes and records them in
@@ -240,6 +240,8 @@ owns package-write access and coordination.
 ## Manual Notes
 
 ## Changelog
+
+- 2026-10-10 03:00: Move the stock Codex dependency pin forward to 0.163.0-alpha.2, which no longer sends the per-content metadata the Codex backend intermittently rejects. (fix-992-pin)
 
 - 2026-10-08 13:36: Pin the shared stock Codex dependency to 0.163.0-alpha.1 before frozen installation and record its dependency patch alongside the existing bridge patches. (authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10 - ae695e7f2b0c7bcd2416ed8146baeecb765ae233)
 
