@@ -241,11 +241,12 @@ If a revision fails before the worker sets the pointer, the pointer is
 unchanged. After a failed first deployment, the Agent has no active revision.
 With [exclusive replacement](../drivers/compute.md#production-revision-stages),
 the unchanged pointer names a predecessor that was already stopped, so nothing
-serves until a new revision activates. When the worker refuses the candidate,
-for example because its deploying actor lost `deploy` or a credential source
-was revoked, it stops the candidate's workload too, and records the refusal
-only after the stop succeeds; until then the deployment waits as
-[`REFUSED_CANDIDATE_STOP_PENDING`](#pending-deployment-progress). A candidate whose runtime
+serves until a new revision activates. When the worker refuses such a candidate,
+or any first deployment, for example because its deploying actor lost `deploy`
+or a credential source was revoked, it stops the candidate's workload too, and
+records the refusal only after the stop succeeds; until then the deployment
+waits as [`REFUSED_CANDIDATE_STOP_PENDING`](#pending-deployment-progress). Other
+refused candidates stay until a later successful deployment, stop or delete. A candidate whose runtime
 failed by itself, such as `RUNTIME_MODEL_PROBE_FAILED` or
 `CONVERGENCE_DEADLINE_EXCEEDED`, keeps its Pods so its version's Logs tab can
 show the cause; the next deployment stops them.

@@ -418,6 +418,127 @@ for (const { failure, stopFailures = 0, convergenceTimeoutMs, maxAttempts } of [
   );
 }
 
+// Finding 1016: without exclusive replacement (Kubernetes declares it only for dedicated
+// Harnesses; Docker and SSH not at all) a refused candidate was never stopped. On a first
+// deployment it is the Agent's only runtime: on Kubernetes its embedded Gateway Pod kept its model
+// key, secret environment and private state until a later deployment, stop or delete. It is now
+// stopped before the refusal is published, waiting on a failed stop like an exclusive candidate.
+// Beside an active revision a refused candidate is left alone: on Kubernetes the active revision
+// keeps serving, and an embedded candidate may own the Agent's shared Gateway route, which its stop
+// would delete. The next deployment retires it. (On Docker the candidate's preparation already
+// replaced the Agent's gateway container; that redeploy shape is tracked separately.) A refusal
+// decided before the work's first preparation leaves Compute untouched; see the Secret Driver and
+// ServiceAccount issuance refusals in postgres-worker-agent-revision.test.mjs. "revoked" refuses on
+// the second pass, before Compute, so only the first pass's recorded evidence shows the candidate
+// was prepared; "unsupported" is refused by Compute itself on the first pass, before any evidence.
+const sharedRefusals = {
+  revoked: "AUTHORIZATION_DENIED",
+  unsupported: "SANDBOX_HARNESS_UNSUPPORTED",
+};
+for (const { declares, shape, stopFailures = 0, refusal = "revoked" } of [
+  { declares: true, shape: "first" },
+  { declares: true, shape: "first", stopFailures: 1 },
+  { declares: true, shape: "redeploy" },
+  { declares: false, shape: "first" },
+  { declares: false, shape: "first", refusal: "unsupported" },
+  { declares: false, shape: "redeploy" },
+]) {
+  const compute = declares ? "embedded Kubernetes-style" : "undeclared (Docker or SSH)";
+  const code = sharedRefusals[refusal];
+  test(
+    `${refusal === "unsupported" ? "an" : "a"} ${refusal} ${shape === "first" ? "first deployment" : "redeploy"} on ${compute} Compute ${shape === "first" ? "is stopped" : "is not stopped"}${stopFailures === 0 ? "" : ` after ${stopFailures} failed stop`}`,
+    { ...requiresPostgres, timeout: 60_000 },
+    async (context) => {
+      const fixture = await setup(context);
+      const owner = await fixture.agent(`shared-${refusal}-${shape}-${declares}-${stopFailures}`);
+      let candidateId;
+      let candidatePasses = 0;
+      let failedStops = 0;
+      const running = new Set();
+      const stops = new Map();
+      const retires = new Map();
+      const counted = (counts, revision) => counts.get(revision.id) ?? 0;
+      const events = [];
+      await fixture.start(
+        {
+          ...fixture.compute,
+          // Kubernetes declares exclusive replacement only for dedicated Harnesses.
+          ...(declares
+            ? { requiresStoppedPredecessors: (revision) => revision.harness.mode === "dedicated" }
+            : {}),
+          async prepareRevision(revision) {
+            running.add(revision.id);
+            const observed = await fixture.compute.prepareRevision(revision);
+            if (revision.id !== candidateId) {
+              return observed;
+            }
+            candidatePasses += 1;
+            if (refusal === "unsupported") {
+              // Compute started the runtime, then refused the revision in the same pass.
+              throw new SandboxRevisionUnsupportedError("SANDBOX_HARNESS_UNSUPPORTED", "test");
+            }
+            if (candidatePasses === 1) {
+              // The actor loses deploy authority after the candidate's runtime started; the
+              // worker's recheck on the next pass refuses the deployment.
+              await fixture.observerPool.query(
+                `INSERT INTO occ.iam_restrictions
+                   (id, namespace_id, action, resource_kind, resource_id, effect)
+                 VALUES ($1, $2, 'deploy', 'agent', $3, 'deny')`,
+                [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
+              );
+            }
+            return { ...observed, ready: false };
+          },
+          async stopRevision(revision) {
+            if (revision.id === candidateId && failedStops < stopFailures) {
+              failedStops += 1;
+              throw new Error("Kubernetes API temporarily unavailable");
+            }
+            stops.set(revision.id, counted(stops, revision) + 1);
+            running.delete(revision.id);
+          },
+          async retireRevision(revision) {
+            retires.set(revision.id, counted(retires, revision) + 1);
+            running.delete(revision.id);
+          },
+        },
+        { emit: (event) => events.push(event) },
+      );
+      let first;
+      if (shape === "redeploy") {
+        first = await fixture.revision(owner, 1);
+        await fixture.work(first, "succeeded");
+      }
+      const candidate = await fixture.revision(owner, shape === "first" ? 1 : 2);
+      candidateId = candidate.id;
+      await fixture.work(candidate, "failed_permanent", 30_000);
+      const result = await fixture.workResult(candidate);
+      assert.equal(result.rows[0].reason_code, code);
+      assert.equal(failedStops, stopFailures);
+      const active = await fixture.activePointer(owner);
+      if (shape === "first") {
+        assert.equal(active.rows[0].active_revision_id, null);
+        assert.equal(counted(stops, candidate), 1, "the refused first deployment is stopped once");
+        assert.deepEqual([...running], [], "nothing runs for the Agent");
+        // A failed stop publishes nothing: the work waits and keeps the refusal's code.
+        const waited = events.filter(
+          ({ event, workId, refusal }) =>
+            event === "worker.completed" && workId === candidate.idempotencyKey && refusal === code,
+        );
+        assert.deepEqual(
+          waited.map(({ outcome, code }) => [outcome, code]),
+          Array.from({ length: stopFailures }, () => ["pending", "REFUSED_CANDIDATE_STOP_PENDING"]),
+        );
+      } else {
+        assert.equal(active.rows[0].active_revision_id, first.id);
+        assert.equal(counted(stops, candidate), 0, "the refused redeploy is not stopped");
+        assert.equal(counted(stops, first) + counted(retires, first), 0, "the predecessor serves");
+        assert.ok(running.has(first.id), "the predecessor still runs");
+      }
+    },
+  );
+}
+
 /**
  * Starts the refused-candidate scenario: an exclusive Agent whose first revision activated and
  * whose replacement's first pass started its runtime, after which `refuse` makes later passes

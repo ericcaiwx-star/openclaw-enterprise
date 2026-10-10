@@ -252,7 +252,7 @@ function revisionFailureLogFields(error: unknown): {
 }
 
 /**
- * Stopping a refused exclusive candidate failed. The pass waits as
+ * Stopping a refused candidate failed. The pass waits as
  * `REFUSED_CANDIDATE_STOP_PENDING`, whose evidence and log keep the refusal code the stop was
  * for, and its log names the stop's own failure.
  */
@@ -842,6 +842,8 @@ const MAX_AUDITED_PENDING_LIFECYCLE_RECORDS = 4_096;
 export class ControllerWorker {
   private readonly metrics: OccMetrics | undefined;
   private passOutcome: WorkOutcome = "error";
+  /** The revision this pass asked Compute to prepare, if any. */
+  private preparedThisPass: string | undefined;
   private readonly state: PostgresPlatformState;
   private readonly queue: PostgresWorkQueue;
   private readonly compute: ComputeDriver;
@@ -1126,6 +1128,7 @@ export class ControllerWorker {
         if (claim !== undefined) {
           const started = process.hrtime.bigint();
           this.passOutcome = "error";
+          this.preparedThisPass = undefined;
           try {
             await this.process(claim);
           } catch (error) {
@@ -1547,6 +1550,7 @@ export class ControllerWorker {
       this.repositoryCredentials.validate(revision);
     }
     await this.recheckRevokedCredentialSources(claim, revision);
+    this.preparedThisPass = revision.id;
     let observation = await this.withClaimHeartbeat(claim, () =>
       this.compute.prepareRevision(revision, prepared),
     );
@@ -3337,7 +3341,7 @@ export class ControllerWorker {
               )
             : undefined;
         if (waited !== undefined) {
-          await this.stopRefusedExclusiveCandidate(claim, waited.refusal ?? "UNKNOWN_FAILURE");
+          await this.stopRefusedCandidate(claim, waited.refusal ?? "UNKNOWN_FAILURE");
         }
         await this.finalizeRevision(claim, {
           outcome: "success",
@@ -4156,7 +4160,7 @@ export class ControllerWorker {
     // ActivationFailedError also lands here, but no bundled Driver activates before commit, so
     // it only reaches a published (active) revision, which the stop skips.
     if (resolved.outcome === "permanent" && heldFailureCode === undefined && !expired) {
-      await this.stopRefusedExclusiveCandidate(claim, resolved.code);
+      await this.stopRefusedCandidate(claim, resolved.code);
     }
     let refusedStopRecheckMs: number | undefined;
     if (resolved.refusedCandidate === undefined) {
@@ -4334,11 +4338,14 @@ export class ControllerWorker {
    * Exclusive replacement stops every predecessor before a candidate's first pass, so a
    * candidate that a later pass refuses (for example after its actor lost `deploy`) would be
    * the only runtime left, serving a deployment OCC rejected while the recorded active revision
-   * has no workload (finding 990). Stop it under the live claim before the failure is published,
-   * so the Agent is unavailable until a new revision activates. A refused active revision is
-   * left alone: its workload is the one recorded, and active maintenance owns it.
+   * has no workload (finding 990). Without an active revision, any Compute's candidate is the
+   * Agent's only runtime too: a refused first embedded deployment on Kubernetes kept its Gateway
+   * Pod with its model key, secret environment and private state until a later deployment, stop
+   * or delete (finding 1016). Stop it under the live claim before the failure is published, so
+   * the Agent is unavailable until a new revision activates. A refused active revision is left
+   * alone: its workload is the one recorded, and active maintenance owns it.
    */
-  private async stopRefusedExclusiveCandidate(claim: ClaimedWork, refusal: string): Promise<void> {
+  private async stopRefusedCandidate(claim: ClaimedWork, refusal: string): Promise<void> {
     const compute = this.compute;
     // Only the deployment's own work can leave a candidate serving: maintenance exists only for
     // revisions that activated, and their retirement already stopped them.
@@ -4347,8 +4354,7 @@ export class ControllerWorker {
       claim.revisionId === undefined ||
       claim.namespaceTarget !== undefined ||
       claim.agentTarget !== undefined ||
-      claim.idempotencyKey !== `agent_revision:${claim.revisionId}:reconcile` ||
-      compute.requiresStoppedPredecessors === undefined
+      claim.idempotencyKey !== `agent_revision:${claim.revisionId}:reconcile`
     ) {
       return;
     }
@@ -4371,10 +4377,26 @@ export class ControllerWorker {
       revision.servicePrincipalId !== agent.servicePrincipalId ||
       revision.compute.id !== compute.id ||
       revision.compute.implementation !== compute.implementation ||
-      agent.activeRevisionId === revision.id ||
-      compute.requiresStoppedPredecessors(revision) !== true
+      agent.activeRevisionId === revision.id
     ) {
       return;
+    }
+    if (compute.requiresStoppedPredecessors?.(revision) !== true) {
+      // Beside a non-exclusive active revision the candidate is left alone: that revision still
+      // serves, and an embedded Kubernetes candidate may own the Agent's shared Gateway route,
+      // which stopping the candidate would delete. Its next deployment, stop or delete retires it.
+      if (agent.activeRevisionId !== undefined) {
+        return;
+      }
+      // Only a candidate Compute prepared can have a runtime: this pass prepared it, or an
+      // earlier pass that recorded evidence may have (stopping an unprepared one is idempotent).
+      // A refusal decided before the work's first preparation leaves Compute untouched.
+      if (
+        this.preparedThisPass !== revision.id &&
+        (await this.queue.findWorkAttempt(claim.idempotencyKey)) === undefined
+      ) {
+        return;
+      }
     }
     const started = Date.now();
     try {
