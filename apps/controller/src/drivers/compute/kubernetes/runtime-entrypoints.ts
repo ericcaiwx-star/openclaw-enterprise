@@ -3746,8 +3746,6 @@ const codexEnv = { ...process.env, PATH: harnessPath };
 // Per-run hook capabilities are delivered by the authenticated app-server connection.
 // Keep them outside the model workspace and the file-transfer plugin's roots.
 const hookDirectory = join(process.env.HOME, ${JSON.stringify(NATIVE_HOOK_CREDENTIAL_DIRECTORY)});
-mkdirSync(hookDirectory, { recursive: true, mode: 0o700 });
-chmodSync(hookDirectory, 0o700);
 // Hook commands call the Gateway route; they trust the CA the node uses. A SandboxDriver
 // delivers that CA as a file (OPENCLAW_NODE_CA_PATH) instead of the PEM variable.
 let gatewayCa = process.env.OPENCLAW_NODE_CA_PEM || "";
@@ -3758,13 +3756,39 @@ if (!gatewayCa && process.env.OPENCLAW_NODE_CA_PATH) {
     console.error("Codex hook commands start without the Gateway CA: " + (error.code || "unreadable"));
   }
 }
+let hookCa = "";
 if (gatewayCa) {
   const inheritedCa = process.env.NODE_EXTRA_CA_CERTS
     ? readFileSync(process.env.NODE_EXTRA_CA_CERTS, "utf8")
     : "";
-  const caPath = join(hookDirectory, "gateway-ca.pem");
-  writeFileSync(caPath, [inheritedCa, gatewayCa].filter(Boolean).join("\n"), { mode: 0o600 });
-  codexEnv.NODE_EXTRA_CA_CERTS = caPath;
+  hookCa = [inheritedCa, gatewayCa].filter(Boolean).join("\n");
+  codexEnv.NODE_EXTRA_CA_CERTS = join(hookDirectory, "gateway-ca.pem");
+}
+// Harness code runs as this user and can replace the directory, for example with a
+// symlink into the workspace, and on OpenShell HOME survives restarts. Before each Codex
+// start, anything but this user's own directory is removed and rebuilt at 0700, and the
+// CA copy is written without following a link. Credentials left by an earlier Harness
+// lifetime belong to retired relays, so the first start also removes them; a Codex
+// restart keeps an intact directory's credentials for the Gateway's live relays.
+let removeHookCredentials = true;
+function prepareHookDirectory() {
+  const entry = lstatSync(hookDirectory, { throwIfNoEntry: false });
+  if (entry !== undefined && !(entry.isDirectory() && entry.uid === process.getuid())) {
+    rmSync(hookDirectory, { recursive: true, force: true });
+  }
+  mkdirSync(hookDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(hookDirectory, 0o700);
+  if (removeHookCredentials) {
+    for (const name of readdirSync(hookDirectory)) {
+      rmSync(join(hookDirectory, name), { recursive: true, force: true });
+    }
+    removeHookCredentials = false;
+  }
+  if (hookCa) {
+    const caPath = join(hookDirectory, "gateway-ca.pem");
+    rmSync(caPath, { recursive: true, force: true });
+    writeFileSync(caPath, hookCa, { mode: 0o600, flag: "wx" });
+  }
 }
 delete codexEnv.OPENCLAW_NODE_SETUP_CODE;
 delete codexEnv.OPENCLAW_NODE_SETUP_PATH;
@@ -3860,7 +3884,12 @@ function nodeArguments() {
 }
 const processes = [
   { name: "workspace node", args: nodeArguments, env: nodeEnv },
-  { name: "Codex", args: ${JSON.stringify(["-e", ...nodeProgramArguments(AGENT_RUNTIME_ENTRYPOINT)])}, env: codexEnv },
+  {
+    name: "Codex",
+    args: ${JSON.stringify(["-e", ...nodeProgramArguments(AGENT_RUNTIME_ENTRYPOINT)])},
+    env: codexEnv,
+    prepare: prepareHookDirectory,
+  },
 ];
 let stopping = false;
 // An OpenShell Sandbox reports EPERM for a group left with only zombies, as Darwin
@@ -3883,6 +3912,13 @@ function start(slot) {
   if (typeof slot.args === "function" && nodeSetupWait !== undefined) {
     logStartupPhase("node-setup", nodeSetupWait);
     nodeSetupWait = undefined;
+  }
+  try {
+    slot.prepare?.();
+  } catch (error) {
+    console.error(slot.name + " start preparation failed: " + (error.code || "error"));
+    slot.timer = setTimeout(() => start(slot), 1_000);
+    return;
   }
   const child = spawn(process.execPath, args, {
     env: slot.env, stdio: "inherit", detached: true,
