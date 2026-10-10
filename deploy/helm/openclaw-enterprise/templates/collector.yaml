@@ -199,10 +199,10 @@ spec:
         {{- else }}
         - namespaceSelector:
             matchLabels:
-              {{- toYaml $exporter.namespaceLabels | nindent 14 }}
+              {{- include "openclaw.networkPolicy.matchLabels" (dict "name" "logging.collector.exporter.namespaceLabels" "value" $exporter.namespaceLabels) | nindent 14 }}
           podSelector:
             matchLabels:
-              {{- toYaml $exporter.podLabels | nindent 14 }}
+              {{- include "openclaw.networkPolicy.matchLabels" (dict "name" "logging.collector.exporter.podLabels" "value" $exporter.podLabels) | nindent 14 }}
         {{- end }}
       ports:
         - protocol: TCP
@@ -224,10 +224,10 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              {{- toYaml $collector.metrics.scraperNamespaceLabels | nindent 14 }}
+              {{- include "openclaw.networkPolicy.matchLabels" (dict "name" "logging.collector.metrics.scraperNamespaceLabels" "value" $collector.metrics.scraperNamespaceLabels) | nindent 14 }}
           podSelector:
             matchLabels:
-              {{- toYaml $collector.metrics.scraperPodLabels | nindent 14 }}
+              {{- include "openclaw.networkPolicy.matchLabels" (dict "name" "logging.collector.metrics.scraperPodLabels" "value" $collector.metrics.scraperPodLabels) | nindent 14 }}
       ports:
         - protocol: TCP
           port: 8888

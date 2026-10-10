@@ -1,3 +1,4 @@
+import { compareResourceQuantities } from "./resource-quantities.ts";
 import {
   asRecord,
   isNonEmptyString,
@@ -118,6 +119,7 @@ import {
   workspaceSetupVerifier,
 } from "../workspace-setup-runtime.ts";
 import { ComputeLifecycleDispatcher } from "../lifecycle-hooks.ts";
+import { validatePlaintextNativeGateway } from "../native-gateway-transport.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import { discoverHarnessModels } from "../model-discovery.ts";
 import { pollHarnessDeviceAuthorization, startHarnessDeviceAuthorization } from "../device-auth.ts";
@@ -147,6 +149,7 @@ import {
   type CodexRepositoryBrokerNetworkPolicy,
   type PluginRuntimeSpec,
   pluginRuntimeConfigMapData,
+  pluginRuntimeEarlierConfigMapData,
   pluginRuntimeSpecForRevision,
 } from "../plugin-runtime.ts";
 import {
@@ -155,6 +158,7 @@ import {
   CODEX_OAUTH_BOOTSTRAP_ENTRYPOINT,
   GATEWAY_RUNTIME_ENTRYPOINT,
   GATEWAY_STOP_TIMEOUT_MS,
+  MANAGED_CONFIGURATION_DIRECTORY,
   NATIVE_WORKER_ENTRYPOINT,
   RUNTIME_READINESS_PATH,
   RUNTIME_WRAPPER_COMMAND,
@@ -957,7 +961,6 @@ const MANAGER = "openclaw-enterprise";
 const FIELD_MANAGER = "openclaw-enterprise-compute";
 const TOKEN_PATH = "/var/run/secrets/openclaw/service-principal";
 const CONFIGURATION_DIRECTORY = "/etc/openclaw";
-const MANAGED_CONFIGURATION_DIRECTORY = "/etc/openclaw-managed";
 const WRITABLE_CONFIGURATION_PATH = "/home/node/.openclaw/openclaw.json";
 const CONFIGURATION_DOCUMENT = "openclaw.json";
 const CONFIGURATION_VOLUME = "openclaw-configuration";
@@ -1406,10 +1409,32 @@ function validateResources(value: V1ResourceRequirements, description: string, p
   if (requests === undefined || limits === undefined) {
     throw new ConfigurationFailure(`${description} requests and limits must be configured.`);
   }
-  resourceQuantity(requests.cpu, `${description} CPU request`, `${path}.requests.cpu`);
-  resourceQuantity(requests.memory, `${description} memory request`, `${path}.requests.memory`);
-  resourceQuantity(limits.cpu, `${description} CPU limit`, `${path}.limits.cpu`);
-  resourceQuantity(limits.memory, `${description} memory limit`, `${path}.limits.memory`);
+  for (const [resource, kind] of [
+    ["cpu", "CPU"],
+    ["memory", "memory"],
+  ] as const) {
+    const request = resourceQuantity(
+      requests[resource],
+      `${description} ${kind} request`,
+      `${path}.requests.${resource}`,
+    );
+    const limit = resourceQuantity(
+      limits[resource],
+      `${description} ${kind} limit`,
+      `${path}.limits.${resource}`,
+    );
+    const compared = compareResourceQuantities(request, limit);
+    if (compared === undefined) {
+      throw new ConfigurationFailure(
+        `${description} ${kind} requests and limits (${path}) must be Kubernetes quantity strings.`,
+      );
+    }
+    if (compared > 0) {
+      throw new ConfigurationFailure(
+        `${description} ${kind} request (${path}.requests.${resource}) cannot exceed its limit (${path}.limits.${resource}).`,
+      );
+    }
+  }
 }
 
 // Quantities stay strings, as Kubernetes returns them: an unquoted YAML `4` is a
@@ -4843,11 +4868,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     );
     if (pluginRuntime !== undefined) {
       await this.prepareRevisionStage("plugin_runtime", () =>
-        this.reconcile(
-          this.pluginRuntimeConfigMap(pluginRuntime, pluginOwnership, namespace),
-          pluginOwnership,
-          namespace,
-        ),
+        this.reconcilePluginRuntimeConfigMap(pluginRuntime, pluginOwnership, namespace),
       );
     }
     const gatewayAccountName = embedded ? agentName : gatewayName;
@@ -4968,11 +4989,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     );
     if (!embedded && pluginRuntime !== undefined) {
       await this.prepareRevisionStage("plugin_runtime", () =>
-        this.reconcile(
-          this.pluginRuntimeConfigMap(pluginRuntime, pluginOwnership, gatewayNamespace),
-          pluginOwnership,
-          gatewayNamespace,
-        ),
+        this.reconcilePluginRuntimeConfigMap(pluginRuntime, pluginOwnership, gatewayNamespace),
       );
     }
     let launchPrepared = false;
@@ -10201,6 +10218,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   private kubernetesGatewayConfigurationDocument(
     configuration: OpenClawConfigurationDocument,
   ): OpenClawConfigurationDocument {
+    validatePlaintextNativeGateway(
+      configuration,
+      (setting, requirement) => new GatewaySettingFailure(setting, requirement),
+    );
     const gatewayRecord = asRecord(configuration.gateway);
     if (configuration.gateway !== undefined && gatewayRecord === undefined) {
       throw new GatewaySettingFailure("gateway", "must be an object");
@@ -11033,6 +11054,23 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       immutable: true,
       data: pluginRuntimeConfigMapData(snapshot.runtime),
     };
+  }
+
+  // A revision prepared before a controller upgrade keeps the plugin-runtime files its
+  // Pods mounted; a new deployment of the Agent renders the current ones. Any other
+  // difference, including an old rendering of another runtime, is still refused.
+  private async reconcilePluginRuntimeConfigMap(
+    snapshot: PluginRuntimeSnapshot,
+    ownership: Ownership,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<void> {
+    await this.reconcile(
+      this.pluginRuntimeConfigMap(snapshot, ownership, namespace),
+      ownership,
+      namespace,
+      undefined,
+      pluginRuntimeEarlierConfigMapData(snapshot.runtime),
+    );
   }
 
   private harnessWorkspaceClaimName(agentId: string): string {
@@ -13435,6 +13473,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     ownership: Ownership,
     namespace: KubernetesNamespaceAddress,
     precondition?: ReconcilePrecondition,
+    // An existing immutable ConfigMap may instead hold exactly one of these complete
+    // data sets: what an earlier controller rendered for the same object.
+    earlierConfigMapData: readonly Readonly<Record<string, string>>[] = [],
   ): Promise<void> {
     const clients = await this.clients(namespace.plane);
     const existing = await this.getOwned(desired.kind, desired.metadata.name, namespace, ownership);
@@ -13459,15 +13500,17 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       }
       if (desired.kind === "ConfigMap") {
         const annotations = desired.metadata.annotations ?? {};
-        const data = desired.data ?? {};
         const existingData = existing.data ?? {};
         if (
           existing.immutable !== true ||
           Object.entries(annotations).some(
             ([name, value]) => existing.metadata.annotations?.[name] !== value,
           ) ||
-          Object.keys(existingData).length !== Object.keys(data).length ||
-          Object.entries(data).some(([name, value]) => existingData[name] !== value) ||
+          ![desired.data ?? {}, ...earlierConfigMapData].some(
+            (data) =>
+              Object.keys(existingData).length === Object.keys(data).length &&
+              Object.entries(data).every(([name, value]) => existingData[name] === value),
+          ) ||
           Object.keys(existing.binaryData ?? {}).length !== 0
         ) {
           throw new OwnershipFailure(

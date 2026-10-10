@@ -25,6 +25,7 @@ import {
   PLUGIN_RUNTIME_MANIFEST_ENVIRONMENT,
   PLUGIN_RUNTIME_READY_MARKER_ENVIRONMENT,
   pluginRuntimeConfigMapData,
+  pluginRuntimeEarlierConfigMapData,
   pluginRuntimeEnvironment,
   pluginRuntimeSpecForRevision,
 } from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
@@ -676,6 +677,41 @@ test("Codex startup preserves explicit session approval choices and native defau
     () => pluginRuntimeSpecForRevision(malformed),
     /session approval policy is invalid/,
   );
+});
+
+test("Kubernetes keeps only the exact earlier Codex config of a selected-plugin revision", () => {
+  const candidate = revision({ plugins: codexLinearPluginState() });
+  const runtime = pluginRuntimeSpecForRevision(candidate);
+  const current = pluginRuntimeConfigMapData(runtime);
+  // The config.toml earlier controllers rendered for a selected-plugin Codex runtime:
+  // before #508 without [plugins._default], before #1995 without approval_policy.
+  const beforePluginDefaults = `[features]
+apps = true
+plugins = true
+remote_plugin = true
+
+[apps._default]
+enabled = false
+`;
+  const beforeApprovalPolicy = `${beforePluginDefaults}
+[plugins._default]
+enabled = false
+`;
+  assert.equal(
+    current[PLUGIN_RUNTIME_CODEX_CONFIG],
+    `approval_policy = "on-request"\n\n${beforeApprovalPolicy}`,
+  );
+  // Only config.toml differs; the manifest that carries selections and approvers must match.
+  assert.deepEqual(pluginRuntimeEarlierConfigMapData(runtime), [
+    { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforeApprovalPolicy },
+    { ...current, [PLUGIN_RUNTIME_CODEX_CONFIG]: beforePluginDefaults },
+  ]);
+  // OpenClaw plugin runtimes never had a Codex config, so nothing earlier is accepted.
+  const openClaw = revision({
+    harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
+    plugins: openClawPluginState(),
+  });
+  assert.deepEqual(pluginRuntimeEarlierConfigMapData(pluginRuntimeSpecForRevision(openClaw)), []);
 });
 
 test("Codex runtime helper installs a plugin with skills and applies write action approval without tool inventory", async () => {
@@ -3986,8 +4022,14 @@ test("Codex gateway supervisor waits for its Harness plugin status without a dea
 // Runs the Kubernetes Codex Gateway wrapper against a real HTTP Harness peer
 // status endpoint and a real readiness endpoint standing in for OpenClaw. Only
 // process spawning and the filesystem are substituted.
-async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
+async function startCodexGatewaySupervisor(
+  t,
+  { bindingDeviceId, writableConfig = false, savedFiles, initialPeerStatus } = {},
+) {
   const peerHttp = await import("node:http");
+  const configurationPath = writableConfig
+    ? "/home/node/.openclaw/openclaw.json"
+    : "/etc/openclaw/openclaw.json";
   const revisionId = "revision-plugin-compute-1";
   const initialFailure = {
     pluginId: "codex-plugin:linear@openai-curated-remote",
@@ -4016,7 +4058,7 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
     statusHandler: undefined,
     files: new Map([
       [
-        "/etc/openclaw/openclaw.json",
+        configurationPath,
         JSON.stringify({
           gateway: { port: 8080 },
           plugins: { installs: { keep: { source: "npm" } }, load: { paths: ["existing"] } },
@@ -4025,6 +4067,15 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
       ],
     ]),
   };
+  if (writableConfig) {
+    fixture.files.set("/etc/openclaw-managed/openclaw.json", fixture.files.get(configurationPath));
+  }
+  if (savedFiles !== undefined) {
+    fixture.files = new Map(savedFiles);
+  }
+  if (initialPeerStatus !== undefined) {
+    fixture.peerStatus = initialPeerStatus;
+  }
   if (bindingDeviceId !== undefined) {
     fixture.files.set(
       "/home/node/workspace-node-binding/workspace-node.json",
@@ -4076,7 +4127,7 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
         APP_SERVER_URL: `ws://127.0.0.1:${peerPort}`,
         HOME: "/home/node",
         OPENCLAW_AGENT_REVISION_ID: revisionId,
-        OPENCLAW_CONFIG_PATH: "/etc/openclaw/openclaw.json",
+        OPENCLAW_CONFIG_PATH: configurationPath,
         OPENCLAW_GATEWAY_PORT: String(gatewayPort),
         OPENCLAW_PLUGIN_RUNTIME_JSON: JSON.stringify({
           manifest: pluginRuntimeSpecForRevision(
@@ -4134,6 +4185,22 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
           writeFileSync(path, data) {
             fixture.files.set(path, String(data));
           },
+          renameSync(from, to) {
+            const failure = fixture.failConfigWrite;
+            if (to === configurationPath && failure !== undefined && --failure.remaining === 0) {
+              fixture.failConfigWrite = undefined;
+              if (failure.after) {
+                fixture.files.set(to, fixture.files.get(from));
+                fixture.files.delete(from);
+              }
+              throw new Error("Interrupted configuration replacement");
+            }
+            fixture.files.set(to, fixture.files.get(from));
+            fixture.files.delete(from);
+          },
+          rmSync(path) {
+            fixture.files.delete(path);
+          },
         };
       }
       if (specifier === "node:child_process") {
@@ -4189,6 +4256,182 @@ async function startCodexGatewaySupervisor(t, { bindingDeviceId } = {}) {
   await waitForCondition("gateway supervisor start", () => fixture.children.length === 1);
   return fixture;
 }
+
+test("Codex gateway supervisor recovers a changed peer after restarting with its writable copy", async (t) => {
+  const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const path = "/home/node/.openclaw/openclaw.json";
+  const edited = JSON.parse(previous.files.get(path));
+  edited.messages = { responsePrefix: "Native admin edit" };
+  previous.files.set(path, JSON.stringify(edited));
+  const gateway = await startCodexGatewaySupervisor(t, {
+    writableConfig: true,
+    savedFiles: previous.files,
+    initialPeerStatus: {
+      ...previous.peerStatus,
+      startupId: "agent-startup-2",
+      podUid: "agent-pod-2",
+      successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+      failures: [],
+    },
+  });
+  assert.equal(gateway.children[0].config.messages.responsePrefix, "Native admin edit");
+  assert.equal(
+    gateway.children[0].config.plugins.entries.codex.config.codexPlugins.plugins.linear.enabled,
+    true,
+  );
+  assert.equal(gateway.children[0].token, gateway.token("agent-startup-2"));
+  assert.equal(gateway.status().phase, "ready");
+  assert.deepEqual(gateway.exits, []);
+});
+
+for (const after of [false, true]) {
+  test(`Codex gateway supervisor replays provenance after an interrupted bridge write (after=${after})`, async (t) => {
+    const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
+    const [first] = previous.children;
+    previous.peerStatus = {
+      ...previous.peerStatus,
+      startupId: "agent-startup-2",
+      podUid: "agent-pod-2",
+      successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+      failures: [],
+    };
+    previous.failConfigWrite = { remaining: 2, after };
+    const respawn = previous.pollPeer();
+    await waitForCondition("the stale Gateway stop", () => first.killed.length === 1);
+    first.exit(null, "SIGTERM");
+    await respawn;
+    assert.deepEqual(previous.exits, [1]);
+    const gateway = await startCodexGatewaySupervisor(t, {
+      writableConfig: true,
+      savedFiles: previous.files,
+      initialPeerStatus: previous.peerStatus,
+    });
+    assert.equal(
+      gateway.children[0].config.plugins.entries.codex.config.codexPlugins.plugins.linear.enabled,
+      true,
+    );
+    assert.equal(gateway.status().phase, "ready");
+    assert.deepEqual(gateway.exits, []);
+  });
+}
+
+test("Codex gateway supervisor refuses provenance for another revision or managed snapshot", async (t) => {
+  const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const path = "/home/node/.openclaw/openclaw.json.oce-peer-bridge.json";
+  for (const patch of [{ revisionId: "another-revision" }, { sourceHash: "0".repeat(64) }]) {
+    const savedFiles = new Map(previous.files);
+    const journal = JSON.parse(savedFiles.get(path));
+    savedFiles.set(path, JSON.stringify({ ...journal, ...patch }));
+    await assert.rejects(
+      startCodexGatewaySupervisor(t, { writableConfig: true, savedFiles }),
+      /Gateway peer configuration state does not match the admitted revision/,
+    );
+  }
+});
+
+test("Codex gateway supervisor preserves native edits when its initial config is writable", async (t) => {
+  const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const [first] = gateway.children;
+  const path = "/home/node/.openclaw/openclaw.json";
+  const edited = JSON.parse(gateway.files.get(path));
+  edited.messages = { responsePrefix: "Native admin edit" };
+  gateway.files.set(path, JSON.stringify(edited));
+  await gateway.pollPeer();
+  assert.equal(gateway.children.length, 1, "the same peer keeps its native process and edits");
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-2",
+    podUid: "agent-pod-2",
+    successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+    failures: [],
+  };
+  const respawn = gateway.pollPeer();
+  await waitForCondition("the stale Gateway stop", () => first.killed.length === 1);
+  first.exit(null, "SIGTERM");
+  await respawn;
+  assert.equal(
+    gateway.children.length,
+    2,
+    JSON.stringify({
+      state: gateway.files.get(path + ".oce-peer-bridge.json"),
+      logs: gateway.logs,
+    }),
+  );
+  const replacement = gateway.children[1];
+  assert.equal(replacement.config.messages.responsePrefix, "Native admin edit");
+  assert.equal(
+    replacement.config.plugins.entries.codex.config.codexPlugins.plugins.linear.enabled,
+    true,
+  );
+  assert.equal(replacement.token, gateway.token("agent-startup-2"));
+  assert.equal(gateway.status().phase, "ready");
+  assert.deepEqual(gateway.exits, []);
+});
+
+test("Codex gateway supervisor refuses a native edit back to an older generated bridge", async (t) => {
+  const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const [first] = gateway.children;
+  const path = "/home/node/.openclaw/openclaw.json";
+  const oldBridge = first.config.plugins.entries.codex.config.codexPlugins;
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-2",
+    podUid: "agent-pod-2",
+    successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+    failures: [],
+  };
+  const recovery = gateway.pollPeer();
+  await waitForCondition("the first Gateway stop", () => first.killed.length === 1);
+  first.exit(null, "SIGTERM");
+  await recovery;
+  const edited = JSON.parse(gateway.files.get(path));
+  edited.plugins.entries.codex.config.codexPlugins = oldBridge;
+  gateway.files.set(path, JSON.stringify(edited));
+  const replacement = gateway.children[1];
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-3",
+    podUid: "agent-pod-3",
+  };
+  const refused = gateway.pollPeer();
+  await waitForCondition("the replacement Gateway stop", () => replacement.killed.length === 1);
+  replacement.exit(null, "SIGTERM");
+  await refused;
+  assert.equal(gateway.children.length, 2);
+  assert.deepEqual(gateway.exits, [1]);
+  assert.equal(
+    JSON.parse(gateway.files.get(path)).plugins.entries.codex.config.codexPlugins.plugins.linear
+      .enabled,
+    false,
+  );
+});
+
+test("Codex gateway supervisor retains refusal of a native-edited managed bridge", async (t) => {
+  const gateway = await startCodexGatewaySupervisor(t, { writableConfig: true });
+  const [first] = gateway.children;
+  const path = "/home/node/.openclaw/openclaw.json";
+  const edited = JSON.parse(gateway.files.get(path));
+  edited.plugins.entries.codex.config.codexPlugins.plugins.linear.name = "Native edit";
+  gateway.files.set(path, JSON.stringify(edited));
+  gateway.peerStatus = {
+    ...gateway.peerStatus,
+    startupId: "agent-startup-2",
+    podUid: "agent-pod-2",
+    successfulPluginIds: ["codex-plugin:linear@openai-curated-remote"],
+    failures: [],
+  };
+  const respawn = gateway.pollPeer();
+  await waitForCondition("the stale Gateway stop", () => first.killed.length === 1);
+  first.exit(null, "SIGTERM");
+  await respawn;
+  assert.equal(gateway.children.length, 1, "an operator edit cannot be overwritten by recovery");
+  assert.equal(
+    JSON.parse(gateway.files.get(path)).plugins.entries.codex.config.codexPlugins.plugins.linear
+      .name,
+    "Native edit",
+  );
+  assert.deepEqual(gateway.exits, [1]);
+});
 
 test("Codex gateway supervisor respawns OpenClaw in place for a changed Harness peer", async (t) => {
   const gateway = await startCodexGatewaySupervisor(t);
