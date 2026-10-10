@@ -19,7 +19,7 @@ existing cluster or change the default kubeconfig.
 ## Parallel scenarios on shared setup
 
 Each installation creates one k3d cluster and reuses its control plane and
-repository broker. Within a preset, two scenario workers run concurrently by
+repository broker when Git is selected. Within a preset, two scenario workers run concurrently by
 default. Each owns a fresh Agent, configuration, credentials, and workspace:
 
 - `model-ui`: model and native browser assertions, in that order.
@@ -46,6 +46,28 @@ request to create more clusters or reuse an existing external installation.
 Teardown waits for all workers. Every repository worker tracks its own pending
 credential disposal; one successful cleanup cannot release another worker's
 unresolved session or allow its broker to be removed.
+
+## Select scenarios
+
+`OCC_TEST_QA_SCENARIOS` accepts `all` (the default) or a comma-separated list of
+`model-ui`, `calendar`, `git-full`, `git-read`, and `slack`.
+`OCC_TEST_QA_INSTALLATION` accepts `all`, `compose`, or `kubernetes`;
+`OCC_TEST_QA_PRESET` accepts `all`, `OpenClaw`, or `Codex`.
+For example, run model/UI and Calendar checks in both installations:
+
+```sh
+OCC_TEST_QA_MATRIX=1 OCC_TEST_QA_SCENARIOS=model-ui,calendar \
+  node --env-file="$TEST_ENV_FILE" --test tests/integration/qa-matrix-real.test.mjs
+```
+
+Selection includes installation startup, preset preparation, Agent deployment,
+and cleanup. Browser login runs for `model-ui`; repository setup runs only for
+Git scenarios. Presets without an applicable selected scenario do not deploy an
+Agent. Invalid names and wholly inapplicable selections fail before provisioning.
+Only selected model credentials and scenario inputs from the table below are
+required: Calendar needs the Codex token and its tool/result settings; Git needs
+repository authorization, inputs, and observer; Slack needs its tokens/channel.
+A selected check with missing credentials fails rather than becoming a skip.
 
 ## Coverage and applicability
 
@@ -149,7 +171,7 @@ Optional settings:
 - `OCC_TEST_CODEX_CALENDAR_PLUGIN_ID`, `OCC_TEST_CODEX_CALENDAR_PROMPT`, and
   `OCC_TEST_CODEX_CALENDAR_EXPECT`: existing Calendar fixture overrides.
 - `OCC_TEST_QA_INSTALLATION`: `compose` or `kubernetes` for a partial local replay.
-  The default `all` covers both; CI forces `all`. A partial run is labeled in
+  The default `all` covers both; Full Integration forces `all`. A partial run is labeled in
   `matrix.json` and cannot establish a full matrix pass.
 - `OCC_TEST_QA_ARTIFACTS`: output directory; otherwise a private temporary directory
   is allocated and printed.
@@ -159,14 +181,26 @@ without `OCC_TEST_QA_MATRIX=1` is not a matrix pass.
 
 ## CI, evidence, and recovery
 
-The `qa-matrix` lane runs only when **Full Integration** is dispatched with
-`lane: qa-matrix`; `all` and the `full` group exclude it until the protected
-`integration-qa` environment and its QA secrets exist. That environment needs
-independent reviewers and the approved main branch before dispatch.
-The workflow materializes file-backed credentials in runner temporary storage and
-uploads only the outcome/evidence JSON files. It does not upload private state or
-raw command logs. The job is ordered after the focused Slack job so they
-cannot compete for Socket Mode delivery once `all` includes it.
+[QA Matrix Advisory](../../.github/workflows/qa-advisory.yml) runs `model-ui`
+in all four cells and `calendar` in both Codex cells on every trusted
+same-repository PR. Compose and Kubernetes run in separate jobs. Failures remain
+visible, but these jobs are outside `CI Required` and must not be configured as
+required branch checks. New pushes cancel superseded runs. Fork and Dependabot
+PRs report that a trusted run is needed; they do not receive model credentials.
+
+The advisory workflow uses `integration-qa-pr`: no required reviewers, deployment
+branch policies allowing `refs/pull/*/merge` and `main`, and only
+`OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` secrets. Set the model and Calendar
+variables from the table above; the Codex account must have Calendar connected.
+These credentials are available to trusted PR code. Manual dispatch on `main`
+can replay the same selection. Runner resources are disposable; always-run steps
+attempt owned cleanup and remove temporary credential files.
+
+**Full Integration**, dispatched with `lane: qa-matrix`, retains the complete
+selection and protected `integration-qa` approval. The `all` dispatch and `full`
+group exclude this lane. Its job runs after the focused Slack job to avoid
+competing Socket Mode consumers. Both workflows materialize only selected
+credentials and upload outcome JSON, not private state or raw command logs.
 `scripts/ci/test-suites/qa-matrix.json` owns lane registration.
 
 Replay through the credentialed runner with the same environment:
@@ -194,19 +228,22 @@ names such as `compose/Codex`. Completed stages enter the report in completion
 order. Writes are serialized and published atomically, so simultaneous workers
 do not overwrite outcomes or expose partial JSON. Earlier outcomes remain
 available when a later stage fails. The workflow retains these files in
-its `qa-matrix-<run-id>-<attempt>` artifact for seven days.
+its `qa-matrix-<run-id>-<attempt>` artifact (manual) or
+`qa-advisory-<installation>-<run-id>-<attempt>` artifact (PR) for seven days.
 
 A grouped stage has one outcome: clone, commit, push, and PR creation are not
 separate result rows. Cell evidence adds Agent/revision/Pod identities, nonce
 results, remote SHAs, credential disposal, and Slack timestamps. The summary
 has per-stage wall-clock durations, excluding queue time and report writes, but
-no explicit `not run`/`not applicable` rows. Parallel durations overlap; adding
+the `selection` inventory separately lists selected, unselected, and
+not-applicable scenarios per cell. Parallel durations overlap; adding
 them does not give the overall run duration.
 Filtered, unentered, or interrupted stages can be absent; absence is not a pass.
 Inspect runner failures and cleanup results alongside the JSON.
 
-`scope: full` identifies the selected installations, not a successful run.
-`partial:*` identifies installation selection or test-name filtering. Exclusions
+`scope: full` means all installations, presets, and scenarios were selected, not
+that they passed. `partial:selected` identifies an explicit subset;
+`partial:filtered` identifies additional Node test-name filtering. Exclusions
 remain explicit. A successful static check or parent setup does not establish
 that every live scenario passed.
 

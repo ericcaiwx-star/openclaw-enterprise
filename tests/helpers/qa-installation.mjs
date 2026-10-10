@@ -48,7 +48,12 @@ export function launcherEnvironment() {
   return env;
 }
 
-export async function createQaInstallation(context, controlPlane, artifacts) {
+export async function createQaInstallation(
+  context,
+  controlPlane,
+  artifacts,
+  { repositoryInputs = true } = {},
+) {
   assert.ok(["compose", "kubernetes"].includes(controlPlane));
   const suffix = randomUUID().slice(0, 8);
   const cluster = `occ-dev-qa-${controlPlane === "compose" ? "c" : "k"}-${suffix}`;
@@ -84,7 +89,9 @@ export async function createQaInstallation(context, controlPlane, artifacts) {
     }
   }
   let repositoryInput;
-  const sourceInput = process.env.OCC_TEST_QA_REPOSITORY_INPUT_DIRECTORY;
+  const sourceInput = repositoryInputs
+    ? process.env.OCC_TEST_QA_REPOSITORY_INPUT_DIRECTORY
+    : undefined;
   if (sourceInput) {
     repositoryInput = join(directory, "repository-input");
     await mkdir(repositoryInput, { mode: 0o700 });

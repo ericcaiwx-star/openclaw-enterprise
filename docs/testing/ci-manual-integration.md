@@ -1,6 +1,7 @@
 # Integration tests outside automatic CI
 
-These integration files have no automatic workflow entrypoint.
+These integrations have coverage outside automatic required CI. The QA matrix
+also has an [advisory PR selection](qa-matrix.md#ci-evidence-and-recovery).
 A green `CI Required` check does not establish their coverage. This inventory describes workflow selection, not
 local or hosted test results.
 
@@ -24,7 +25,7 @@ manual lanes do not run as part of automatic `CI Required`.
 
 ## Manual Full Integration lanes
 
-These files run only when selected in
+Full coverage of these files runs when selected in
 [Full Integration](../../.github/workflows/full-integration.yml), using the listed
 lane or `all` (`all` excludes `qa-matrix` until its environment exists).
 Model/service lanes require configured credentials and infrastructure.
@@ -32,7 +33,7 @@ Model/service lanes require configured credentials and infrastructure.
 
 | Lane               | Integration test file                                                                                                  | Coverage absent from automatic CI                                                                                                                                 |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `qa-matrix`        | [qa-matrix-real.test.mjs](../../tests/integration/qa-matrix-real.test.mjs)                                             | [Four shipped installation/preset combinations](qa-matrix.md): model, native UI, Git/PR, approvals, and single-message Slack delivery.                            |
+| `qa-matrix`        | [qa-matrix-real.test.mjs](../../tests/integration/qa-matrix-real.test.mjs)                                             | [Four shipped installation/preset combinations](qa-matrix.md): full selection includes Git/PR and Slack beyond the advisory model/UI and Calendar checks.         |
 | `docker-model`     | [docker-compute-real.test.mjs](../../tests/integration/docker-compute-real.test.mjs)                                   | Docker Compute networks, containers, workspace persistence, cleanup, and real model turns.                                                                        |
 | `k3d-model`        | [harness-topology-k3d-real.test.mjs](../../tests/integration/harness-topology-k3d-real.test.mjs)                       | Pod-replacement continuity, secret rotation/rejection, and startup-failure durability with real runtimes.                                                         |
 | `k3d-model`        | [local-first-agent-real.test.mjs](../../tests/integration/local-first-agent-real.test.mjs)                             | Fresh local Agent deployment and reuse with real model replies; external changes block credential replacement.                                                    |
