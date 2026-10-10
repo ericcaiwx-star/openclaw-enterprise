@@ -367,7 +367,8 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
       // cursor poll without `sinceSeconds` (after an empty page) reads nothing older.
       gapFloor ?? (continuing ? baseTime : (sinceTime ?? null)),
     );
-    const unobservableTail = retainCheckpoint && chunk.bufferTotal >= tailLines;
+    const unobservableTail =
+      (retainCheckpoint || checkpoint !== undefined) && chunk.bufferTotal >= tailLines;
     const records = [
       ...leading,
       ...(unobservableTail && window.overflow === null

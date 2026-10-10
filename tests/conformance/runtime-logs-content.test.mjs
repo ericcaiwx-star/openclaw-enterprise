@@ -2664,6 +2664,48 @@ test("container empty checkpoint recovery suppresses the next single untimed sna
   assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
 });
 
+test("container checkpoints preserve the existing overlap through backend processing delay", async () => {
+  const { createRuntimeLogFixture, createRuntimeLogComputeDriver } =
+    await import("../helpers/runtime-logs.mjs");
+  const underlying = createRuntimeLogComputeDriver();
+  const read = underlying.readAgentRuntimeLogs.bind(underlying);
+  let calls = 0;
+  const driver = {
+    ...underlying,
+    async readAgentRuntimeLogs(binding, request) {
+      calls += 1;
+      if (calls === 1) {
+        const time = new Date(Date.now() - request.sinceSeconds * 1000 + 500).toISOString();
+        underlying.state.lines = wireContainerRows(time);
+      }
+      const chunk = await read(binding, request);
+      // Equivalent backend processing time, without changing the host clock or reader.
+      const floor = Date.now() + (calls === 1 ? 0 : 1800) - request.sinceSeconds * 1000;
+      return { ...chunk, lines: chunk.lines.filter(({ time }) => Date.parse(time) >= floor) };
+    },
+  };
+  const fixture = await createRuntimeLogFixture({ computeDriver: driver });
+  const target = await fixture.deployAgent("container-processing-delay");
+  const first = await fixture.request(
+    "GET",
+    target.logsPath("source=gateway&tailLines=200&sinceSeconds=60"),
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  const next = await fixture.request(
+    "GET",
+    target.logsPath(`source=gateway&tailLines=200&cursor=${first.data.cursor}`),
+  );
+  assert.equal(next.status, 200);
+  const seen = [...messages(first.data), ...messages(next.data)].map((message) =>
+    Number(/^row=(\d+);/.exec(message)[1]),
+  );
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 60 }, (_, index) => index),
+  );
+});
+
 test("container checkpoint windows remain stable when relative seconds round outward", async () => {
   const { createRuntimeLogFixture, createRuntimeLogComputeDriver } =
     await import("../helpers/runtime-logs.mjs");

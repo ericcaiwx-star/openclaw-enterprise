@@ -1,18 +1,16 @@
 ---
 created: 2026-09-30
 updated: 2026-10-10
-last_updated_session: authoring-run/9cfa5b3b-2ef8-4413-a9ec-458eb1ba7fdd
+last_updated_session: authoring-run/e28bad2a-a77a-4033-aa7c-174ac006a870
 ---
 
 # Agent runtime logs flow
 
 ## Overview
 
-An authorized reader requests Pod status or one page of container output for an
-admitted Agent revision. OpenClaw Control Plane (OCC) authorizes the exact target,
-asks the selected Compute Driver for raw Kubernetes data, and returns only
-classified, redacted, bounded records. OCC does not persist logs; downloads
-stay on the reader's device.
+For an admitted Agent revision, OpenClaw Control Plane (OCC) authorizes status/log
+reads, obtains raw data through its Compute Driver and returns classified,
+redacted, bounded records. Logs are not persisted; downloads stay on the reader's device.
 
 ## Entry Points
 
@@ -170,7 +168,7 @@ batches them, and filters `since_time` by that stamp, so a resume sends a time
 keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
 Signed cut checkpoints retain the raw-prefix digest/count, query floor and pre-cut
-baseline. Sandbox checkpoints reuse outer time/hashes for the baseline. Fixed-width hashes
+baseline. Container requests keep the two-second overlap, then filter to the saved floor. Sandbox checkpoints reuse outer time/hashes for the baseline. Fixed-width hashes
 and window tuples retain occurrences within response and query cursor limits. All-untimed byte-cut prefixes retain consumed progress; mixed prefixes advance
 through delivered time with an explicit `window_exceeded` reset, which may replay
 untimed rows. Known container times retain
@@ -241,6 +239,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 08:12: Retain overlap and Sandbox gaps. (authoring-run/e28bad2a-a77a-4033-aa7c-174ac006a870 - a2911f897dfdd9d748f8e65065da5196b7749eff)
 
 - 2026-10-10 07:56: Preserve full-window gaps through final drain. (authoring-run/9cfa5b3b-2ef8-4413-a9ec-458eb1ba7fdd - 5533e03c05db33fdec64574893190f8ec4096bb0)
 

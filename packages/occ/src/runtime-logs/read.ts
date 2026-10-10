@@ -256,7 +256,10 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
         ? undefined
         : Math.min(
             86_400,
-            Math.max(1, Math.ceil((now() - Date.parse(checkpoint.sinceTime)) / 1000)),
+            Math.max(
+              1,
+              Math.ceil((now() - Date.parse(checkpoint.sinceTime)) / 1000) + RESUME_OVERLAP_SECONDS,
+            ),
           )
       : resume !== undefined
         ? secondsSince(Date.parse(resume.lastTime!))
@@ -588,7 +591,7 @@ export async function readRuntimeLogPage(input: ReadRuntimeLogPageInput): Promis
       // retained every occurrence; preserve its gap on the final delivered page.
       ...(!skipStalled &&
       (retainCheckpoint || checkpoint !== undefined) &&
-      (chunk.lines.length >= query.tailLines || chunk.truncated) &&
+      (completeLines.length >= query.tailLines || chunk.truncated) &&
       !leading.some((record) => record.type === "gap" && record.reason === "window_exceeded")
         ? [runtimeLogGap("window_exceeded", observedStream, earliest)]
         : []),

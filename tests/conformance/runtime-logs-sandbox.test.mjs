@@ -1170,6 +1170,39 @@ test("sandbox empty checkpoint recovery suppresses the next single untimed snaps
   assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
 });
 
+test("sandbox full timed checkpoints retain their gap through final drain below hash capacity", async () => {
+  const fixture = await sandboxFixture();
+  fixture.gateway.state.lines = Array.from({ length: 40 }, () =>
+    sandboxLine(1, `same diagnostic ${'"'.repeat(8000)}`),
+  );
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=40"),
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  const last = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=40&cursor=${first.data.cursor}`),
+  );
+  assert.equal(last.status, 200);
+  assert.equal(last.data.truncated, false);
+  assert.equal(
+    [...first.data.records, ...last.data.records].filter(({ type }) => type === "line").length,
+    40,
+  );
+  assert.ok(
+    last.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
+    "identical rolling remains unobservable after the checkpoint closes",
+  );
+  assert.ok(Buffer.byteLength(last.text) <= 512 * 1024);
+  const replay = await fixture.request(
+    "GET",
+    fixture.target.logsPath(`source=sandbox&tailLines=40&cursor=${last.data.cursor}`),
+  );
+  assert.equal(replay.data.records.filter(({ type }) => type === "line").length, 0);
+});
+
 for (const wideIdentity of [false, true]) {
   test(`sandbox full overlap cuts keep ${wideIdentity ? "maximum Driver identities" : "legacy cursors"} within admission limits`, async () => {
     const cursorSecret = "disposable-legacy-baseline-cursor-secret-32";
