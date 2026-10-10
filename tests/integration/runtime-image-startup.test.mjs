@@ -2439,3 +2439,127 @@ http.createServer((req, res) => {
     }
   },
 );
+
+test(
+  "runtime image Kubernetes admission refuses healthy native listeners that cannot serve Pod-IP traffic",
+  imageTestOptions,
+  async (t) => {
+    const driver = plaintextGatewayComputeDrivers()[0][1];
+    const network = `oce-native-bind-${randomBytes(6).toString("hex")}`;
+    await runDocker(["network", "create", "--internal", network]);
+    const runtimeCleanups = [];
+    t.after(async () => {
+      for (const cleanup of runtimeCleanups.reverse()) {
+        await cleanup();
+      }
+      await runDocker(["network", "rm", network]);
+    });
+    const directory = await mkdtemp(join(tmpdir(), "oce-native-bind-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const provider = String.raw`
+const http = require("node:http");
+let modelCalls = 0;
+http.createServer((req, res) => {
+  if (req.method === "POST") modelCalls++;
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify(req.url === "/counter" ? { modelCalls } : { data: [{ id: "fixture" }] }));
+}).listen(18880, "127.0.0.1");
+`;
+    for (const [gateway, reachable] of [
+      [{ bind: "loopback" }, false],
+      [{ bind: "custom", customBindHost: "127.0.0.1" }, false],
+      [{ bind: "tailnet" }, false],
+      [{ bind: "lan" }, true],
+      [{ bind: "auto" }, true],
+      [{ bind: "custom", customBindHost: "0.0.0.0" }, true],
+      [{}, true],
+    ]) {
+      const configuration = driver.kubernetesGatewayConfigurationDocument(
+        createAdmittedRuntimeImageConfiguration("openclaw"),
+      );
+      delete configuration.gateway.bind;
+      Object.assign(configuration.gateway, gateway);
+      configuration.models.providers.openai.baseUrl = "http://127.0.0.1:18880/v1";
+      configuration.models.providers.openai.apiKey = "synthetic-owned-native-bind";
+      const path = join(directory, "openclaw.json");
+      // Private directory, read-only mount, synthetic input readable by native UID1000.
+      await writeFile(path, JSON.stringify(configuration), { mode: 0o644 });
+      // Feed native-valid inputs independently of admission to establish which
+      // healthy listeners cannot serve the actual Service-facing address.
+      const { containerName } = await runGatewaySmoke(
+        { after: (cleanup) => runtimeCleanups.push(cleanup) },
+        "openclaw",
+        {
+          configurationPath: "/etc/openclaw/openclaw.json",
+          entrypoint: provider + KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
+          network,
+          volumes: [`${path}:/etc/openclaw/openclaw.json:ro`],
+          waitUntilReady: false,
+          withAppServer: false,
+          extraEnvironment: [
+            "OPENCLAW_RUNTIME_STATUS_PORT=18791",
+            "OPENCLAW_RUNTIME_STATUS_CONTAINER=gateway",
+            "OPENCLAW_AGENT_REVISION_ID=owned-native-bind",
+            "OPENCLAW_POD_UID=owned-native-bind",
+          ],
+        },
+      );
+      let ready = false;
+      for (let attempt = 0; attempt < 80 * imageSmokeTimeoutMultiplier; attempt++) {
+        try {
+          await runDocker([
+            "exec",
+            containerName,
+            "node",
+            "-e",
+            'fetch("http://127.0.0.1:18791/readyz").then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1));',
+          ]);
+          ready = true;
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      assert.equal(ready, true, commandOutput(await runDocker(["logs", containerName])));
+      const inspected = JSON.parse((await runDocker(["inspect", containerName])).stdout)[0];
+      const address = inspected.NetworkSettings.Networks[network].IPAddress;
+      assert.ok(address);
+      const remote = await runDocker([
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network",
+        network,
+        "--entrypoint",
+        "node",
+        image,
+        "-e",
+        `Promise.all([8080,18791].map(async port=>{try{const r=await fetch("http://${address}:"+port+"/readyz",{signal:AbortSignal.timeout(3000)});return {port,status:r.status};}catch(e){return {port,error:e.cause?.code??e.name};}})).then(v=>console.log(JSON.stringify(v)));`,
+      ]);
+      const [native, status] = JSON.parse(remote.stdout.trim());
+      assert.equal(status.status, 200);
+      if (reachable) {
+        assert.equal(native.status, 200);
+        assert.doesNotThrow(() => driver.validateGatewaySettings(configuration));
+      } else {
+        assert.equal(native.error, "ECONNREFUSED");
+        assert.throws(
+          () => driver.validateGatewaySettings(configuration),
+          /gateway\.(bind|customBindHost)/,
+        );
+      }
+      const counter = await runDocker([
+        "exec",
+        containerName,
+        "node",
+        "-e",
+        'fetch("http://127.0.0.1:18880/counter").then(r=>r.json()).then(v=>console.log(v.modelCalls));',
+      ]);
+      assert.equal(Number(counter.stdout.trim()), 0);
+      t.diagnostic(
+        `native bind=${gateway.bind ?? "omitted"} host=${gateway.customBindHost ?? "default"}: private ready=200, Pod-IP ${reachable ? "ready=200" : "ECONNREFUSED"}, modelCalls=0`,
+      );
+      await runDocker(["rm", "-f", containerName]);
+    }
+  },
+);

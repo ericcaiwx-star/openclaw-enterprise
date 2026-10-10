@@ -350,6 +350,62 @@ export async function runWritableGatewayRestart(t) {
   const fresh = await waitState(replacement.containerName, "fresh Pod-local copy", (s) => s.ready);
   assert.equal(fresh.prefix, undefined, "a fresh Pod-local copy restores the admitted snapshot");
   assert.equal(fresh.bridge.plugins.linear.enabled, false);
+  // The peer bridge record survives container restarts in its Pod. An unreadable one
+  // (here truncated, as an unsynced write after node power loss could leave it) must hold
+  // the wrapper unready with its cause reported, not crash-loop on a bare SyntaxError.
+  const record = "/home/node/.openclaw/openclaw.json.oce-peer-bridge.json";
+  await runDocker([
+    "exec",
+    replacement.containerName,
+    "node",
+    "-e",
+    `const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(record)},fs.readFileSync(${JSON.stringify(record)},"utf8").slice(0,-5));`,
+  ]);
+  await runDocker(["restart", "--time", "350", replacement.containerName], { timeout: 360_000 });
+  const heldDeadline = Date.now() + 60_000;
+  let held;
+  while (Date.now() < heldDeadline) {
+    const observed = JSON.parse(
+      (await runDocker(["inspect", replacement.containerName])).stdout,
+    )[0];
+    assert.equal(observed.State.Running, true, "an unreadable record holds instead of exiting");
+    try {
+      held = JSON.parse(
+        (
+          await runDocker([
+            "exec",
+            replacement.containerName,
+            "node",
+            "-e",
+            `Promise.all([fetch("http://127.0.0.1:18791/readyz"),fetch("http://127.0.0.1:18791/openclaw/runtime/status").then((r)=>r.json())]).then(([ready,status])=>console.log(JSON.stringify({ready:ready.status,failure:status.runtimeFailure}))).catch(()=>process.exit(1));`,
+          ])
+        ).stdout.trim(),
+      );
+    } catch {
+      held = undefined;
+    }
+    if (held?.failure !== undefined) {
+      break;
+    }
+    await delay(250);
+  }
+  assert.equal(held?.failure?.check, "peer-bridge-record", JSON.stringify(held));
+  assert.equal(held.failure.code, "UNAVAILABLE");
+  assert.notEqual(held.ready, 200);
+  const heldLogs = await runDocker(["logs", replacement.containerName]);
+  assert.match(
+    heldLogs.stderr + heldLogs.stdout,
+    /Gateway peer configuration record \/home\/node\/\.openclaw\/openclaw\.json\.oce-peer-bridge\.json is unreadable\. OpenClaw was not started\. Delete the Pod/,
+  );
+  // Deleting the Pod is the remedy: the held wrapper ends on SIGTERM without the grace period.
+  const stopStartedAt = Date.now();
+  await runDocker(["stop", "--time", "60", replacement.containerName], { timeout: 90_000 });
+  const heldStopMs = Date.now() - stopStartedAt;
+  const heldStopped = JSON.parse(
+    (await runDocker(["inspect", replacement.containerName])).stdout,
+  )[0];
+  assert.equal(heldStopped.State.ExitCode, 0);
+  assert.ok(heldStopMs < 30_000, `held wrapper stop took ${heldStopMs} ms`);
   const logs = await runDocker(["logs", first.containerName]);
   assert.match(logs.stderr + logs.stdout, /OpenClaw Codex bridge configuration conflicts/);
   t.diagnostic(
@@ -365,6 +421,8 @@ export async function runWritableGatewayRestart(t) {
       nativeEditRetained: recovered.prefix === afterRestart.prefix,
       explicitBridgeRefused: stopped.State.ExitCode,
       freshCopyRestored: fresh.prefix === undefined,
+      unreadableRecordHeld: held.failure.check,
+      heldStopMs,
     }),
   );
 }

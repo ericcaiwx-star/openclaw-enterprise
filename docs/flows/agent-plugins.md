@@ -273,7 +273,9 @@ the read-only managed snapshot. A Pod-local record binds the last and pending
 generated bridges to the revision and snapshot hash before configuration writes.
 Process and same-Pod container restarts rebuild only a matching generated bridge.
 Other native edits survive; conflicting bridge edits retain the existing refusal.
-Pod replacement restores the snapshot and clears this private record.
+An unreadable or mismatched record holds startup unready, reporting runtime
+failure `peer-bridge-record` (`UNAVAILABLE`), and logs the remedy: replace the
+Pod, which restores the snapshot and clears this private record.
 During an outage, the supervisor reports unready. Kubernetes propagates that
 state asynchronously, so the signal alone is not a per-request traffic fence.
 If OpenClaw exits while the supervisor waits for its peer, the wrapper exits
@@ -349,6 +351,8 @@ deadline.
 - 2026-10-10 04:49: Preserve writable native configuration during Harness peer recovery and same-Pod container restarts. (codex/thirty-compute-07-oct10 - 8e5a06ce)
 
 - 2026-10-10 04:10: Check the Codex automatic reviewer policy at Agent create and update too. (fix-994-995)
+
+- 2026-10-10 04:00: Hold an unusable writable-configuration peer bridge record unready with its file and remedy named. (fix-994-995)
 
 - 2026-10-10 00:30: Keep the earlier Codex `config.toml` of revisions prepared before an upgrade. (fix-982)
 
