@@ -57,32 +57,34 @@ access to the native gateway port for this mode.
 
 ### Gateway authentication
 
-Kubernetes Compute supports trusted-proxy gateway authentication only, for
-embedded and dedicated Agents, with or without private routing. At deployment,
-it renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
+Kubernetes Compute supports only trusted-proxy authentication for embedded and
+dedicated Agents, with or without private routing. It renders `gateway.trustedProxies` from `network.gatewayTrustedProxyCidrs`,
 `gateway.auth.mode: trusted-proxy`, `userHeader: x-occ-identity`, the allowed
 identity `occ-workspace-files` with `operator.admin`, and
-`gateway.allowRealIpFallback: true`. Agent Configuration and Console starters
-can omit those fields. Unsupported gateway authentication fields or conflicting
-tenant trust fields fail deployment; matching explicit CIDR lists are accepted
-regardless of order. Deployment and Agent provisioning check the same fields
-when they admit a request and answer `409 RESOURCE_CONFLICT` naming the refused
-setting and what is accepted, for example `Configuration setting gateway.auth.mode must be
+`gateway.allowRealIpFallback: true`. Configuration and Console starters
+can omit these fields. Unsupported auth fields or conflicting trust fields fail
+deployment; matching CIDR lists are accepted regardless of order. Deployment and
+provisioning check the same fields and answer `409 RESOURCE_CONFLICT` naming the setting and requirement, for example `Configuration setting gateway.auth.mode must be
 trusted-proxy: …`, never its value. `trustedProxy.allowUsers` is checked later:
-provisioning answers the fixed `409` text, with the reason in the API log, and a
-deployment is admitted and then fails with `DEPENDENCY_UNAVAILABLE`, with the
-reason in the worker's `worker.compute-prepare-failed` line. `trustedProxy.allowLoopback` must be omitted or false:
+provisioning returns fixed `409` text with the reason in the API log; deployment
+is admitted, then fails with `DEPENDENCY_UNAVAILABLE` and the reason in the
+worker's `worker.compute-prepare-failed` line. `trustedProxy.allowLoopback` must be omitted or false:
 loopback access uses the separate password, not proxy identity headers. Native
 required-header and device auto-approval settings retain their separate purposes.
 
-An optional [loopback password](storage-and-credentials.md#runtime-credentials)
-supports operator verification; it does not change the gateway's authentication mode.
-Kubernetes sends `GET /readyz` to the private runtime status port. Its empty
-`200` or `503` preserves each runtime's existing readiness gates. Docker and SSH
-default to managed password
-authentication and also support explicit trusted proxy.
+`gateway.bind` must serve Pod-IP traffic. Deployment/provisioning refuse
+`loopback`, `tailnet`, and `custom` with loopback IPv4 `gateway.customBindHost`;
+omitted/auto/lan/nonloopback custom retain native semantics. SSH's local
+listener is separate.
 
-Operators must verify that the configured CIDRs contain the proxy's actual
+An optional [loopback password](storage-and-credentials.md#runtime-credentials)
+supports operator verification without changing authentication mode.
+Kubernetes private status-port `GET /readyz` returns empty `200`/`503`, retaining
+readiness gates; Gateway probes HTTP. `gateway.tls.enabled: true` is refused
+before revision creation; omit/false is valid. Envoy terminates TLS. Docker/SSH
+retain managed-password defaults and explicit trusted-proxy HTTP.
+
+Operators must verify that configured CIDRs contain the proxy's
 source addresses and exclude untrusted sources. CIDRs do not authenticate a
 proxy: retain the exact Envoy NetworkPolicy peer, TLS verification, service-key
 authentication, and identity/header sanitization.

@@ -436,6 +436,15 @@ test("startup pairs the Credential Refresh Driver with its gateway on one OpenSh
     offered.filter(({ rotation }) => rotation === "refresh").map(({ type }) => type),
     ["oauth2-client-credentials", "oauth2-refresh-token"],
   );
+  // The issuer replaces a refresh token on use, so an update must not re-send the recorded one.
+  assert.deepEqual(
+    offered.flatMap(({ type, secrets }) =>
+      secrets
+        .filter(({ issuerRotated }) => issuerRotated === true)
+        .map(({ name }) => `${type}.${name}`),
+    ),
+    ["oauth2-refresh-token.refresh_token"],
+  );
   const withoutRefresh = sandboxInstallation();
   withoutRefresh.drivers.credential_gateway.configuration.toolBinaries = ["/usr/bin/curl"];
   const staticOnly = await loadInstallationFile(t, withoutRefresh);

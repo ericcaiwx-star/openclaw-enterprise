@@ -272,7 +272,9 @@ export async function loadDriverPackage(
 
   let installedManifest: ConfigurationRecord | undefined;
   try {
-    installedManifest = asRecord(JSON.parse(await readFile(installedManifestPath, "utf8")));
+    // Node accepts one leading UTF-8 byte order mark in package metadata.
+    const text = (await readFile(installedManifestPath, "utf8")).replace(/^\uFEFF/, "");
+    installedManifest = asRecord(JSON.parse(text));
     if (installedManifest === undefined) {
       throw new Error(`${path}.package manifest must be one object.`);
     }

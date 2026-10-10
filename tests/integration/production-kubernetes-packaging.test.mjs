@@ -308,6 +308,36 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
 });
 
 test(
+  "database routing refuses invalid ports before emitting NetworkPolicies",
+  tooling,
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "oce-database-port-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const valuesFile = join(directory, "ports.yaml");
+    for (const port of [5342.5, 65536, 0, -1, "05342", "postgresql", "9223372036854775808"]) {
+      await writeFile(valuesFile, `database:\n  port: ${JSON.stringify(port)}\n`);
+      await assert.rejects(
+        render({}, { valuesFiles: [valuesFile] }),
+        ({ code, stderr }) => code !== 0 && stderr.includes("database.port must be"),
+        JSON.stringify(port),
+      );
+    }
+    for (const port of [1, 5433, 65535, "5433"]) {
+      await writeFile(valuesFile, `database:\n  port: ${JSON.stringify(port)}\n`);
+      const objects = await resources((await render({}, { valuesFiles: [valuesFile] })).stdout);
+      const databaseRules = objects
+        .filter((object) => object.kind === "NetworkPolicy")
+        .flatMap((object) => object.spec.egress ?? [])
+        .filter((rule) => rule.to?.some((peer) => peer.ipBlock?.cidr === "10.45.0.12/32"));
+      assert.equal(databaseRules.length, 2, "bootstrap and controller database routing");
+      for (const rule of databaseRules) {
+        assert.deepEqual(rule.ports, [{ protocol: "TCP", port: Number(port) }]);
+      }
+    }
+  },
+);
+
+test(
   "gateway routing refuses fractional YAML ports before emitting resources",
   tooling,
   async (t) => {
@@ -722,6 +752,19 @@ test("production native examples satisfy the current Helm, Installation, and PVC
       environment: { OCC_CONFIG_PATH: unquotedPath },
     }),
     /drivers\.compute\.configuration does not match its Driver configuration schema at \/resources\/gateway\/limits\/cpu: must be string/,
+  );
+  // Trusted Installation startup must reject a validly spelled request that
+  // Kubernetes refuses against its smaller limit, before any cluster operation.
+  const impossible = loadYaml(example.replace("<actual-proxy-source-cidr>", "192.0.2.10/32"));
+  impossible.drivers.compute.configuration.resources.gateway.requests.cpu = "5";
+  const impossiblePath = join(directory, "request-over-limit.yaml");
+  await writeFile(impossiblePath, JSON.stringify(impossible));
+  await assert.rejects(
+    loadInstallationConfiguration({
+      mode: "production",
+      environment: { OCC_CONFIG_PATH: impossiblePath },
+    }),
+    /Gateway CPU request \(resources\.gateway\.requests\.cpu\) cannot exceed its limit/,
   );
   const values = loadYaml(await readFile(new URL("values.yaml", productionExamples), "utf8"));
   assert.equal(values.gatewayRouting.enabled, true);
@@ -3389,6 +3432,21 @@ test(
   "the real Helm renderer rejects mutable images, broad dependencies, and shared credentials",
   tooling,
   async () => {
+    // Helm accepts dotted and overlong --namespace values, but Kubernetes
+    // Namespace admission requires a single DNS-1123 label of at most 63.
+    for (const namespace of ["openclaw.system", "a".repeat(64), "a".repeat(253)]) {
+      await assert.rejects(
+        render({}, { namespace }),
+        /Helm release namespace must be a DNS-1123 label of at most 63 characters/,
+      );
+    }
+    for (const namespace of ["1system", "0", "a".repeat(63)]) {
+      const objects = await resources(
+        (await render(externalGatewayRoutingValues, { namespace })).stdout,
+      );
+      const gateway = objects.find((object) => object.kind === "Gateway");
+      assert.equal(gateway.metadata.namespace, namespace);
+    }
     for (const [description, override] of [
       ["mutable controller", { "images.controller": "registry.example/controller:latest" }],
       ["missing Better Auth secret", { "auth.secretName": "" }],
@@ -4139,6 +4197,124 @@ test("Helm renders a values-file worker timeout of 1800000 as digits", tooling, 
   const rendered = await render({}, { valuesFiles: [valuesFile] });
   assert.match(rendered.stdout, /name: OCC_WORKER_CONVERGENCE_TIMEOUT_MS\n\s+value: "1800000"/);
   assert.doesNotMatch(rendered.stdout, /OCC_WORKER_CONVERGENCE_TIMEOUT_MS\n\s+value: "1\.8e\+06"/);
+});
+
+test("production peer matchLabels keep the native Kubernetes map contract", tooling, async (t) => {
+  const scrapers = {
+    "metrics.scraperNamespaceLabels.team": "observability",
+    "metrics.scraperPodLabels.app": "prometheus",
+  };
+  const exporter = {
+    ...productionCollectorValues,
+    "logging.collector.exporter.cidr": "",
+    "logging.collector.exporter.namespaceLabels.team": "logs",
+    "logging.collector.exporter.podLabels.app": "loki",
+  };
+  const collectorScrapers = {
+    ...productionCollectorValues,
+    "logging.collector.metrics.scraperNamespaceLabels.team": "observability",
+    "logging.collector.metrics.scraperPodLabels.app": "prometheus",
+  };
+  const sandbox = {
+    ...gatewayRoutingValues,
+    "gatewayRouting.sandbox.enabled": "true",
+    "gatewayRouting.sandbox.domain": "sandbox.example.test",
+    "gatewayRouting.sandbox.tlsSecretName": "sandbox-tls",
+    "gatewayRouting.sandbox.ingressPeers[0].namespaceSelector.matchLabels.team": "public",
+    "gatewayRouting.sandbox.ingressPeers[0].podSelector.matchLabels.app": "edge",
+  };
+  const callers = [
+    ["api.clients[0].podLabels", {}],
+    ["dns.podLabels", {}],
+    ["gatewayRouting.envoyGatewayPodLabels", gatewayRoutingValues],
+    ["metrics.scraperNamespaceLabels", scrapers],
+    ["metrics.scraperPodLabels", scrapers],
+    ["logging.collector.exporter.namespaceLabels", exporter],
+    ["logging.collector.exporter.podLabels", exporter],
+    ["logging.collector.metrics.scraperNamespaceLabels", collectorScrapers],
+    ["logging.collector.metrics.scraperPodLabels", collectorScrapers],
+    ["gatewayRouting.sandbox.ingressPeers[0].namespaceSelector.matchLabels", sandbox],
+    ["gatewayRouting.sandbox.ingressPeers[0].podSelector.matchLabels", sandbox],
+  ];
+  for (const [field, configuration] of callers) {
+    await assert.rejects(
+      render({ ...configuration, [`${field}.probe`]: "true" }),
+      ({ stderr }) => stderr.includes(field),
+      `Must refuse the active caller's boolean label: ${field}`,
+    );
+    await render(configuration, { strings: { [`${field}.probe`]: "true" } });
+  }
+  for (const shape of ["true", "31", "{value}", "value"]) {
+    await assert.rejects(
+      render({ "api.clients[0].podLabels": shape }),
+      /api\.clients\[0\]\.podLabels/,
+    );
+  }
+  for (const value of ["false", "31", "{nested}", "kube/dns", "a".repeat(64)]) {
+    await assert.rejects(
+      render({ "api.clients[0].podLabels.probe": value }),
+      /api\.clients\[0\]\.podLabels/,
+    );
+  }
+  for (const key of ["Example.com/Name", "example.com/", "a/b/c", `${"a".repeat(254)}/Name`]) {
+    await assert.rejects(
+      render(
+        {},
+        { strings: { [`api.clients[0].podLabels.${key.replaceAll(".", "\\.")}`]: "value" } },
+      ),
+      /api\.clients\[0\]\.podLabels/,
+    );
+  }
+  for (const [key, value] of [
+    ["looksTrue", "true"],
+    ["looksFalse", "false"],
+    ["looksNumeric", "31"],
+    ["looksExponent", "1e3"],
+    ["looksNull", "null"],
+    ["empty", ""],
+    ["example.com/Name_1", ""],
+    [`${"a".repeat(253)}/Name`, "x"],
+    ["a".repeat(63), "b".repeat(63)],
+  ]) {
+    const objects = await resources(
+      (
+        await render(
+          {},
+          { strings: { [`api.clients[0].podLabels.${key.replaceAll(".", "\\.")}`]: value } },
+        )
+      ).stdout,
+    );
+    const policy = objects.find(
+      ({ metadata }) => metadata.name === "openclaw-enterprise-api-ingress",
+    );
+    assert.equal(policy.spec.ingress[0].from[0].podSelector.matchLabels[key], value);
+  }
+  await render({ "api.clients[0].podLabels.empty": "null" });
+  await render({ "metrics.scraperNamespaceLabels": "false", "metrics.scraperPodLabels": "false" });
+  const directory = await mkdtemp(join(tmpdir(), "occ-peer-labels-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "values.json");
+  const sandboxOptions = Object.fromEntries(
+    Object.entries(sandbox).filter(([key]) => !key.includes("ingressPeers")),
+  );
+  for (const shape of [null, {}]) {
+    await writeFile(
+      path,
+      JSON.stringify({
+        gatewayRouting: {
+          sandbox: {
+            ingressPeers: [
+              {
+                namespaceSelector: { matchLabels: shape },
+                podSelector: { matchLabels: { app: "edge" } },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    await render(sandboxOptions, { valuesFiles: [path] });
+  }
 });
 
 test("Collector exporter ports preserve decimal meaning in Kubernetes YAML", tooling, async () => {

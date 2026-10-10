@@ -1368,6 +1368,7 @@ export const scenarios = {
     pluginCapabilities,
     pluginCatalog: {
       status: "error",
+      canLoad: true,
       message: "This credential does not have access to the plugin catalog.",
     },
     description:
@@ -1383,6 +1384,7 @@ export const scenarios = {
     pluginCapabilities,
     pluginCatalog: {
       status: "error",
+      canLoad: true,
       message: "The plugin catalog could not be loaded. Try again after restoring connectivity.",
     },
     description: "A simulated catalog failure is shown as an error, not a successful empty result.",
@@ -1395,7 +1397,7 @@ export const scenarios = {
     actions: [click("Configure plugins")],
     pluginCapabilities,
     description:
-      "The component explains that discovery requires an entered service account token with the Codex harness.",
+      "The component explains that discovery requires an entered service account token with the Codex harness. The empty list points to Plugin selections JSON for adding a plugin by ID instead of the unavailable Load plugins.",
   },
   pluginsCapabilitiesUnavailable: {
     group: "Components/Plugins",
@@ -2075,6 +2077,39 @@ export const scenarios = {
     rules: [{ path: presetSecretsPath.replace(/secrets$/, "presets"), status: 403 }],
     description:
       "Denied Preset access leaves quick-start disabled and reports the error. Start without Preset remains available as a separate action.",
+  },
+  createPresetInvalidField: {
+    group: "Pages/Create Agent",
+    name: "Preset with an invalid field",
+    path: create,
+    presetAgent: { executionMode: "turbo" },
+    actions: [
+      { selector: "#agent-preset", value: "pre_00000000-0000-4000-8000-000000000001" },
+      { selector: "#preset-variable-name", value: "Codex assistant" },
+      click("Use Preset"),
+    ],
+    description:
+      "The Preset API saves launch-field errors such as an unknown execution mode. Use Preset names the first field the form cannot use and keeps the chooser open.",
+    gap: "The fixture edits a simulated Preset; Preset CRUD has no console page.",
+  },
+  createCapabilitiesDenied: {
+    group: "Pages/Create Agent",
+    name: "Agent creation needs an administrator",
+    path: create,
+    actions: form,
+    rules: [{ path: "/installation", status: 403, code: "FORBIDDEN" }],
+    description:
+      "A member without Installation access can open the form, but Create Agent stays disabled and the page says an Installation administrator must create the Agent. No retry is offered.",
+    gap: "Namespace IAM cannot grant create; the live check is a member account on a real Installation.",
+  },
+  createCapabilitiesError: {
+    group: "Pages/Create Agent",
+    name: "Capability check failure",
+    path: create,
+    actions: form,
+    rules: [{ path: "/installation", status: 503, code: "DEPENDENCY_UNAVAILABLE" }],
+    description:
+      "A transient capability-read failure keeps Create Agent disabled and offers Retry capability check.",
   },
   createNoPresets: {
     group: "Pages/Create Agent",
