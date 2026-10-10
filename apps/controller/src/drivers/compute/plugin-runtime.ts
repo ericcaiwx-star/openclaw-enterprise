@@ -185,11 +185,11 @@ function codexToml(
 }
 
 /**
- * The session policy the pinned Gateway runs for a configured `appServer.approvalPolicy`.
- * Native startup reads it before the Gateway can create a session, so its reviewer checks see
- * the same policy. The Gateway runs `on-failure` as `on-request`; other choices, including
- * incompatible ones that readiness rejects, are kept. Deployment refuses `untrusted`, which the
- * Gateway refuses at configuration load, and an omitted policy with an automatic reviewer.
+ * The session policy the pinned Gateway runs for a configured `appServer.approvalPolicy`
+ * (see `apps/controller/src/gateway/codex-approval-policy.ts`). Native startup reads it before
+ * the Gateway can create a session, so its reviewer checks see the same policy. The Gateway
+ * runs `on-failure` as `on-request`; other choices, including incompatible ones that
+ * readiness rejects, are kept.
  */
 function nativeCodexApprovalPolicy(approvalPolicy: string | undefined): string | undefined {
   return approvalPolicy === "on-failure" ? "on-request" : approvalPolicy;

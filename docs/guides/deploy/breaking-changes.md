@@ -12,9 +12,9 @@ real Installation.
 
 ## 2026-10-10: Codex approval policy is checked before deployment
 
-**What breaks.** Configuration saves, provisioning, and deployment answer `400`
-when `plugins.entries.codex.config.appServer.approvalPolicy` is `untrusted`.
-Provisioning and deployment also answer `400` when an enabled plugin selection
+**What breaks.** Provisioning and deployment answer `409` when
+`plugins.entries.codex.config.appServer.approvalPolicy` is `untrusted` (Compute
+Drivers also refuse to prepare it), and `400` when an enabled plugin selection
 sets `toolDefaults.reviewer` to `auto` and that policy is omitted or `never`.
 Native startup checks the automatic reviewer against the policy Compute renders,
 but with the policy omitted the Gateway picks its own, which can be `never`.
@@ -25,7 +25,7 @@ Agents with an automatic plugin reviewer whose Configuration omits the policy.
 With `never`, deployment now refuses what readiness refused before. Every
 bundled Preset sets the policy.
 
-**How to tell.** The `400` names the setting.
+**How to tell.** The `409` or `400` names the setting.
 
 **Steps.** Set the policy to `on-request`, or choose the human reviewer, then
 deploy the Agent again. `on-failure` still works; native startup now gets

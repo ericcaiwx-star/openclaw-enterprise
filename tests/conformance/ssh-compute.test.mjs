@@ -963,6 +963,20 @@ test("SSH revisions fail closed on unbound identities, unsupported topology, san
       /gateway authentication|OPENCLAW_GATEWAY_PASSWORD|gateway\.tls\.enabled/,
     );
   }
+  await assert.rejects(
+    f.driver.prepareRevision({
+      ...rev,
+      configuration: admitLoggingConfiguration(
+        {
+          plugins: {
+            entries: { codex: { config: { appServer: { approvalPolicy: "untrusted" } } } },
+          },
+        },
+        "info",
+      ),
+    }),
+    /appServer\.approvalPolicy must not be "untrusted", which the OpenClaw runtime retired/,
+  );
   // Bind an Agent in a second Namespace; a revision naming it reaches the ownership check.
   const otherNamespace = { ...tenant, id: "ns-ssh-other" };
   bind(f.driver, revision(f.driver, 1, "agent-ssh-other"), otherNamespace);

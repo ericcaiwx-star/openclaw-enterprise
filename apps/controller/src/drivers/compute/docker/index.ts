@@ -41,6 +41,7 @@ import {
   pluginRuntimeSpecForRevision,
 } from "../plugin-runtime.ts";
 import { validatePlaintextNativeGateway } from "../native-gateway-transport.ts";
+import { validateCodexApprovalPolicySetting } from "../../../gateway/codex-approval-policy.ts";
 import { unsupportedNativeGatewayAuthFields } from "../../../gateway/auth-fields.ts";
 
 export interface DockerComputeDriverOptions {
@@ -138,11 +139,13 @@ function dockerGatewayConfigurationDocument(configuration: OpenClawConfiguration
   readonly configuration: OpenClawConfigurationDocument;
   readonly requiresManagedPassword: boolean;
 } {
-  validatePlaintextNativeGateway(
-    configuration,
-    (setting, requirement) =>
-      new ConfigurationFailure(`Configuration setting ${setting} ${requirement}.`),
-  );
+  for (const validate of [validatePlaintextNativeGateway, validateCodexApprovalPolicySetting]) {
+    validate(
+      configuration,
+      (setting, requirement) =>
+        new ConfigurationFailure(`Configuration setting ${setting} ${requirement}.`),
+    );
+  }
   const gatewayRecord = asRecord(configuration.gateway);
   if (configuration.gateway !== undefined && gatewayRecord === undefined) {
     throw new ConfigurationFailure("Docker native gateway configuration must be an object.");
@@ -464,6 +467,7 @@ export class DockerComputeDriver implements ComputeDriver {
 
   validateGatewaySettings(configuration: Readonly<OpenClawConfigurationDocument>): void {
     validatePlaintextNativeGateway(configuration);
+    validateCodexApprovalPolicySetting(configuration);
   }
 
   validateHarnessAuth(): never {

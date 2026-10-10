@@ -120,6 +120,7 @@ import {
 } from "../workspace-setup-runtime.ts";
 import { ComputeLifecycleDispatcher } from "../lifecycle-hooks.ts";
 import { validatePlaintextNativeGateway } from "../native-gateway-transport.ts";
+import { validateCodexApprovalPolicySetting } from "../../../gateway/codex-approval-policy.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import { discoverHarnessModels } from "../model-discovery.ts";
 import { pollHarnessDeviceAuthorization, startHarnessDeviceAuthorization } from "../device-auth.ts";
@@ -10219,6 +10220,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     configuration: OpenClawConfigurationDocument,
   ): OpenClawConfigurationDocument {
     validatePlaintextNativeGateway(
+      configuration,
+      (setting, requirement) => new GatewaySettingFailure(setting, requirement),
+    );
+    validateCodexApprovalPolicySetting(
       configuration,
       (setting, requirement) => new GatewaySettingFailure(setting, requirement),
     );

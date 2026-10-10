@@ -136,10 +136,11 @@ nonsecret request; Docker uses bounded environment delivery. For Codex, Compute
 writes the policy the Gateway runs into native `approval_policy` before startup
 validation: the configured `appServer.approvalPolicy`, with `on-failure` as
 `on-request`. Omission preserves native defaults; incompatible explicit policies
-remain subject to reviewer checks. Deployment refuses an automatic reviewer
-unless the policy is `on-request` or `on-failure`, because an omitted policy lets
-the Gateway pick one the startup check cannot see. Configuration saves and
-deployment refuse `untrusted`, which the Gateway refuses at load.
+remain subject to reviewer checks. At provisioning and deployment, the Codex
+PluginDriver refuses an automatic reviewer unless the policy is `on-request` or
+`on-failure`, because an omitted policy lets the Gateway pick one the startup
+check cannot see. Compute Drivers refuse `untrusted`, which the Gateway refuses
+at load, with their other gateway settings.
 
 The Kubernetes ConfigMap is immutable and per revision. A revision prepared
 by an earlier controller keeps its earlier `config.toml` (without
@@ -343,7 +344,7 @@ deadline.
 
 ## Changelog
 
-- 2026-10-10 09:00: Render `on-failure` as the Gateway's `on-request`, and refuse `untrusted` and an automatic reviewer without an explicit policy. (fix-987-988)
+- 2026-10-10 09:00: Render `on-failure` as the Gateway's `on-request`; Compute refuses `untrusted`, and the Codex PluginDriver an automatic reviewer without an explicit policy. (fix-987-988)
 
 - 2026-10-10 04:49: Preserve writable native configuration during Harness peer recovery and same-Pod container restarts. (codex/thirty-compute-07-oct10 - 8e5a06ce)
 
