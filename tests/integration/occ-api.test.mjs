@@ -3585,6 +3585,15 @@ test("the Codex Plugin Driver refuses an automatic reviewer without an on-reques
   const unchanged = await controller.request("GET", agentPath);
   assert.equal(unchanged.data.configurationId, configuration.id);
   assert.deepEqual(unchanged.data.plugins, automatic);
+  // Clearing the plugins leaves nothing to check against that Configuration.
+  const cleared = await controller.request("PATCH", agentPath, {
+    body: { configurationId: omitted.id, plugins: {} },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  const restored = await controller.request("PATCH", agentPath, {
+    body: { configurationId: configuration.id, plugins: automatic },
+  });
+  assert.equal(restored.status, 200, JSON.stringify(restored.body));
   await controller.fixture.controller.handleNamespaceLifecycle(
     controller.fixture.principal.id,
     namespace.id,

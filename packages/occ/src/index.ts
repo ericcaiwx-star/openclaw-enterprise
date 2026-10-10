@@ -5982,7 +5982,6 @@ export class OpenClawController {
         harnessAuth,
       );
       this.validatePluginPolicies(plugins, pluginApprovers);
-      await this.validateSavedPluginConfiguration(plugins, configuration);
       const agentId = this.nextIdentifier("agent");
       await this.authorizeBindings(
         state,
@@ -5990,6 +5989,7 @@ export class OpenClawController {
         namespace.id,
         this.bindings(configuration.secretBindings),
       );
+      await this.validateSavedPluginConfiguration(plugins, configuration);
       const { repositoryBindings, repositoryAccess } = this.repositorySettings(namespace.id, input);
 
       const agent = await state.agents.createAgent({

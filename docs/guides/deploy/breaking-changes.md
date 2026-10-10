@@ -18,11 +18,13 @@ Configuration's `plugins.entries.codex.config.appServer.approvalPolicy` is
 omitted or `never`. Before, the save succeeded and only deployment refused it.
 
 **Who is affected.** Clients that save such an Agent before fixing its
-Configuration, and any update to an Agent already saved that way.
+Configuration, and any update (even of credentials only) to an Agent already
+saved that way.
 
 **How to tell.** The `400` names the setting, as at deployment.
 
-**Steps.** Set the policy to `on-request` first, or choose the human reviewer.
+**Steps.** Set the policy to `on-request` (or `on-failure`) first, or choose the
+human reviewer.
 
 ## 2026-10-10: controller-only releases can restart Agent Pods once
 

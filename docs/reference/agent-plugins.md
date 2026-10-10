@@ -291,7 +291,7 @@ Codex maps `toolDefaults.reviewer` to the native app-wide reviewer. Native Codex
 has no per-tool reviewer setting, so explicit `tools.<toolId>.reviewer` values
 are rejected rather than applied to the whole app. Unsupported choices fail even if the tool is disabled
 or the value matches an inherited reviewer. Reviewer does not belong in
-`driverPolicy`. Agent create, update, and deploy answer `400` for an enabled
+`driverPolicy`. Agent create, update, provisioning, and deploy answer `400` for an enabled
 `auto` reviewer unless the Agent's Configuration sets
 `plugins.entries.codex.config.appServer.approvalPolicy` to `on-request` or
 `on-failure`.
