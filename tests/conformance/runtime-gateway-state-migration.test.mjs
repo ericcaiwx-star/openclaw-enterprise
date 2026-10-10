@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -189,22 +189,57 @@ test("Gateway state migration names the failure when Doctor leaves an older agen
   assert.equal(readVersion(databasePath(directory, "main")), CURRENT - 1);
 });
 
-test("Gateway state migration stops Doctor and exits on termination", async (t) => {
-  const directory = await stateDirectory(t, { main: CURRENT - 1 });
-  const killed = [];
-  const outcome = await migrate(directory, (child, { listeners }) => {
-    child.on("killed", (signal) => {
-      killed.push(signal);
-      child.emit("exit", null, signal);
+test("Gateway state migration leaves an agent database it cannot read to OpenClaw's own check", async (t) => {
+  const directory = await stateDirectory(t, { main: CURRENT });
+  await mkdir(join(directory, "agents", "broken", "agent"), { recursive: true });
+  await writeFile(databasePath(directory, "broken"), "not a SQLite database");
+  // An agent directory without a database is skipped too.
+  await mkdir(join(directory, "agents", "empty", "agent"), { recursive: true });
+  const outcome = await migrate(directory);
+  assert.equal(outcome.started, true);
+  assert.deepEqual(outcome.spawned, []);
+});
+
+test("Gateway state migration names a Doctor that could not start or was killed", async (t) => {
+  for (const [end, named] of [
+    [
+      (child) => child.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })),
+      "error-ENOENT",
+    ],
+    [(child) => child.emit("exit", null, "SIGKILL"), "SIGKILL"],
+  ]) {
+    const directory = await stateDirectory(t, { main: CURRENT - 1 });
+    const outcome = await migrate(directory, end);
+    assert.equal(outcome.started, false);
+    assert.deepEqual(outcome.failures, [{ check: "state-migration", code: "UNAVAILABLE" }]);
+    assert.deepEqual(outcome.exits, []);
+    assert.deepEqual(outcome.listeners, { SIGTERM: [], SIGINT: [] });
+    assert.ok(
+      outcome.errors
+        .at(-1)
+        .startsWith(`Gateway state migration failed: openclaw doctor --fix (${named}) left `),
+    );
+  }
+});
+
+test("Gateway state migration stops Doctor with the signal it got and exits", async (t) => {
+  for (const signal of ["SIGTERM", "SIGINT"]) {
+    const directory = await stateDirectory(t, { main: CURRENT - 1 });
+    const killed = [];
+    const outcome = await migrate(directory, (child, { listeners }) => {
+      child.on("killed", (received) => {
+        killed.push(received);
+        child.emit("exit", null, received);
+      });
+      for (const listener of listeners[signal]) {
+        listener();
+      }
     });
-    for (const listener of listeners.SIGTERM) {
-      listener();
-    }
-  });
-  assert.deepEqual(killed, ["SIGTERM"]);
-  assert.deepEqual(outcome.exits, [0]);
-  assert.deepEqual(outcome.failures, []);
-  assert.deepEqual(outcome.listeners, { SIGTERM: [], SIGINT: [] });
+    assert.deepEqual(killed, [signal]);
+    assert.deepEqual(outcome.exits, [0]);
+    assert.deepEqual(outcome.failures, []);
+    assert.deepEqual(outcome.listeners, { SIGTERM: [], SIGINT: [] });
+  }
 });
 
 test("Kubernetes and Docker Gateway programs share the migration step and stay down after a failure", () => {
