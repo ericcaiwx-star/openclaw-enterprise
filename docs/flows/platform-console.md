@@ -193,6 +193,9 @@ restores inheritance. Submission, uncertain outcomes, or invalid JSON lock editi
 The picker keeps a compact credential/access reminder beside an expandable
 **Access and credential setup** disclosure. Its bounded instructions, list, and
 details scroll within the dialog while search and pagination remain reachable.
+While mounted, Available and Configured retain separate selected plugins, queries,
+tool filters, and expanded rows without fetching pages or changing drafts.
+Removed selections clear their details; discovery resets clear both tabs.
 
 `create.mjs:loadPluginCatalog` and `loadPluginTools` implement
 [PAT discovery](agent-plugins.md#credential-scoped-discovery): the selected or
