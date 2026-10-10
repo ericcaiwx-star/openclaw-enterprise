@@ -55,11 +55,31 @@ export async function waitForDockerLog(containerName, pattern) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`Timed out waiting for ${pattern} in ${containerName} logs.
-${output}`);
+${failureTail(output)}`);
 }
 
 export function commandOutput(error) {
   return `${error.stdout ?? ""}\n${error.stderr ?? ""}`;
+}
+
+// CI keeps only the first 16 KiB of a failure message (scripts/ci/reporter.mjs),
+// so a whole container log in an error loses its end: the wrapper's stderr and
+// the actual failure (finding 976 misread a cut log as a Doctor stall). Errors
+// carry at most the last `limit` characters of process output instead, from a
+// line start when one is near, so the cut does not split a value the reporter
+// would redact.
+export const failureOutputLimit = 12 * 1024;
+
+export function failureTail(output, limit = failureOutputLimit) {
+  if (output.length <= limit) {
+    return output;
+  }
+  let tail = output.slice(-limit);
+  const lineEnd = tail.indexOf("\n");
+  if (lineEnd !== -1 && lineEnd < 1024) {
+    tail = tail.slice(lineEnd + 1);
+  }
+  return `[... ${output.length - tail.length} earlier chars omitted ...]\n${tail}`;
 }
 
 export async function temporaryGatewayConfiguration(t, harnessId) {
@@ -129,7 +149,7 @@ export async function waitForGatewayReady(containerName, readinessAttempts = 60)
       "-e",
       'fetch("http://127.0.0.1:8080/readyz").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1));',
     ]).catch((error) => {
-      lastReadinessOutput = commandOutput(error);
+      lastReadinessOutput = failureTail(commandOutput(error), 2048);
       return undefined;
     });
     if (ready !== undefined) {
@@ -154,9 +174,10 @@ export async function listGatewayPlugins(containerName) {
   try {
     return JSON.parse(stdout);
   } catch (error) {
-    throw new Error(`OpenClaw plugin list output was not valid JSON.\n${stdout}`, {
-      cause: error,
-    });
+    throw new Error(
+      `OpenClaw plugin list output was not valid JSON.\n${failureTail(stdout, 2048)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -252,7 +273,16 @@ export async function runGatewaySmoke(t, harnessId, options = {}) {
     };
   } catch (error) {
     const logs = await runDocker(["logs", containerName]).catch((logsError) => logsError);
-    throw new Error(`${error.message}\n${commandOutput(logs)}`, { cause: error });
+    // A failed docker command's message carries its whole stderr after the
+    // line that names the command.
+    const [headline, ...detail] = error.message.split("\n");
+    const failure = [
+      headline.slice(0, 512),
+      ...(detail.length > 0 ? [failureTail(detail.join("\n"), 2560)] : []),
+    ];
+    throw new Error(`${failure.join("\n")}\n${failureTail(commandOutput(logs))}`, {
+      cause: error,
+    });
   }
 }
 
