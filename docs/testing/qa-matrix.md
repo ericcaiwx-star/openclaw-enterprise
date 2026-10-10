@@ -173,18 +173,21 @@ The dispatch input `qa_repository_fixture` selects the repository credential
 fixture. Keep the default `default` value to use the existing
 `REPOSITORY_OBSERVER_TOKEN`, `REPOSITORY_REGISTRY_JSON`, and
 `REPOSITORY_APP_KEY` secrets. Select `isolated` to use a separate repository
-fixture with `QA_ISOLATED_REPOSITORY_OBSERVER_TOKEN`,
+fixture. Configure `QA_ISOLATED_REPOSITORY_OBSERVER_TOKEN`,
 `QA_ISOLATED_REPOSITORY_REGISTRY_JSON`, and
-`QA_ISOLATED_REPOSITORY_APP_KEY`, plus the repository variable
-`QA_ISOLATED_REPOSITORY_FULL_NAME`. That variable must name the one approved
-isolated fixture repository as lowercase `owner/repository`. The isolated path
-checks the registry's repository target before materializing credential files:
-the registry must contain exactly one repository, that repository must match
-`QA_ISOLATED_REPOSITORY_FULL_NAME`, and it must not be the workflow repository.
-The isolated path still shares the approved model, Codex, Slack, Calendar, and
-upstream CIDR settings from `integration-qa`. If any isolated repository secret
-or target is missing or mismatched, credential materialization fails; the
-workflow does not fall back to the default repository secrets.
+`QA_ISOLATED_REPOSITORY_APP_KEY` as environment secrets in the protected
+`integration-qa` environment, never as repository-level secrets. Configure
+`QA_ISOLATED_REPOSITORY_FULL_NAME` as an `integration-qa` environment variable
+so it is protected by the same independent reviewer gate. That variable must
+name the one approved isolated fixture repository as lowercase
+`owner/repository`. The isolated path checks the registry's repository target
+before materializing credential files: the registry must contain exactly one
+repository, that repository must match `QA_ISOLATED_REPOSITORY_FULL_NAME`, and
+it must not be the workflow repository. The isolated path still shares the
+approved model, Codex, Slack, Calendar, and upstream CIDR settings from
+`integration-qa`. If any isolated repository secret or target is missing or
+mismatched, credential materialization fails; the workflow does not fall back to
+the default repository secrets.
 
 Replay through the credentialed runner with the same environment:
 
