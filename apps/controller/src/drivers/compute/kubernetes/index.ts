@@ -3443,19 +3443,20 @@ export class KubernetesComputeDriver implements ComputeDriver {
         );
         const reports = await Promise.all(
           this.runtimeStatusContainers(revision).map(async (container) => {
-            const checks = await this.runtimeDiagnosticChecks(revision, namespace, container);
-            if (checks === undefined) {
-              return [
-                {
-                  component: container,
-                  check: "runtime-status",
-                  state: "unknown",
-                  checkedAt: null,
-                  code: "UNAVAILABLE",
-                } satisfies RuntimeDiagnosticCheck,
-              ];
-            }
-            return checks;
+            const [checks, heldFailure] = await Promise.all([
+              this.runtimeDiagnosticChecks(revision, namespace, container),
+              this.heldRuntimeFailureCheck(revision, namespace, container),
+            ]);
+            const reported = checks ?? [
+              {
+                component: container,
+                check: "runtime-status",
+                state: "unknown",
+                checkedAt: null,
+                code: "UNAVAILABLE",
+              } satisfies RuntimeDiagnosticCheck,
+            ];
+            return heldFailure === undefined ? reported : [heldFailure, ...reported];
           }),
         );
         return {
@@ -8148,6 +8149,52 @@ export class KubernetesComputeDriver implements ComputeDriver {
       return undefined;
     }
     return this.validRuntimeDiagnosticChecks(readback.status, revision, container, readback.podUid);
+  }
+
+  // A runtime holding a startup failure (for example an unusable Gateway peer
+  // configuration record) still answers diagnostics, but only with channel
+  // checks it could not run. The held failure is on the status path, so it is
+  // reported first as a failed check named after the startup step. A status
+  // read that fails or returns invalid data adds nothing; the diagnostics read
+  // alone decides the rest of the observation.
+  private async heldRuntimeFailureCheck(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+    container: "agent" | "gateway",
+  ): Promise<RuntimeDiagnosticCheck | undefined> {
+    const ownerSignal = currentComputeAbortSignal();
+    try {
+      const readback = await this.privateStatusReadback(
+        revision,
+        namespace,
+        container,
+        RUNTIME_STATUS_PATH,
+      );
+      if (readback === undefined) {
+        return undefined;
+      }
+      const failure = this.cachedRuntimeFailureEvidence(
+        readback.status,
+        revision,
+        container,
+        readback.podUid,
+      );
+      if (failure === undefined) {
+        return undefined;
+      }
+      return {
+        component: failure.component,
+        check: failure.check,
+        state: "failed",
+        checkedAt: new Date(failure.checkedAt).toISOString(),
+        code: failure.code,
+      };
+    } catch {
+      if (ownerSignal?.aborted) {
+        throw ownerSignal.reason;
+      }
+      return undefined;
+    }
   }
 
   private async privateStatusReadback(

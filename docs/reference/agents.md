@@ -102,11 +102,11 @@ deployments have separate records and cannot rewrite earlier results.
 A bodyless `POST` to
 `/namespaces/:namespaceId/agents/:agentId/deployments/:deploymentId/diagnostics`
 requests fresh checks for the exact revision. It requires Agent read and operate
-plus AgentRevision read. The response has a revision ID, observation time, and
-at most 32 bounded checks. Kubernetes currently probes Slack configuration,
-authentication, and connectivity without sending. Missing Pods yield `unknown`;
-unavailable evidence yields `503`. The call changes no stored deployment state
-and proves no model response. See the [diagnostics flow](../flows/agent-deployment-diagnostics.md).
+plus AgentRevision read. It returns a revision ID, observation time, and at
+most 32 checks. Kubernetes reports held startup failures and probes Slack
+configuration, authentication, and connectivity without sending. Missing Pods
+yield `unknown`; unavailable evidence yields `503`. The call changes no stored
+state and proves no model response. See the [diagnostics flow](../flows/agent-deployment-diagnostics.md).
 
 ## Backend association
 
