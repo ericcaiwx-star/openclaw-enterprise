@@ -384,7 +384,7 @@ export async function createQaInstallation(
           const value = await f.api("GET", base + `/deployments/${agent.revision.id}`);
           assert.ok(
             !["failed", "cancelled"].includes(value.status),
-            `Agent deployment ${value.status}`,
+            `Agent deployment ${value.status}: ${JSON.stringify(value.error)}`,
           );
           return value.status === "succeeded" && value;
         },
