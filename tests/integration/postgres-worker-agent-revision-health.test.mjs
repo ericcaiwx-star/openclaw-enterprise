@@ -815,6 +815,115 @@ revisionTest(
   { timeout: 60_000 },
 );
 
+// Finding 1010: the refused-stop wait has no attempt limit, but a claim lost during it spent one.
+// A controller restart while the stop blocks (a Pod-termination wait) aborts the pass as a lost
+// claim, so a few rollouts ended the work LEASE_EXPIRED with the refused candidate still running
+// and its refusal unrecorded. Recovery now refunds that attempt and keeps the refusal. Exclusive
+// replacement and a shared first deployment reach the stop the same way.
+for (const shape of ["exclusive", "shared"]) {
+  test(
+    `a refused ${shape === "exclusive" ? "exclusive candidate" : "first deployment on shared Compute"} keeps waiting on its stop across controller restarts`,
+    { ...requiresPostgres, timeout: 120_000 },
+    async (context) => {
+      // On main the second restart exhausted these two attempts.
+      const restarts = 3;
+      const fixture = await setup(context, { maxAttempts: 2 });
+      const owner = await fixture.agent(
+        `refused-restart-${shape}`,
+        shape === "exclusive" ? { executionMode: "dedicated" } : {},
+      );
+      let candidateId;
+      let candidatePasses = 0;
+      let stopCalls = 0;
+      let release;
+      const compute = {
+        ...fixture.compute,
+        ...(shape === "exclusive" ? { requiresStoppedPredecessors: () => true } : {}),
+        async prepareRevision(revision) {
+          const observed = await fixture.compute.prepareRevision(revision);
+          if (revision.id !== candidateId) {
+            return observed;
+          }
+          candidatePasses += 1;
+          if (candidatePasses === 1) {
+            // The actor loses deploy authority after the runtime started; the next pass refuses.
+            await fixture.observerPool.query(
+              `INSERT INTO occ.iam_restrictions
+                 (id, namespace_id, action, resource_kind, resource_id, effect)
+               VALUES ($1, $2, 'deploy', 'agent', $3, 'deny')`,
+              [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
+            );
+          }
+          return { ...observed, ready: false };
+        },
+        async stopRevision(revision) {
+          if (revision.id === candidateId) {
+            stopCalls += 1;
+            if (stopCalls === 1) {
+              // The first stop fails, so the work waits as REFUSED_CANDIDATE_STOP_PENDING.
+              throw new Error("Kubernetes API temporarily unavailable");
+            }
+            if (stopCalls <= 1 + restarts) {
+              // A Pod-termination wait that outlasts the controller's shutdown.
+              await new Promise((resolve) => {
+                release = resolve;
+              });
+              throw new Error("Pods did not terminate before the controller stopped");
+            }
+          }
+        },
+        async retireRevision() {},
+      };
+      await fixture.start(compute);
+      if (shape === "exclusive") {
+        await fixture.work(await fixture.revision(owner, 1), "succeeded");
+      }
+      const candidate = await fixture.revision(owner, shape === "exclusive" ? 2 : 1);
+      candidateId = candidate.id;
+      for (let restart = 1; restart <= restarts; restart += 1) {
+        const ended = await waitFor(
+          `refused stop ${restart + 1} to block, or the work to end`,
+          async () => {
+            if (release !== undefined) {
+              return { blocked: true };
+            }
+            const { rows } = await fixture.workResult(candidate);
+            return rows[0] !== undefined && rows[0].reason_code !== null ? rows[0] : undefined;
+          },
+          30_000,
+        );
+        assert.deepEqual(ended, { blocked: true }, `the work ended before restart ${restart}`);
+        // A graceful restart: shutdown aborts the pass, which loses its claim once the stop ends.
+        const stopped = fixture.stop();
+        release();
+        release = undefined;
+        await stopped;
+        // The next controller recovers the claim once its lease has expired.
+        await fixture.observerPool.query(
+          `UPDATE occ.controller_work SET lease_expires_at = clock_timestamp() - interval '1 second'
+           WHERE idempotency_key = $1 AND state = 'claimed'`,
+          [candidate.idempotencyKey],
+        );
+        await fixture.start(compute);
+      }
+      await fixture.work(candidate, "failed_permanent", 30_000);
+      const result = await fixture.workResult(candidate);
+      assert.equal(result.rows[0].reason_code, "AUTHORIZATION_DENIED");
+      assert.equal(stopCalls, restarts + 2, "the refusal was recorded after the stop succeeded");
+      const recoveries = await fixture.observerPool.query(
+        `SELECT details->>'refusal' AS refusal FROM occ.audit_events
+         WHERE details->>'workId' = $1 AND details->>'reasonCode' = 'LEASE_EXPIRED'`,
+        [candidate.idempotencyKey],
+      );
+      assert.deepEqual(
+        recoveries.rows.map(({ refusal }) => refusal),
+        Array.from({ length: restarts }, () => "AUTHORIZATION_DENIED"),
+        "each recovered claim keeps the refusal it waits to publish",
+      );
+    },
+  );
+}
+
 test(
   "a predecessor that comes back after the sweep is stopped again",
   { ...requiresPostgres, timeout: 60_000 },

@@ -8,6 +8,8 @@ This record preserves the dated changes to the controller worker flow. See the [
 
 ## Changelog
 
+- 2026-10-10 06:40: Back off and report a failing refused-candidate stop. (fix-1002-1004)
+
 - 2026-10-10 03:10: Stop an exclusive candidate the worker refuses before publishing its failure. (fix-990-991)
 
 - 2026-10-05 10:51: Preserve shared tenant placement while incorporating main startup and runtime diagnostics. (01a0fe72-58b2-7cc3-b770-7310f5401deb - 71a1cedb)
