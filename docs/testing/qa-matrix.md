@@ -184,25 +184,31 @@ without `OCC_TEST_QA_MATRIX=1` is not a matrix pass.
 ## CI, evidence, and recovery
 
 [QA Matrix Advisory](../../.github/workflows/qa-advisory.yml) runs `model-ui`
-in all four cells and `calendar` in both Codex cells on every trusted
+and `calendar` in both Codex cells on every trusted
 same-repository PR. Compose and Kubernetes run in separate jobs. Failures remain
 visible, but these jobs are outside `CI Required` and must not be configured as
 required branch checks. New pushes cancel superseded runs. Fork and Dependabot
 PRs report that a trusted run is needed; they do not receive model credentials.
 
 The advisory workflow uses `integration-qa-pr`: no required reviewers, deployment
-branch policies allowing `refs/pull/*/merge` and `main`, and only
-`OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` secrets. Set the model and Calendar
+branch policies allowing `refs/pull/*/merge` and `main`, and only the
+`CODEX_ACCESS_TOKEN` secret. Set the Codex model and Calendar
 variables from the table above; the Codex account must have Calendar connected.
 These credentials are available to trusted PR code. Manual dispatch on `main`
 can replay the same selection. Runner resources are disposable; always-run steps
 attempt owned cleanup and remove temporary credential files.
+
+OpenClaw, Git and Slack scenarios remain manual. Adding OpenClaw to the PR
+selection requires an OpenAI API key accepted from hosted runners; a successful
+devbox request alone does not prove that access.
 
 **Full Integration**, dispatched with `lane: qa-matrix`, retains the complete
 selection and protected `integration-qa` approval. The `all` dispatch and `full`
 group exclude this lane. Its job runs after the focused Slack job to avoid
 competing Socket Mode consumers. Both workflows materialize only selected
 credentials and upload outcome JSON, not private state or raw command logs. Failed commands include bounded, redacted stderr for diagnosis.
+OpenClaw authentication failures also report credential-delivery equality and a
+bounded provider result from the Agent Pod, without exposing the credential.
 `scripts/ci/test-suites/qa-matrix.json` owns lane registration.
 
 Replay through the credentialed runner with the same environment:

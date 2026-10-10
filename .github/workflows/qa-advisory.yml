@@ -41,9 +41,8 @@ jobs:
     env:
       CI: "1"
       OCC_TEST_QA_INSTALLATION: ${{ matrix.installation }}
-      OCC_TEST_QA_PRESET: all
+      OCC_TEST_QA_PRESET: Codex
       OCC_TEST_QA_SCENARIOS: model-ui,calendar
-      OCC_TEST_QA_OPENAI_MODEL: ${{ vars.OCC_TEST_QA_OPENAI_MODEL }}
       OCC_TEST_QA_CODEX_MODEL: ${{ vars.OCC_TEST_QA_CODEX_MODEL }}
       OCC_TEST_CODEX_CALENDAR_TOOL_NAME: ${{ vars.OCC_TEST_CODEX_CALENDAR_TOOL_NAME }}
       OCC_TEST_CODEX_CALENDAR_RESULT_EXPECT: ${{ vars.OCC_TEST_CODEX_CALENDAR_RESULT_EXPECT }}
@@ -57,7 +56,6 @@ jobs:
           node-version: "24.16.0"
       - name: Materialize selected QA credentials
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
         run: node scripts/ci/qa-matrix-credentials.mjs
       - uses: ./.github/actions/run-ci-lane
