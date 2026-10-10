@@ -1,7 +1,7 @@
 ---
 created: 2026-09-08
 updated: 2026-10-10
-last_updated_session: authoring-run/72c276e8-6db5-44e5-aac1-f9e3fdc34ff2
+last_updated_session: codex/thirty-compute-07-oct10
 ---
 
 # Agent Plugin Deployment Flow
@@ -263,6 +263,12 @@ revoke access to a still-running old Harness or an established connection. For a
 changed peer, the supervisor publishes non-ready, restarts only OpenClaw and
 rechecks peer startup, Pod, successes and failures after it serves. Changed or
 unavailable peers trigger container restart.
+For writable native-admin configuration, recovery reads the bridge baseline from
+the read-only managed snapshot. A Pod-local record binds the last and pending
+generated bridges to the revision and snapshot hash before configuration writes.
+Process and same-Pod container restarts rebuild only a matching generated bridge.
+Other native edits survive; conflicting bridge edits retain the existing refusal.
+Pod replacement restores the snapshot and clears this private record.
 During an outage, the supervisor reports unready. Kubernetes propagates that
 state asynchronously, so the signal alone is not a per-request traffic fence.
 If OpenClaw exits while the supervisor waits for its peer, the wrapper exits
@@ -332,6 +338,8 @@ deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 04:49: Preserve writable native configuration during Harness peer recovery and same-Pod container restarts. (codex/thirty-compute-07-oct10 - 8e5a06ce)
 
 - 2026-10-10 00:30: Keep the earlier Codex `config.toml` of revisions prepared before an upgrade. (fix-982)
 

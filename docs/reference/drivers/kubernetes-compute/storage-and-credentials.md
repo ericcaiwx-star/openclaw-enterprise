@@ -207,7 +207,11 @@ opt-in shape, including ordinary routed gateways, keep the read-only path.
 
 Native edits change only the copy; Pod replacement or Agent redeployment
 restores the managed snapshot, while the persistent gateway and workspace claims
-retain their data. Edits stay outside OCE Configuration and AgentRevisions; see
+retain their data. Pod-local provenance records revision, snapshot hash and
+generated bridges; only matches with the managed baseline are rebuilt.
+Peer recovery and same-Pod restarts retain unrelated edits; conflicting bridge
+edits remain refused. Pod replacement clears copy/provenance.
+Edits stay outside OCE Configuration and AgentRevisions; see
 the [native admin feature boundary](../../agent-native-admin.md#native-authority-and-drift)
 and [deployment procedure](../../../guides/deploy/native-admin.md).
 
