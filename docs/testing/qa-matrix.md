@@ -169,6 +169,17 @@ raw command logs. The job is ordered after the focused Slack job so they
 cannot compete for Socket Mode delivery once `all` includes it.
 `scripts/ci/test-suites/qa-matrix.json` owns lane registration.
 
+The dispatch input `qa_repository_fixture` selects the repository credential
+fixture. Keep the default `default` value to use the existing
+`REPOSITORY_OBSERVER_TOKEN`, `REPOSITORY_REGISTRY_JSON`, and
+`REPOSITORY_APP_KEY` secrets. Select `isolated` to use a separate repository
+fixture with `QA_ISOLATED_REPOSITORY_OBSERVER_TOKEN`,
+`QA_ISOLATED_REPOSITORY_REGISTRY_JSON`, and
+`QA_ISOLATED_REPOSITORY_APP_KEY`. The isolated path still shares the approved
+model, Codex, Slack, Calendar, and upstream CIDR settings from `integration-qa`.
+If any isolated repository secret is missing, credential materialization fails;
+the workflow does not fall back to the default repository secrets.
+
 Replay through the credentialed runner with the same environment:
 
 ```sh

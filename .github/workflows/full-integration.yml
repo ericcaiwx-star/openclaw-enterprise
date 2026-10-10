@@ -21,6 +21,14 @@ on:
           - logging-collector
           - k3d-otel
           - all
+      qa_repository_fixture:
+        description: Repository credential fixture for the qa-matrix lane.
+        required: true
+        default: default
+        type: choice
+        options:
+          - default
+          - isolated
 
 permissions:
   contents: read
@@ -542,6 +550,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Materialize approved QA credentials
+        if: inputs.qa_repository_fixture == 'default'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
@@ -551,6 +560,19 @@ jobs:
           REPOSITORY_OBSERVER_TOKEN: ${{ secrets.REPOSITORY_OBSERVER_TOKEN }}
           REPOSITORY_REGISTRY_JSON: ${{ secrets.REPOSITORY_REGISTRY_JSON }}
           REPOSITORY_APP_KEY: ${{ secrets.REPOSITORY_APP_KEY }}
+          REPOSITORY_UPSTREAM_CIDRS_JSON: ${{ vars.REPOSITORY_UPSTREAM_CIDRS_JSON }}
+        run: node scripts/ci/qa-matrix-credentials.mjs
+      - name: Materialize isolated QA repository credentials
+        if: inputs.qa_repository_fixture == 'isolated'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SENDER_TOKEN: ${{ secrets.SLACK_SENDER_TOKEN }}
+          REPOSITORY_OBSERVER_TOKEN: ${{ secrets.QA_ISOLATED_REPOSITORY_OBSERVER_TOKEN }}
+          REPOSITORY_REGISTRY_JSON: ${{ secrets.QA_ISOLATED_REPOSITORY_REGISTRY_JSON }}
+          REPOSITORY_APP_KEY: ${{ secrets.QA_ISOLATED_REPOSITORY_APP_KEY }}
           REPOSITORY_UPSTREAM_CIDRS_JSON: ${{ vars.REPOSITORY_UPSTREAM_CIDRS_JSON }}
         run: node scripts/ci/qa-matrix-credentials.mjs
       - uses: ./.github/actions/run-ci-lane

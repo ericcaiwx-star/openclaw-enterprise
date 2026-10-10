@@ -48,6 +48,59 @@ test("full integration workflow carries QA job outcomes into targeted aggregatio
   }
 });
 
+test("qa-matrix repository fixture dispatch keeps default and isolated credentials separate", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/full-integration.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    /qa_repository_fixture:[\s\S]*?default: default[\s\S]*?options:[\s\S]*?- default[\s\S]*?- isolated/,
+  );
+
+  const defaultStep = workflow.match(
+    /- name: Materialize approved QA credentials\n([\s\S]*?)\n      - name: Materialize isolated QA repository credentials/,
+  )?.[1];
+  assert.ok(defaultStep, "default QA credential materialization step is missing");
+  assert.match(defaultStep, /if: inputs\.qa_repository_fixture == 'default'/);
+  assert.match(
+    defaultStep,
+    /REPOSITORY_OBSERVER_TOKEN: \$\{\{ secrets\.REPOSITORY_OBSERVER_TOKEN \}\}/,
+  );
+  assert.match(
+    defaultStep,
+    /REPOSITORY_REGISTRY_JSON: \$\{\{ secrets\.REPOSITORY_REGISTRY_JSON \}\}/,
+  );
+  assert.match(defaultStep, /REPOSITORY_APP_KEY: \$\{\{ secrets\.REPOSITORY_APP_KEY \}\}/);
+
+  const isolatedStep = workflow.match(
+    /- name: Materialize isolated QA repository credentials\n([\s\S]*?)\n      - uses: \.\/\.github\/actions\/run-ci-lane/,
+  )?.[1];
+  assert.ok(isolatedStep, "isolated QA repository materialization step is missing");
+  assert.match(isolatedStep, /if: inputs\.qa_repository_fixture == 'isolated'/);
+  assert.match(
+    isolatedStep,
+    /REPOSITORY_OBSERVER_TOKEN: \$\{\{ secrets\.QA_ISOLATED_REPOSITORY_OBSERVER_TOKEN \}\}/,
+  );
+  assert.match(
+    isolatedStep,
+    /REPOSITORY_REGISTRY_JSON: \$\{\{ secrets\.QA_ISOLATED_REPOSITORY_REGISTRY_JSON \}\}/,
+  );
+  assert.match(
+    isolatedStep,
+    /REPOSITORY_APP_KEY: \$\{\{ secrets\.QA_ISOLATED_REPOSITORY_APP_KEY \}\}/,
+  );
+  assert.doesNotMatch(isolatedStep, /secrets\.REPOSITORY_(?:OBSERVER_TOKEN|REGISTRY_JSON|APP_KEY)/);
+  assert.equal(
+    (defaultStep.match(/run: node scripts\/ci\/qa-matrix-credentials\.mjs/g) ?? []).length,
+    1,
+  );
+  assert.equal(
+    (isolatedStep.match(/run: node scripts\/ci\/qa-matrix-credentials\.mjs/g) ?? []).length,
+    1,
+  );
+});
+
 function providerEnvironment(patch = {}) {
   return {
     name: "integration-provider-account",
