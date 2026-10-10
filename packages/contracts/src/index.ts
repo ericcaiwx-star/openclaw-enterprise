@@ -1448,6 +1448,15 @@ export interface PluginDriver extends Driver {
   readonly policyCapabilities: PluginPolicyCapabilities;
   /** Checks policy support without installing plugins or performing authenticated discovery. */
   validatePolicies(selections: PluginDesiredState, defaultApprovers?: PluginApprovers): void;
+  /**
+   * Side-effect-free check of admitted selections against the Agent's Configuration values,
+   * at provisioning and deployment. Throws ConfigurationHarnessError, naming the setting but
+   * never its value, for a combination the Driver's runtime cannot enforce.
+   */
+  validateAgentConfiguration?(
+    selections: PluginDesiredState,
+    configuration: Readonly<OpenClawConfigurationDocument>,
+  ): void;
   listCatalog(context: PluginDriverContext): Promise<readonly PluginCatalogEntry[]>;
   /** Pre-Agent discovery defaults to requiring a transient credential. Results are not persisted. */
   readonly discoveryCredential?: "required" | "none";

@@ -21,19 +21,22 @@ names such as `compose/Codex`. Completed stages enter the report in completion
 order. Writes are serialized and published atomically, so simultaneous workers
 do not overwrite outcomes or expose partial JSON. Earlier outcomes remain
 available when a later stage fails. The workflow retains these files in
-its `qa-matrix-<run-id>-<attempt>` artifact for seven days.
+its `qa-matrix-<run-id>-<attempt>` artifact (manual) or
+`qa-advisory-<installation>-<run-id>-<attempt>` artifact (PR) for seven days.
 
 A grouped stage has one outcome: clone, commit, push, and PR creation are not
 separate result rows. Cell evidence adds Agent/revision/Pod identities, nonce
 results, remote SHAs, credential disposal, and Slack timestamps. The summary
 has per-stage wall-clock durations, excluding queue time and report writes, but
-no explicit `not run`/`not applicable` rows. Parallel durations overlap; adding
+the `selection` inventory separately lists selected, unselected, and
+not-applicable scenarios per cell. Parallel durations overlap; adding
 them does not give the overall run duration.
 Filtered, unentered, or interrupted stages can be absent; absence is not a pass.
 Inspect runner failures and cleanup results alongside the JSON.
 
-`scope: full` identifies the selected installations, not a successful run.
-`partial:*` identifies installation selection or test-name filtering. Exclusions
+`scope: full` means all installations, presets, and scenarios were selected, not
+that they passed. `partial:selected` identifies an explicit subset;
+`partial:filtered` identifies additional Node test-name filtering. Exclusions
 remain explicit. A successful static check or parent setup does not establish
 that every live scenario passed.
 

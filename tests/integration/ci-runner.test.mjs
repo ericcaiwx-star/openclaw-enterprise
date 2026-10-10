@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const runnerPath = join(repositoryRoot, "scripts/ci/run-tests.mjs");
@@ -544,7 +545,9 @@ test("QA inputs", async () => {
   assert.equal(process.env.OCC_TEST_QA_CODEX_MODEL, "selected-codex-model");
   assert.equal(process.env.OCC_TEST_CODEX_CALENDAR_PROMPT, "selected calendar read");
   assert.equal(await readFile(process.env.OCC_TEST_QA_GITHUB_OBSERVER_TOKEN_FILE, "utf8"), "synthetic-observer");
-  assert.equal(process.env.OCC_TEST_QA_INSTALLATION, "all");
+  assert.equal(process.env.OCC_TEST_QA_INSTALLATION, "compose");
+  assert.equal(process.env.OCC_TEST_QA_PRESET, "Codex");
+  assert.equal(process.env.OCC_TEST_QA_SCENARIOS, "model-ui,calendar");
   await writeFile(join(process.env.OCC_TEST_QA_ARTIFACTS, "matrix.json"), JSON.stringify({ outcome: "inputs received" }));
 });
 `,
@@ -576,6 +579,8 @@ test("QA inputs", async () => {
       OCC_TEST_QA_GITHUB_OBSERVER_TOKEN_FILE: observer,
       OCC_TEST_QA_ARTIFACTS: artifacts,
       OCC_TEST_QA_INSTALLATION: "compose",
+      OCC_TEST_QA_PRESET: "Codex",
+      OCC_TEST_QA_SCENARIOS: "model-ui,calendar",
     },
   );
   assert.equal(result.status, 0, result.stderr);
@@ -1683,7 +1688,16 @@ test("failure text is bounded and redacts env values and credential shapes", asy
   const { failureSecrets, redactFailure } = await import("../../scripts/ci/failure-redaction.mjs");
   const secrets = failureSecrets([
     { GITHUB_REPOSITORY_OWNER: "openclaw", JOB_ONLY_KEY: "jobonlyopaque123" },
-    { CHILD_URL: "postgres://app:childpw77@db/app", JOB_ONLY_KEY: "otheropaque456" },
+    {
+      CHILD_URL: syntheticCredentialUrl({
+        protocol: "postgres",
+        username: "app",
+        password: "childpw77",
+        host: "db",
+        pathname: "/app",
+      }),
+      JOB_ONLY_KEY: "otheropaque456",
+    },
   ]);
   const render = async (cause) => {
     let text = "";
@@ -1700,14 +1714,34 @@ test("failure text is bounded and redacts env values and credential shapes", asy
   };
   const credentials = [
     "Authorization: Bearer abcdefghijklmnop0123",
-    "postgres://occ:hunter2pass@db.internal:5432/occ",
+    syntheticCredentialUrl({
+      protocol: "postgres",
+      username: "occ",
+      password: "hunter2pass",
+      host: "db.internal",
+      port: 5432,
+      pathname: "/occ",
+    }),
     "token=ghp_0123456789abcdefghijABCDEFGHIJ",
     'password: "correct-horse"',
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.c2lnbmF0dXJl",
     "sk-proj-0123456789abcdef",
     "xoxb-1234-5678-abcdefgh",
     "xapp-1-A0123-4567-abcdef",
-    "redis://:redispw99@cache:6379 https://tokenvalue123@git.example",
+    [
+      syntheticCredentialUrl({
+        protocol: "redis",
+        username: "",
+        password: "redispw99",
+        host: "cache",
+        port: 6379,
+      }),
+      syntheticCredentialUrl({
+        username: "tokenvalue123",
+        password: "",
+        host: "git.example",
+      }).replace(":@", "@"),
+    ].join(" "),
     '{"privateKey":"pkvalue123"}',
     "-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY-----",
     "job jobonlyopaque123 child otheropaque456 password childpw77",
@@ -1832,7 +1866,12 @@ test("the reporter forwards a failed file's output tail and whole stack only", a
   assert.equal(detail.stack, "at helper (tests/a.mjs:2:3)\nat next (b.mjs:4:5)");
   assert.equal(redactFailureDetail(undefined, secrets, "/repo"), undefined);
   assert.equal(
-    redactOutputLine("stdout: proxy https://user:pw@example.test", secrets, "/repo", 1_000),
+    redactOutputLine(
+      `stdout: proxy ${syntheticCredentialUrl({ username: "user", password: "pw", host: "example.test" })}`,
+      secrets,
+      "/repo",
+      1_000,
+    ),
     "[redacted credential-bearing line]",
   );
   assert.equal(
@@ -2220,8 +2259,9 @@ test("run records a preparation failure's redacted message in the diagnostics re
       "  if (file.path.endsWith('broken.test.mjs')) {",
       "    // The lane state's env holds prepared values the job env never had.",
       "    await writeFile(statePath, JSON.stringify({ env: { OCC_TEST_STATE_IMAGE: 'stateonlyopaque-image-ref' } }));",
+      `    const pullUrl = ${JSON.stringify(syntheticCredentialUrl({ username: "user", password: "hunter2pass", host: "registry.example", pathname: "/x" }))};`,
       "    const error = new Error(",
-      "      `image import failed for ${process.env.CI_RUNNER_FIXTURE_CREDENTIAL} stateonlyopaque-image-ref\\nAuthorization: Bearer abcdefghijklmnop0123\\npull https://user:hunter2pass@registry.example/x`,",
+      "      `image import failed for ${process.env.CI_RUNNER_FIXTURE_CREDENTIAL} stateonlyopaque-image-ref\\nAuthorization: Bearer abcdefghijklmnop0123\\npull ${pullUrl}`,",
       "    );",
       "    error.stderr = 'child output secretauthvalue-stderr';",
       "    throw error;",
@@ -2280,7 +2320,7 @@ test("run records a preparation failure's redacted message in the diagnostics re
     record.error.message,
     "image import failed for [env:CI_RUNNER_FIXTURE_CREDENTIAL] [env:OCC_TEST_STATE_IMAGE]\n[redacted credential-bearing line]\n[redacted credential-bearing line]",
   );
-  assert.match(record.error.stack, /^at prepareFile \(.*scripts\/ci\/prepare\.mjs:6:\d+\)/);
+  assert.match(record.error.stack, /^at prepareFile \(.*scripts\/ci\/prepare\.mjs:7:\d+\)/);
 });
 
 test("run keeps bounded Agent namespace activity from passing k3d files, alone and side by side", async (t) => {

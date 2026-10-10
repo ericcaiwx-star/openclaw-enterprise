@@ -10,6 +10,28 @@ you run now, then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-10: Codex approval policy is checked before deployment
+
+**What breaks.** Provisioning and deployment answer `409` when
+`plugins.entries.codex.config.appServer.approvalPolicy` is `untrusted` (Compute
+Drivers also refuse to prepare it), and `400` when an enabled plugin selection
+sets `toolDefaults.reviewer` to `auto` and that policy is omitted or `never`.
+Native startup checks the automatic reviewer against the policy Compute renders,
+but with the policy omitted the Gateway picks its own, which can be `never`.
+
+**Who is affected.** Custom Codex Configurations with `untrusted` (the Gateway
+already refused them at load, with a `doctor --fix` hint that cannot work), and
+Agents with an automatic plugin reviewer whose Configuration omits the policy.
+With `never`, deployment now refuses what readiness refused before. Every
+bundled Preset sets the policy.
+
+**How to tell.** The `409` or `400` names the setting.
+
+**Steps.** Set the policy to `on-request`, or choose the human reviewer, then
+deploy the Agent again. `on-failure` still works; native startup now gets
+`on-request`, which the Gateway runs for it. An Agent already deployed with the
+policy omitted keeps its current session policy until it is deployed again.
+
 ## 2026-10-09: refresh-token source updates need a new Secret
 
 **What breaks.** Since #2016, `PATCH` on an `oauth2-refresh-token` credential
