@@ -44,7 +44,9 @@ async function startDevelopment(environment) {
       .slice(-12)
       .map((line) => redactLogLine(line, secrets, 800))
       .join("\n");
-    throw new Error(`OpenShell development startup failed:\n${tail}`, { cause: error });
+    // Node's direct test reporter would print the raw subprocess output from a cause.
+    // eslint-disable-next-line preserve-caught-error
+    throw new Error(`OpenShell development startup failed:\n${tail}`);
   }
 }
 
