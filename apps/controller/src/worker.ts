@@ -156,10 +156,12 @@ const REVISION_READINESS_CODES: ReadonlySet<string> = new Set([
 ]);
 
 // A refused candidate whose stop keeps failing waits on that stop, which can block the serial
-// worker for minutes (Kubernetes waits up to 120 s for Pods to terminate). Each failed stop
-// doubles its recheck from the readiness cadence up to 5 minutes, so other Agents' work runs
-// between attempts (finding 1002).
+// worker for minutes (Kubernetes waits for gateway and Agent Pods to terminate). Each failed stop
+// doubles its recheck from the readiness cadence up to 5 minutes, and waits at least four times
+// as long as that stop took, so a blocked stop holds at most a fifth of the worker and other
+// Agents' work runs between attempts (finding 1002).
 const REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS = 300_000;
+const REFUSED_CANDIDATE_STOP_DURATION_FACTOR = 4;
 
 // A repository cleanup that another pass cannot settle (an invalidated attempt or a cleanup
 // error, with no session still closing) still rechecks so its obligation stays visible, but
@@ -256,11 +258,14 @@ function revisionFailureLogFields(error: unknown): {
  */
 class RefusedCandidateStopError extends Error {
   readonly refusal: string;
+  /** How long the failed stop held the worker. */
+  readonly durationMs: number;
 
-  constructor(refusal: string, cause: unknown) {
+  constructor(refusal: string, durationMs: number, cause: unknown) {
     super("The refused AgentRevision candidate could not be stopped.", { cause });
     this.name = "RefusedCandidateStopError";
     this.refusal = refusal;
+    this.durationMs = durationMs;
   }
 
   /**
@@ -276,6 +281,7 @@ class RefusedCandidateStopError extends Error {
         outcome: "pending",
         code: "REFUSED_CANDIDATE_STOP_PENDING",
         refusedCandidate: this.refusal,
+        refusedStopMs: this.durationMs,
       },
       logFields: { ...revisionFailureLogFields(this.cause), refusal: this.refusal },
     };
@@ -335,6 +341,8 @@ interface RevisionDispatchResult extends DispatchResult {
    * candidate serving with nothing left to stop it.
    */
   readonly refusedCandidate?: string;
+  /** How long the refused candidate's failed stop took; it lengthens the recheck. */
+  readonly refusedStopMs?: number;
   readonly data?: Readonly<Record<string, unknown>>;
   readonly resultData?: Readonly<Record<string, unknown>>;
   readonly revision?: Readonly<AgentRevision>;
@@ -3317,12 +3325,19 @@ export class ControllerWorker {
         // credential-source problem, a refused observation) may still wait on its candidate's
         // stop. The newer revision's sweep gives up at its own deadline, so finish that stop
         // before superseding; a failed stop keeps waiting (finding 1004).
-        const attempt =
-          claim.idempotencyKey === `agent_revision:${revision.id}:reconcile`
-            ? await this.queue.findWorkAttempt(claim.idempotencyKey)
+        // The wait need not be the latest evidence: a lost claim or a retry may have followed it.
+        // A stop this process made within a lease (the newer revision's sweep) is not repeated.
+        const stopped = this.stoppedPredecessors.get(revision.id);
+        const waited =
+          claim.idempotencyKey === `agent_revision:${revision.id}:reconcile` &&
+          (stopped === undefined || Date.now() - stopped.stoppedAt >= stopped.restopAfterMs)
+            ? await this.queue.findWorkAttempt(
+                claim.idempotencyKey,
+                "REFUSED_CANDIDATE_STOP_PENDING",
+              )
             : undefined;
-        if (attempt?.code === "REFUSED_CANDIDATE_STOP_PENDING") {
-          await this.stopRefusedExclusiveCandidate(claim, attempt.refusal ?? "UNKNOWN_FAILURE");
+        if (waited !== undefined) {
+          await this.stopRefusedExclusiveCandidate(claim, waited.refusal ?? "UNKNOWN_FAILURE");
         }
         await this.finalizeRevision(claim, {
           outcome: "success",
@@ -4150,6 +4165,7 @@ export class ControllerWorker {
       refusedStopRecheckMs = this.refusedStopRecheckMs(
         claim,
         Date.now() - claim.createdAt.getTime(),
+        resolved.refusedStopMs ?? 0,
       );
     }
     let activated: Readonly<AgentRevision> | undefined;
@@ -4357,6 +4373,7 @@ export class ControllerWorker {
     ) {
       return;
     }
+    const started = Date.now();
     try {
       if (compute.bindAgent !== undefined) {
         await this.withClaimHeartbeat(claim, async () => {
@@ -4369,7 +4386,7 @@ export class ControllerWorker {
       if (error instanceof WorkClaimLostError) {
         throw error;
       }
-      throw new RefusedCandidateStopError(refusal, error);
+      throw new RefusedCandidateStopError(refusal, Date.now() - started, error);
     }
     this.refusedStopFailures.delete(claim.idempotencyKey);
     // Like a swept predecessor, the next deployment need not stop it again within a lease.
@@ -4388,9 +4405,10 @@ export class ControllerWorker {
 
   /**
    * The recheck after this work's next failed refused-candidate stop: the readiness cadence,
-   * doubled for each earlier consecutive failure, at most REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS.
+   * doubled for each earlier consecutive failure up to REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS, and
+   * at least REFUSED_CANDIDATE_STOP_DURATION_FACTOR times as long as the failed stop took.
    */
-  private refusedStopRecheckMs(claim: ClaimedWork, ageMs: number): number {
+  private refusedStopRecheckMs(claim: ClaimedWork, ageMs: number, stopMs: number): number {
     const key = claim.idempotencyKey;
     const failures = (this.refusedStopFailures.get(key) ?? 0) + 1;
     this.refusedStopFailures.delete(key);
@@ -4402,9 +4420,12 @@ export class ControllerWorker {
         this.refusedStopFailures.delete(oldest);
       }
     }
-    return Math.min(
-      REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS,
-      revisionReadinessRecheckMs(ageMs) * 2 ** Math.min(failures - 1, 20),
+    return Math.max(
+      Math.min(
+        REFUSED_CANDIDATE_STOP_RECHECK_MAX_MS,
+        revisionReadinessRecheckMs(ageMs) * 2 ** Math.min(failures - 1, 20),
+      ),
+      Math.ceil(Math.max(0, stopMs) * REFUSED_CANDIDATE_STOP_DURATION_FACTOR),
     );
   }
 

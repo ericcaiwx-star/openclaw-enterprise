@@ -12,9 +12,9 @@ This record preserves the dated changes to the controller worker flow. See the [
 
 - 2026-10-04 04:20: Abort Compute when the last confirmed claim lease runs out, even if a renewal never answers. (bughunt-10-claimloss)
 
-- 2026-10-03 16:02: Run configured development API and worker Compute preflight before admitting work. (01a0fe72-58b2-7cc3-b770-7310f5401deb - c04093189f2ba6240f8dc431847c2f487afd11de)
-
 - 2026-10-03 17:00: Finish published deployments after a last-attempt crash. (fix-recover-active-revision)
+
+- 2026-10-03 16:02: Run configured development API and worker Compute preflight before admitting work. (01a0fe72-58b2-7cc3-b770-7310f5401deb - c04093189f2ba6240f8dc431847c2f487afd11de)
 
 - 2026-10-03 16:00: Bound worker queries and restart a stuck run loop. (fix-worker-liveness)
 

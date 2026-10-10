@@ -512,9 +512,10 @@ revisionTest(
 );
 
 // Finding 1002: the worker is serial, and a refused candidate's stop can block it for minutes
-// (Kubernetes waits up to 120 s for Pods to terminate). Rechecked every 0.5-5 s, such a stop took
-// every other turn from every other Agent. Each failed stop now doubles its recheck, so another
-// Agent's deployment runs its readiness passes between the stops.
+// (Kubernetes waits for its Pods to terminate). Rechecked every 0.5-5 s, such a stop took every
+// other turn from every other Agent. Each failed stop now doubles its recheck and waits at least
+// four times as long as the stop took, so another Agent's deployment runs its readiness passes
+// between the stops.
 revisionTest(
   "a slow failing refused stop backs off so another Agent's deployment keeps its cadence",
   async (fixture) => {
@@ -539,7 +540,7 @@ revisionTest(
         throw new Error("Pods did not terminate before the deadline");
       },
     });
-    // Let the backoff grow past the readiness cadence (0.5, 1, 2 and 4 s after each failure).
+    // Let the backoff grow past four times the stop's duration (4, 4, 4, 4 and then 8 s).
     await waitFor(
       "five failed refused stops",
       async () => (refusedStopWaits(events, replacement).length >= 5 ? true : undefined),
@@ -554,6 +555,12 @@ revisionTest(
       (at) => at > otherPasses[0] && at < otherPasses.at(-1),
     ).length;
     assert.ok(interleaved <= 2, `${interleaved} refused stops ran during the other deployment`);
+    // Each 1 s stop is followed by at least 4 s in which other work can run.
+    const gaps = stopStarts.slice(1).map((at, index) => at - stopStarts[index]);
+    assert.ok(
+      gaps.every((gap) => gap >= 4_900),
+      `refused stops started ${gaps.join(", ")} ms apart`,
+    );
   },
   { timeout: 120_000 },
 );

@@ -952,7 +952,11 @@ export class PostgresWorkQueue {
     return found.rows[0] === undefined ? undefined : asWork(found.rows[0]);
   }
 
-  async findWorkAttempt(idempotencyKey: string): Promise<ControllerWorkAttempt | undefined> {
+  /** The latest evidence bound to this work item, or the latest with `code` when given. */
+  async findWorkAttempt(
+    idempotencyKey: string,
+    code?: string,
+  ): Promise<ControllerWorkAttempt | undefined> {
     // A revision can also have maintenance and cleanup work. Only evidence bound
     // to this exact work item can explain its progress; unbound history is unknown.
     const found = await this.client.query(
@@ -965,9 +969,13 @@ export class PostgresWorkQueue {
          AND event.kind = 'mutation' AND event.action = 'reconcile'
          AND event.details->>'workId' = work.idempotency_key
          AND event.occurred_at >= work.created_at
+         AND ($2::text IS NULL OR event.details->>'reasonCode' = $2::text)
        WHERE work.idempotency_key = $1
        ORDER BY event.occurred_at DESC, event.id DESC LIMIT 1`,
-      [nonempty(idempotencyKey, "Controller work idempotency key")],
+      [
+        nonempty(idempotencyKey, "Controller work idempotency key"),
+        code === undefined ? null : nonempty(code, "Controller work attempt code"),
+      ],
     );
     const row = found.rows[0] as
       { occurred_at: Date | string; reason_code: string; refusal: string | null } | undefined;

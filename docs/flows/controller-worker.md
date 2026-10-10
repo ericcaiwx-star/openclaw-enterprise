@@ -303,10 +303,10 @@ held runtime failure or the deadline),
 heartbeat, so a rejected deployment never serves. A stop failure publishes nothing: the work defers as
 `REFUSED_CANDIDATE_STOP_PENDING` past the attempt budget and deadline until the
 stop succeeds, after the readiness cadence doubled per failed stop up to 5 minutes
-(`refusedStopRecheckMs`, in memory), so other Agents' work runs. Each deferral
-records evidence with the refusal (`repeatEvidence`) for deployment status and
-`worker.completed`'s `refusal`. With a newer exclusive revision, the pass retries
-the stop before completing as `REVISION_SUPERSEDED`.
+but at least four times the stop's duration (`refusedStopRecheckMs`, in memory),
+so other Agents' work runs. Each deferral records evidence with the refusal
+(`repeatEvidence`) for deployment status and `worker.completed`'s `refusal`. A pass
+superseded by a newer exclusive revision first retries a stop its work waited on.
 
 `ControllerWorker.processRepositoryCleanup` defers every incomplete pass at the
 Driver interval, including closing sessions and failed runtime retirement,

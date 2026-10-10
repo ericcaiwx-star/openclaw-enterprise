@@ -79,7 +79,8 @@ export function deploymentProgressForWork(
       message = "A dependency was unavailable. The controller will retry.";
       break;
     case "REFUSED_CANDIDATE_STOP_PENDING":
-      // The refusal is the code this deployment's `error` will carry once the stop succeeds.
+      // The refusal is the code this deployment's `error` carries once the stop succeeds,
+      // unless a newer revision supersedes it first.
       code = attempt.code;
       message = `Deployment refused${
         attempt.refusal !== undefined && FAILURE_CODE.test(attempt.refusal)

@@ -196,14 +196,15 @@ The worker retries on the same cadence without spending its
 deadline fails the deployment with its own code.
 
 `REFUSED_CANDIDATE_STOP_PENDING` means the worker refused the candidate but could
-not stop its workload yet, for example while its Pods are stuck terminating. The
-message names the refusal code that the deployment's `error` will carry, such as
-`AUTHORIZATION_DENIED`. The wait has no deadline or attempt limit, because the
-refused version would otherwise keep serving. Each failed stop doubles the
-recheck, from the cadence above to 5 minutes, so other Agents' deployments keep
-running; every try moves `lastAttempt.at`. If the refusal no longer applies, for
-example after `deploy` is granted again, the next try deploys normally. Check the
-worker log's `worker.completed` `cause` for why the stop fails.
+not yet stop its workload, for example Pods stuck terminating. The message names
+the refusal, such as `AUTHORIZATION_DENIED`, that `error` carries once the stop
+succeeds, unless a newer revision supersedes the deployment. The wait has no
+deadline or attempt limit, since the refused version could still serve. Each
+failed stop doubles the recheck, from the cadence above to 5 minutes, and waits
+at least four times the stop's duration, so other Agents' deployments keep
+running; every try moves `lastAttempt.at`. If the refusal lifts, for example when
+`deploy` is granted again, the deployment continues within its convergence
+deadline. The worker log's `worker.completed` `cause` says why the stop fails.
 
 ### Model check failure cause
 
@@ -242,10 +243,8 @@ the unchanged pointer names a predecessor that was already stopped, so nothing
 serves until a new revision activates. When the worker refuses the candidate,
 for example because its deploying actor lost `deploy` or a credential source
 was revoked, it stops the candidate's workload too, and records the refusal
-only after the stop succeeds. Until then the deployment stays pending with
-`progress.lastAttempt.code` `REFUSED_CANDIDATE_STOP_PENDING`, whose message
-names the refusal and whose `at` moves with each try; see
-[pending deployment progress](#pending-deployment-progress). A candidate whose runtime
+only after the stop succeeds; until then the deployment waits as
+[`REFUSED_CANDIDATE_STOP_PENDING`](#pending-deployment-progress). A candidate whose runtime
 failed by itself, such as `RUNTIME_MODEL_PROBE_FAILED` or
 `CONVERGENCE_DEADLINE_EXCEEDED`, keeps its Pods so its version's Logs tab can
 show the cause; the next deployment stops them.
