@@ -10272,10 +10272,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     // The Gateway writes each credential into the Harness filesystem through Codex, and
     // the Harness entrypoint creates this directory under its own HOME.
     const harnessHome = this.sandboxDriverForRevision(revision)?.harnessHome ?? HARNESS_HOME;
-    if (!posix.isAbsolute(harnessHome) || posix.normalize(harnessHome) !== harnessHome) {
-      throw new ConfigurationFailure(
-        "SandboxDriver Harness HOME must be a normalized absolute path.",
-      );
+    // Driver registration (packages/occ driver-contract) refuses a non-normalized HOME.
+    if (!posix.isAbsolute(harnessHome)) {
+      throw new ConfigurationFailure("SandboxDriver Harness HOME must be an absolute path.");
     }
     appServer.nativeHookRelay = {
       url: `${endpoint.replace(/^wss:/, "https:")}/node/__openclaw__/native-hook`,

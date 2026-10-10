@@ -220,9 +220,10 @@ The Driver mounts a revision-scoped Agent PVC subpath at
 `/sandbox/.openclaw-runtime`; persistent subpaths mount below
 `/sandbox/.openclaw-mounts`. It rewrites admitted `/home/node` paths beneath the
 runtime home, declared as `harnessHome` for native hook credentials. Codex hook
-commands also trust the provider-file Gateway CA. Exact mount paths such as
-`OPENCLAW_NODE_STATE_DIR` use a process-created `state` child, so atomic writes
-cross neither a symlink nor a root-owned mount. Workspace, node identity, sessions, and generated images
+commands trust the provider-file Gateway CA and reach the Gateway route only when
+the node does: an in-cluster routing hostname or two clusters. Exact mount paths
+such as `OPENCLAW_NODE_STATE_DIR` use a process-created `state` child, so atomic
+writes cross neither a symlink nor a root-owned mount. Workspace, node identity, sessions, and generated images
 remain separate. `/tmp` stays on the bounded ephemeral image layer.
 
 Credential attachments must use the OCC `oce-cs-` name shape and cannot repeat

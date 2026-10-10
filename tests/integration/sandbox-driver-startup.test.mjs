@@ -292,6 +292,7 @@ function codexSandboxFixture(
     runtimeManifest = JSON.stringify({ kind: "codex", selections: {} }),
     codexConfig = "[features]\nplugins = false\n",
     files,
+    nodeSetupUrl = () => "wss://gateway.example.test/node",
   } = {},
 ) {
   const context = namespaceContext();
@@ -303,7 +304,7 @@ function codexSandboxFixture(
     sandboxDriverId: driver.id,
   };
   const nodeSetup = {
-    url: "wss://gateway.example.test/node",
+    url: nodeSetupUrl(revision, context),
     bootstrapToken: "one-shot-node-setup",
     expiresAtMs: Date.now() + 600_000,
     tlsFingerprint: "sha256:test",
@@ -1201,8 +1202,37 @@ test("OpenShell provisions dedicated Codex with bearer passthrough and provider 
     implementation: "openshell",
     backend: backendFor(gatewayClient),
   });
+  // Same-cluster Compute with the in-cluster Envoy route hostname the k3d OpenShell
+  // profile uses; the node's setup URL is the one Compute derives for that route.
+  const routeHost = "occ-gateway-0123456789ab.envoy-gateway-system.svc.cluster.local";
+  const computeOptions = conformanceKubernetesOptions({
+    gatewayTrustedProxyCidrs: ["127.0.0.1/32"],
+    runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
+  });
+  // Routing derives the Gateway client peer from the Envoy namespace.
+  delete computeOptions.network.gatewayClients;
+  const compute = new KubernetesComputeDriver(
+    {
+      ...computeOptions,
+      gatewayRouting: {
+        hostname: routeHost,
+        gatewayName: "oce-agent-gateways",
+        gatewayNamespace: "openclaw-system",
+        envoyNamespace: "envoy-gateway-system",
+      },
+    },
+    { sandboxDriver: driver },
+  );
   const { context, revision, requirements, runtimeManifest, codexConfig, nodeSetup } =
-    codexSandboxFixture(driver);
+    codexSandboxFixture(driver, {
+      nodeSetupUrl: (target, { namespace }) =>
+        compute.workspaceNodeConnectionUrl(
+          target,
+          { name: namespace.name, plane: "execution" },
+          compute.getGatewayEndpoint(target),
+        ),
+    });
+  assert.match(nodeSetup.url, new RegExp(`^wss://${routeHost.replaceAll(".", "\\.")}/`));
 
   await driver.ensureNamespace(context);
   await driver.provisionHarness({ ...context, revision, requirements });
@@ -1357,7 +1387,7 @@ test("OpenShell provisions dedicated Codex with bearer passthrough and provider 
     binaries: [{ path: "/usr/local/bin/node" }],
     endpoints: [
       {
-        host: "gateway.example.test",
+        host: routeHost,
         ports: [443],
         tls: "NETWORK_TLS_MODE_SKIP",
         enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
@@ -1368,31 +1398,15 @@ test("OpenShell provisions dedicated Codex with bearer passthrough and provider 
   // Each turn the Gateway writes a native hook credential through Codex into the directory
   // Compute renders, which the Harness entrypoint creates under its HOME. Hook commands
   // then call the Gateway route on the host and port the node rule above admits.
-  const computeOptions = conformanceKubernetesOptions({
-    gatewayTrustedProxyCidrs: ["127.0.0.1/32"],
-    runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
-  });
-  // Routing derives the Gateway client peer from the Envoy namespace.
-  delete computeOptions.network.gatewayClients;
-  const compute = new KubernetesComputeDriver(
-    {
-      ...computeOptions,
-      gatewayRouting: {
-        hostname: "gateway.example.test",
-        gatewayName: "oce-agent-gateways",
-        gatewayNamespace: "openclaw-system",
-        envoyNamespace: "envoy-gateway-system",
-      },
-    },
-    { sandboxDriver: driver },
-  );
   const relay = compute.gatewayNativeHookRelayConfiguration(revision, {}).plugins.entries.codex
     .config.appServer.nativeHookRelay;
   assert.equal(relay.credentialDirectory, `${requests[0].spec.environment.HOME}/.oce-native-hooks`);
   const callback = new URL(relay.url);
+  const [nodeEndpoint] =
+    requests[0].spec.policy.network_policies["workspace-node-enrollment"].endpoints;
   assert.equal(callback.protocol, "https:");
-  assert.equal(callback.hostname, "gateway.example.test");
-  assert.equal(callback.port, "");
+  assert.equal(callback.hostname, nodeEndpoint.host);
+  assert.deepEqual([Number(callback.port || 443)], nodeEndpoint.ports);
 
   await driver.cleanup({ ...context, revision });
   assert.equal(gatewayClient.providers.has(runtimeProvider), false);

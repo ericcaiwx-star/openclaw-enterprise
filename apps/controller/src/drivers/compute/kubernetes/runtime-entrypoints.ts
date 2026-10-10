@@ -3750,8 +3750,14 @@ mkdirSync(hookDirectory, { recursive: true, mode: 0o700 });
 chmodSync(hookDirectory, 0o700);
 // Hook commands call the Gateway route; they trust the CA the node uses. A SandboxDriver
 // delivers that CA as a file (OPENCLAW_NODE_CA_PATH) instead of the PEM variable.
-const gatewayCa = process.env.OPENCLAW_NODE_CA_PEM ||
-  (process.env.OPENCLAW_NODE_CA_PATH ? readFileSync(process.env.OPENCLAW_NODE_CA_PATH, "utf8").trim() : "");
+let gatewayCa = process.env.OPENCLAW_NODE_CA_PEM || "";
+if (!gatewayCa && process.env.OPENCLAW_NODE_CA_PATH) {
+  try {
+    gatewayCa = readFileSync(process.env.OPENCLAW_NODE_CA_PATH, "utf8").trim();
+  } catch (error) {
+    console.error("Codex hook commands start without the Gateway CA: " + (error.code || "unreadable"));
+  }
+}
 if (gatewayCa) {
   const inheritedCa = process.env.NODE_EXTRA_CA_CERTS
     ? readFileSync(process.env.NODE_EXTRA_CA_CERTS, "utf8")
