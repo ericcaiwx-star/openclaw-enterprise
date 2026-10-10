@@ -264,10 +264,22 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
       (checkpoint.total >= tailLines || chunk.bufferTotal >= tailLines)
     );
   const checkpointLost = checkpoint !== undefined && !replaced && !checkpointValid;
-  // A byte-cut window retains the pre-cut overlap baseline. Value-prefix
-  // checkpoints are authenticated observations, not backend sequence numbers.
-  const baseTime = replaced ? null : (resume?.lastTime ?? null);
-  const baseHashes = replaced ? [] : (prior?.lastHashes ?? []);
+  // A position-only checkpoint retains its pre-cut baseline. A resumable timed
+  // cut can also retain a window witness beside advanced overlap. If that witness
+  // changes, an ordered earlier timestamp establishes the overlap group's start;
+  // otherwise a fresh snapshot with a gap may replay, but must not hide unread copies.
+  const resumeTime = replaced ? null : (resume?.lastTime ?? null);
+  const timed = chunk.lines.filter((line) => line.time !== null);
+  const overlapContext =
+    !checkpointLost ||
+    resumeTime === null ||
+    (timed.some((line) => compareRuntimeLogTime(line.time!, resumeTime) < 0) &&
+      timed.every(
+        (line, index) =>
+          index === 0 || compareRuntimeLogTime(line.time!, timed[index - 1]!.time!) >= 0,
+      ));
+  const baseTime = overlapContext ? resumeTime : null;
+  const baseHashes = replaced || !overlapContext ? [] : (prior?.lastHashes ?? []);
   const continuing = baseTime !== null && !replaced;
   if (checkpointLost) {
     leading.push(
@@ -288,9 +300,17 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     for (const hash of baseHashes) {
       remaining.set(hash, (remaining.get(hash) ?? 0) + 1);
     }
-    eligible = eligible.filter(({ line }) => {
+    eligible = eligible.filter(({ line, index }) => {
       if (line.time === null) {
         return true;
+      }
+      // A retained witness reads its original window; the advanced overlap has
+      // already delivered timed rows before this floor.
+      if (
+        compareRuntimeLogTime(line.time, baseTime) < 0 &&
+        !(checkpointValid && index >= checkpoint.count)
+      ) {
+        return false;
       }
       const hash = sandboxLogLineHash(line);
       const count = remaining.get(hash) ?? 0;
@@ -378,7 +398,7 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
     );
     const deliveredHashes = pageCut ? new Set(lineHashes.slice(0, end)) : undefined;
     // Equal hashes across the cut do not identify which occurrences survive a
-    // rolling tail. Retain the observed snapshot and its conservative reset.
+    // rolling tail. Retain its witness beside resumable timed overlap.
     const ambiguousOccurrences =
       pageCut &&
       lines
@@ -391,7 +411,6 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
         (chunk.bufferTotal < tailLines ||
           consumedLines.some((line) => line.time === null) ||
           window.overflow !== null ||
-          ambiguousOccurrences ||
           window.since === null ||
           newestDelivered === null ||
           lines
@@ -401,6 +420,7 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
             ))) ||
       (checkpoint !== undefined &&
         (consumedLines.some((line) => line.time === null) || lines.length === 0));
+    const saveCheckpoint = retainCheckpoint || ambiguousOccurrences;
     // Identical occurrences in a full single-time tail can roll without visible change.
     const firstTime = chunk.lines[0]?.time;
     const fullSingleTime =
@@ -410,7 +430,7 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
         (line) => line.time !== null && compareRuntimeLogTime(line.time, firstTime) === 0,
       );
     const unobservableTail =
-      (retainCheckpoint || checkpoint !== undefined || fullSingleTime) &&
+      (saveCheckpoint || checkpoint !== undefined || fullSingleTime) &&
       chunk.bufferTotal >= tailLines;
     const records = [
       ...leading,
@@ -433,11 +453,11 @@ export async function readSandboxLogPage(input: ReadSandboxLogPageInput): Promis
       podUid: sandboxId,
       restartCount: 0,
       previous: false,
-      // Retain the overlap baseline while the response window has an
-      // unconsumed suffix, rather than moving beyond an undelivered time.
+      // Pin the baseline for positional-only cuts. Safe timed overlap can advance
+      // beside the raw witness without crossing an undelivered time.
       lastTime: retainCheckpoint ? (baseTime ?? sinceTime ?? null) : window.since,
       lastHashes: retainCheckpoint ? baseHashes : window.hashes,
-      ...(retainCheckpoint
+      ...(saveCheckpoint
         ? {
             sandboxWindow: {
               since: sinceTime ?? null,

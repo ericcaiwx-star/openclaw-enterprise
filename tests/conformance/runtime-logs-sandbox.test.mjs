@@ -1331,8 +1331,12 @@ test("sandbox follows a growing full wire-cut tail without replaying its deliver
   );
 });
 
-for (const tailLines of [200, 1000]) {
-  test(`sandbox follows full ${tailLines}-line wire cuts inside millisecond timestamp groups`, async () => {
+for (const { tailLines, identical } of [
+  { tailLines: 200, identical: false },
+  { tailLines: 1000, identical: false },
+  { tailLines: 1000, identical: true },
+]) {
+  test(`sandbox follows full ${tailLines}-line wire cuts inside ${identical ? "identical" : "distinct"} millisecond timestamp groups`, async () => {
     const fixture = await sandboxFixture();
     const start = Date.now() - 120_000;
     const total = tailLines + 21;
@@ -1351,7 +1355,7 @@ for (const tailLines of [200, 1000]) {
       level: "INFO",
       target: "supervisor",
       source: "sandbox",
-      message: `row=${index}; ${"ordinary diagnostic ".repeat(tailLines === 200 ? 350 : 105)}`,
+      message: `row=${identical ? offsets[index] : index}; ${"ordinary diagnostic ".repeat(tailLines === 200 ? 350 : 105)}`,
       fields: {},
     });
     fixture.gateway.state.lines = Array.from({ length: tailLines }, (_, index) => row(index));
@@ -1379,14 +1383,19 @@ for (const tailLines of [200, 1000]) {
       seen.push(...indices);
       if (response.data.truncated && indices.length > 0) {
         const last = indices.at(-1);
-        splitGroup ||= offsets[last] === offsets[last + 1];
+        splitGroup ||= identical
+          ? lines.filter(({ message }) => message === lines.at(-1).message).length <
+            fixture.gateway.state.lines
+              .slice(-tailLines)
+              .filter(({ message }) => message === lines.at(-1).message).length
+          : offsets[last] === offsets[last + 1];
       }
       cursor = response.data.cursor;
     }
     assert.ok(splitGroup, "the response cut exercises a partly delivered timestamp group");
     assert.deepEqual(
       seen,
-      Array.from({ length: total }, (_, index) => index),
+      Array.from({ length: total }, (_, index) => (identical ? offsets[index] : index)),
     );
     const replay = await fixture.request(
       "GET",
@@ -1506,4 +1515,55 @@ test("sandbox partial identical groups preserve rollover uncertainty beside newe
   assert.ok(
     second.data.records.some(({ type, reason }) => type === "gap" && reason === "window_exceeded"),
   );
+});
+
+test("sandbox matching witnesses deliver new late rows below the advanced overlap floor", async () => {
+  const fixture = await sandboxFixture();
+  const start = Date.now() - 2000;
+  const recent = Array.from({ length: 300 }, (_, index) => ({
+    sandboxId: SANDBOX_ID,
+    time: new Date(start + Math.floor(index / 3)).toISOString().replace("Z", "000000Z"),
+    level: "INFO",
+    target: "supervisor",
+    source: "sandbox",
+    message: `group=${Math.floor(index / 3)}; ${"ordinary diagnostic ".repeat(105)}`,
+    fields: {},
+  }));
+  // An already full ring can grow the filtered window without changing its
+  // total or prior value prefix: the evicted rows are before the query floor.
+  const older = Array.from({ length: 1700 }, () => ({
+    ...recent[0],
+    time: new Date(start - 20_000).toISOString().replace("Z", "000000Z"),
+    message: "older diagnostic",
+  }));
+  fixture.gateway.state.lines = [...older, ...recent];
+  fixture.gateway.state.bufferTotal = 2000;
+  const first = await fixture.request(
+    "GET",
+    fixture.target.logsPath("source=sandbox&tailLines=1000&sinceSeconds=10"),
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.data.truncated, true);
+  fixture.gateway.state.lines.shift();
+  fixture.gateway.state.lines.push({
+    ...recent[0],
+    time: new Date(start - 2000).toISOString().replace("Z", "000000Z"),
+    message: "new late diagnostic",
+  });
+  const seen = [...first.data.records.filter(({ type }) => type === "line")];
+  let cursor = first.data.cursor;
+  for (let page = 0; page < 5; page += 1) {
+    const response = await fixture.request(
+      "GET",
+      fixture.target.logsPath(`source=sandbox&tailLines=1000&cursor=${cursor}`),
+    );
+    assert.equal(response.status, 200);
+    seen.push(...response.data.records.filter(({ type }) => type === "line"));
+    cursor = response.data.cursor;
+    if (!response.data.truncated) {
+      break;
+    }
+  }
+  assert.equal(seen.filter(({ message }) => message.startsWith("group=")).length, 300);
+  assert.equal(seen.filter(({ message }) => message === "new late diagnostic").length, 1);
 });

@@ -167,17 +167,17 @@ batches them, and filters `since_time` by that stamp, so a resume sends a time
 `SANDBOX_LOG_OVERLAP_MS` (5 s) behind the newest delivered line; the cursor
 keeps one hash per line delivered since then (up to 48), and each re-read line
 consumes one. First pages retain the requested window start.
-Signed cut checkpoints retain prefix digest/count, query floor and pre-cut baseline.
-Container retains two-second overlap. Changed timed windows resume
-from delivered progress; changed tails and ambiguous single-time replacements take
+Signed checkpoints retain prefix digest/count, query floor and baseline.
+Container retains 2-second overlap. Timed windows resume
+from progress; changed tails and ambiguous single-time replacements take
 fresh snapshots. Sandbox pins short windows, untimed rows and overflowing groups.
-Full timed windows use counted overlap for distinct partial groups within its floor.
-Identical cut occurrences retain snapshots; single-time tails retain ambiguity gaps.
-Container recovery keeps shortened/unknown-window gaps without duplicate notices.
+Full timed groups use counted overlap within its floor; identical cuts also retain
+rollover witnesses. Ordered overlap retains progress; uncertain context resets
+with a gap and replay. Single-time tails retain gaps. Container
+recovery retains shortened/unknown-window gaps without duplicates.
 All-untimed Driver byte cuts retain progress;
 mixed cuts advance through time with an explicit reset that may replay untimed rows.
-Matching checkpoints retain positional proof across growth. Stable windows drain,
-including over-capacity timestamp groups. UID/restarts reset progress; PEM recovery
+Matching checkpoints retain positional proof. Stable windows drain overflowing groups. UID/restarts reset progress; PEM recovery
 keeps masking. Identical replacements remain unobservable; full checkpoints, missing
 anchors or overflowing timestamp groups report gaps. gRPC `NOT_FOUND` (absent
 Sandbox, or concealed from a non-member) maps to

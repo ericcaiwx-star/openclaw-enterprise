@@ -302,8 +302,8 @@ export function createRuntimeLogCursorCodec(secret: string): RuntimeLogCursorCod
           fn: value.frontierCount,
           po: value.pemOpen,
           pt: value.pemAfterTime,
-          // The outer t/h retain the pre-cut overlap baseline while w is present.
-          // Compact only the additional window observation, keeping full hashes.
+          // The outer t/h hold the positional baseline or advanced timed overlap.
+          // Compact the additional window witness without dropping hashes.
           w:
             value.sandboxWindow === undefined
               ? undefined
