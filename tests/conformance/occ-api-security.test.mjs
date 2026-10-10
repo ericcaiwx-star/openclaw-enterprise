@@ -293,6 +293,14 @@ test("development admission fails closed outside explicit loopback-only developm
     createFixture({ development: { trustedCidrs: ["not-a-cidr"] } }),
     /IPv4 CIDR/,
   );
+  // "08" is prefix 8, and "010" is decimal 10. Production trusted proxies refuse both.
+  for (const cidr of ["192.168.0.0/08", "10.0.0.010/32", "10.0.0.0/032"]) {
+    await assert.rejects(
+      createFixture({ development: { trustedCidrs: [cidr] } }),
+      /IPv4 CIDR/,
+      cidr,
+    );
+  }
 
   const fixture = await createFixture();
   const remote = await request(fixture.app, "/installation/bootstrap", {
@@ -680,6 +688,26 @@ test("malformed, non-JSON, invalid, and oversized inputs fail without mutations"
   for (const candidate of cases) {
     const result = await request(fixture.app, "/namespaces", candidate);
     assert.equal(result.response.status, candidate.expectedStatus, JSON.stringify(candidate.body));
+    assert.equal(fixture.controller.pendingOperations().length, before);
+  }
+
+  // Route-specific Preset defaults must still obey an explicitly smaller application limit.
+  for (const method of ["POST", "PATCH"]) {
+    const suffix = method === "PATCH" ? "/pre_00000000-0000-4000-8000-000000000001" : "";
+    const result = await request(
+      fixture.app,
+      `/namespaces/${tenantANamespaceId}/presets${suffix}`,
+      {
+        method,
+        body: {
+          name: "Bounded",
+          template: {
+            variables: { guidance: { type: "string", default: "Routine guidance. ".repeat(40) } },
+          },
+        },
+      },
+    );
+    assert.equal(result.response.status, 413);
     assert.equal(fixture.controller.pendingOperations().length, before);
   }
 
@@ -1786,19 +1814,19 @@ test("contract error details stay within the published path cap and name what a 
   assert.ok(
     severalMessage.endsWith(
       "… is not an accepted field; body /harnessAuth/source is required;" +
-        " body /harnessAuth/serviceAccountId is required; and 3 more.",
+        " body /harnessAuth/sourceId is required; and 2 more.",
     ),
     severalMessage,
   );
   // Paths that exactly fill the cap stay whole.
   const exact = await request(fixture.app, agents, {
-    body: { ...agent, harnessAuth: { method: "x", ["Q".repeat(63)]: 1 } },
+    body: { ...agent, harnessAuth: { method: "x", ["Q".repeat(71)]: 1 } },
   });
   assert.equal(
     exact.payload.error.message,
-    `${contract} /harnessAuth/${"Q".repeat(63)} is not an accepted field;` +
-      " body /harnessAuth/source is required; body /harnessAuth/serviceAccountId is required;" +
-      " and 3 more.",
+    `${contract} /harnessAuth/${"Q".repeat(71)} is not an accepted field;` +
+      " body /harnessAuth/source is required; body /harnessAuth/sourceId is required;" +
+      " and 2 more.",
   );
   assert.equal(Array.from(exact.payload.error.message).length, 256);
   // The cap counts characters, not UTF-16 code units: an astral key that fits stays whole,

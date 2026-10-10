@@ -36,6 +36,7 @@ const cheatSheetEntities = [
   { title: "Configurations" },
   { title: "IAM access bindings", tag: "IAM", paths: ["/iam/access-bindings"] },
   { title: "IAM roles", tag: "IAM", paths: ["/iam/roles"] },
+  { title: "IAM service principals", tag: "IAM", paths: ["/iam/service-principals"] },
   { title: "Secrets" },
   { title: "Service accounts" },
   {
@@ -213,7 +214,7 @@ function operationReference(path, method, operation, document, { headingLevel = 
               ? " (when associated)"
               : condition === "existing_namespace"
                 ? " (when selecting an existing namespace)"
-                : condition === "bound_secret"
+                : condition === "bound_secret" || condition === "bound_credential_source"
                   ? " (when bound)"
                   : condition === "read_logs_alternative"
                     ? " (instead of `read_logs`)"

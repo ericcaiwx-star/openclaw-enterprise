@@ -32,7 +32,12 @@ function slackChannels(scenario) {
 function configurationValues(scenario) {
   const values = {
     gateway: { mode: "local" },
-    agents: { defaults: { model: "codex/gpt-4.1" } },
+    agents: {
+      defaults: {
+        model: "codex/gpt-4.1",
+        models: { "codex/gpt-4.1": { agentRuntime: { id: "codex" } } },
+      },
+    },
     channels: {},
   };
   if (scenario.gatewayPassword) {
@@ -161,6 +166,7 @@ export function installFixture(scenario, evidence) {
     {
       id: "sa_demo",
       name: "Research service",
+      credential: { kind: "access_token" },
       backendId: "chatgpt-demo",
       status: "active",
       createdAt,
@@ -198,7 +204,7 @@ export function installFixture(scenario, evidence) {
       : scenario.auth === "runtime"
         ? { method: "runtime" }
         : scenario.auth === "service"
-          ? { method: "chatgpt_service_account", serviceAccountId: "sa_demo" }
+          ? { method: "codex_pat", source: { kind: "service_account", namespaceId, id: "sa_demo" } }
           : scenario.auth === "codex_pat"
             ? { method: "codex_pat", source: secretRef("sec_demo_service_account") }
             : scenario.auth === "oauth"
@@ -404,6 +410,9 @@ export function installFixture(scenario, evidence) {
       ),
     );
   }
+  if (scenario.presetAgent) {
+    Object.assign(preset.template.agent, structuredClone(scenario.presetAgent));
+  }
   if (scenario.presetWorkspaceFiles) {
     preset.template.agent.initialWorkspaceFiles = structuredClone(scenario.presetWorkspaceFiles);
   }
@@ -602,7 +611,7 @@ export function installFixture(scenario, evidence) {
         }
       }
       if (resource === "service-accounts" && method === "GET") {
-        return response(accounts);
+        return response(scenario.serviceAccountsEmpty ? [] : accounts);
       }
       if (
         (resource === "agents/repository-options" ||
@@ -1081,6 +1090,18 @@ export function installFixture(scenario, evidence) {
           const revisionId = suffix.split("/")[2];
           if (url.searchParams.get("download") === "true") {
             // Downloads are a text/plain attachment, not a JSON envelope.
+            if (scenario.runtimeLogDownloadNoPod) {
+              return new Response(
+                `# agent=${id} revision=${revisionId} source=${url.searchParams.get("source")} observedAt=2026-09-27T11:41:10.000Z withheld=0\n`,
+                {
+                  status: 200,
+                  headers: {
+                    "content-type": "text/plain; charset=utf-8",
+                    "content-disposition": `attachment; filename="${id}-${revisionId}-${url.searchParams.get("source")}-no-pod.log"`,
+                  },
+                },
+              );
+            }
             return new Response(
               [
                 "2026-09-27T11:40:01.120Z info wrapper runtime.startup_phase container=gateway phase=config outcome=ok ms=12",

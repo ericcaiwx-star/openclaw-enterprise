@@ -34,7 +34,7 @@ authentication through the controller API remain deferred.
 
 An Agent may also reference one same-Namespace, OCC-owned
 [service account](../service-accounts.md) through
-`harnessAuth: { method: "chatgpt_service_account", serviceAccountId }`; setting
+`harnessAuth: { method: "codex_pat", source: { kind: "service_account", namespaceId, id: serviceAccountId } }`; setting
 `harnessAuth` to `null` clears it. This credential binding does not
 replace its ServicePrincipal or Kubernetes ServiceAccount.
 
@@ -64,8 +64,17 @@ An Agent update may include `executionMode`, `harnessAuth`, and `backendId`
 alongside its required `configurationId`. Omission preserves the current value;
 `harnessAuth: null` clears authentication and `backendId: null` clears the
 Backend. Existing revisions retain their immutable placement, auth binding, and
-Backend association.
-See the
+Backend association. For the current `harnessAuth` source, an update checks only
+the caller's grant (Secret or credential source `operate`, account `read`) and
+reads no record. After the Installation selects another Secret Driver or
+Credential Gateway, an update can still omit, clear, or replace the old binding;
+naming it again fails with `503`, and so does deploying with it. For a Secret,
+that `503`, like creating an Agent with one, says to bind a Secret stored
+through the selected driver. The named Configuration's Secret bindings get the
+full check on every update, even when `configurationId` is unchanged: until
+that Configuration's `secretBindings` name Secrets stored through the selected
+driver, updates and deploys fail with `503` and a message that says so.
+Updating that Configuration, or naming another one, resolves it. See the
 [Harness execution topology flow](../../flows/harness-execution-topology.md) for
 runtime selection, identity boundaries, and activation.
 
@@ -219,7 +228,13 @@ activation finishes.
 If a revision fails before the worker sets the pointer, the pointer is
 unchanged. After a failed first deployment, the Agent has no active revision.
 With [exclusive replacement](../drivers/compute.md#production-revision-stages),
-the unchanged pointer names a predecessor that was already stopped.
+the unchanged pointer names a predecessor that was already stopped, so nothing
+serves until a new revision activates. When the worker refuses the candidate,
+for example because its deploying actor lost `deploy` or a credential source
+was revoked, it stops the candidate's workload too. A candidate whose runtime
+failed by itself, such as `RUNTIME_MODEL_PROBE_FAILED` or
+`CONVERGENCE_DEADLINE_EXCEEDED`, keeps its Pods so its version's Logs tab can
+show the cause; the next deployment stops them.
 Kubernetes embedded replacement reports ready while the predecessor still
 serves, so the worker sets the pointer first. Activation then replaces the
 shared gateway, and the new gateway runs the startup model probe. If that
