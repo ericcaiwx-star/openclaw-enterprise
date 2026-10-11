@@ -362,6 +362,14 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if or (not $execution.apiCidrs) (not $execution.kubeconfigKey) -}}
 {{- fail "executionCluster requires explicit API CIDRs and kubeconfig key" -}}
 {{- end -}}
+{{- range $cidr := $execution.apiCidrs -}}
+{{- if not (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|3[0-2])$" $cidr) -}}
+{{- fail "executionCluster.apiCidrs requires explicit IPv4 CIDRs with prefixes 1 through 32" -}}
+{{- end -}}
+{{- range $octet := splitList "." (first (splitList "/" $cidr)) -}}
+{{- if gt (int $octet) 255 -}}{{- fail "executionCluster.apiCidrs contains an invalid IPv4 address" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if .Values.slackProxy.enabled -}}
 {{- $proxy := .Values.slackProxy -}}
