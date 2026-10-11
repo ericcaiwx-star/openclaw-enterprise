@@ -1083,7 +1083,7 @@ async function waitForGatewayReadiness(
   readiness: NonNullable<OpenShellSandboxDriverOptions["gateway"]["readiness"]>,
 ): Promise<void> {
   const namespace = namespaceName(context.namespace);
-  const deadline = Date.now() + (readiness.timeoutMs ?? 0);
+  const deadline = Date.now() + readiness.timeoutMs;
   const pollIntervalMs = readiness.pollIntervalMs ?? 1_000;
   let unavailable = "OpenShell gateway Service is unavailable.";
   for (;;) {
@@ -1555,15 +1555,22 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
   if (options.gateway.readiness !== undefined) {
     nonempty(options.gateway.readiness.serviceName, "OpenShell gateway Service name");
     labels(options.gateway.readiness.podSelector, "OpenShell gateway Pod selector");
-    for (const [value, description] of [
-      [options.gateway.readiness.timeoutMs, "OpenShell gateway readiness timeout"],
-      [options.gateway.readiness.pollIntervalMs, "OpenShell gateway readiness poll interval"],
-    ] as const) {
-      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
-        throw new OpenShellSandboxConfigurationFailure(
-          `${description} must be a positive safe integer.`,
-        );
-      }
+    if (
+      !Number.isSafeInteger(options.gateway.readiness.timeoutMs) ||
+      options.gateway.readiness.timeoutMs < 1
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell gateway readiness timeout must be a positive safe integer.",
+      );
+    }
+    const pollIntervalMs = options.gateway.readiness.pollIntervalMs;
+    if (
+      pollIntervalMs !== undefined &&
+      (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1)
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell gateway readiness poll interval must be a positive safe integer.",
+      );
     }
   }
   options.gateway.networkPolicyResources?.forEach((resource, index) =>
