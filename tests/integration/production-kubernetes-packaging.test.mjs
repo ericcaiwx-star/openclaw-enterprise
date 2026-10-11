@@ -2853,14 +2853,18 @@ test(
   tooling,
   async () => {
     for (const override of [
-      { "gatewayRouting.remoteNodeCidrs[0]": "0.0.0.0/0" },
       { "gatewayRouting.remoteNodeCidrs[0]": "not-a-cidr" },
       { "gatewayRouting.remoteNodeCidrs[0]": "010.0.0.1/32" },
+      { "gatewayRouting.remoteNodeCidrs[0]": "12345::/64" },
+      { "gatewayRouting.remoteNodeCidrs[0]": "::ffff:999.1.2.3/32" },
     ]) {
       await assert.rejects(
         render({ ...gatewayRoutingValues, ...override }),
         /gatewayRouting\.remoteNodeCidrs/,
       );
+    }
+    for (const cidr of ["10.0.0.1/32", "0.0.0.0/0", "::/64", "::ffff:10.0.0.0/120"]) {
+      await render({ ...gatewayRoutingValues, "gatewayRouting.remoteNodeCidrs[0]": cidr });
     }
   },
 );
