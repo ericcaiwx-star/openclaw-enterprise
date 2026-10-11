@@ -2002,6 +2002,27 @@ test("startup rejects OpenShell network policies without binary identities", asy
   );
 });
 
+test("startup rejects duplicate OpenShell network policy names", async (t) => {
+  const configuration = sandboxInstallation();
+  const template = configuration.drivers.sandbox.configuration.policy.networkPolicies[0];
+  configuration.drivers.sandbox.configuration.policy.networkPolicies.push({
+    ...template,
+    name: "model-egress",
+  });
+
+  await assert.rejects(
+    loadInstallationFile(t, configuration),
+    /OpenShell network policy name model-egress must be unique/,
+  );
+
+  configuration.drivers.sandbox.configuration.policy.networkPolicies[1].name =
+    "workspace-node-enrollment";
+  await assert.rejects(
+    loadInstallationFile(t, configuration),
+    /OpenShell network policy name workspace-node-enrollment is reserved/,
+  );
+});
+
 test("startup rejects inherited OpenShell network enum property names", async (t) => {
   const cases = [
     ["tls", "toString", /TLS mode must be one of: skip, terminate/],
