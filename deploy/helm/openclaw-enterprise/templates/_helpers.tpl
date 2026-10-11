@@ -262,6 +262,9 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if or (not (regexMatch "^[1-9][0-9]*$" (toString .Values.api.port))) (gt (int .Values.api.port) 65535) -}}
 {{- fail "api.port must be an integer TCP port from 1 to 65535" -}}
 {{- end -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" (toString .Values.cluster.port))) (gt (int .Values.cluster.port) 65535) -}}
+{{- fail "cluster.port must be an integer TCP port from 1 to 65535" -}}
+{{- end -}}
 {{- if not .Values.api.clients -}}{{- fail "api.clients must contain exact approved client selectors" -}}{{- end -}}
 {{- range $index, $client := .Values.api.clients -}}
 {{- if or (not $client.namespace) (not $client.podLabels) -}}
@@ -360,6 +363,9 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- end -}}
 {{- if or (not $execution.apiCidrs) (not $execution.kubeconfigKey) -}}
 {{- fail "executionCluster requires explicit API CIDRs and kubeconfig key" -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" (toString $execution.apiPort))) (gt (int $execution.apiPort) 65535) -}}
+{{- fail "executionCluster.apiPort must be an integer TCP port from 1 to 65535" -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.slackProxy.enabled -}}
