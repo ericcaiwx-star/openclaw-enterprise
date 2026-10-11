@@ -2848,6 +2848,23 @@ test(
   },
 );
 
+test(
+  "gatewayRouting.remoteNodeCidrs rejects invalid and every-address ranges",
+  tooling,
+  async () => {
+    for (const override of [
+      { "gatewayRouting.remoteNodeCidrs[0]": "0.0.0.0/0" },
+      { "gatewayRouting.remoteNodeCidrs[0]": "not-a-cidr" },
+      { "gatewayRouting.remoteNodeCidrs[0]": "010.0.0.1/32" },
+    ]) {
+      await assert.rejects(
+        render({ ...gatewayRoutingValues, ...override }),
+        /gatewayRouting\.remoteNodeCidrs/,
+      );
+    }
+  },
+);
+
 test("database CA mounts stay distinct from active production volume mounts", tooling, async () => {
   const optionalFeatures = {
     ...repositoryCredentialValues,

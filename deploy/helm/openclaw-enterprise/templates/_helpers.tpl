@@ -1,5 +1,6 @@
 {{- /* One IPv4 host. Go's ParseCIDR rejects an octet above 255 and a leading zero. */ -}}
 {{- define "openclaw.ipv4Host32" -}}^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])){3}/32${{- end -}}
+{{- define "openclaw.ipv4Cidr" -}}^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])){3}/([1-9]|[12][0-9]|3[0-2])${{- end -}}
 {{- define "openclaw.validateSecretKey" -}}
 {{- if or (eq (toString .value) ".") (hasPrefix ".." (toString .value)) (gt (len (toString .value)) 253) (not (regexMatch "^[-._A-Za-z0-9]+$" (toString .value))) -}}
 {{- fail (printf "%s must be a Kubernetes Secret key of at most 253 characters" .label) -}}
@@ -478,6 +479,16 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- fail "gatewayRouting.envoyHttpsTargetPort must be an integer TCP port from 1 to 65535" -}}
 {{- end -}}
 {{- if not $routing.envoyGatewayPodLabels -}}{{- fail "gatewayRouting.envoyGatewayPodLabels must select the Envoy Gateway control-plane Pods for xDS egress" -}}{{- end -}}
+{{- if not (kindIs "slice" $routing.remoteNodeCidrs) -}}{{- fail "gatewayRouting.remoteNodeCidrs must be a list of IPv4 or IPv6 CIDR strings" -}}{{- end -}}
+{{- range $cidr := $routing.remoteNodeCidrs -}}
+{{- $value := toString $cidr -}}
+{{- if regexMatch (include "openclaw.ipv4Cidr" .) $value -}}
+{{- else if regexMatch "^[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*/([1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$" $value -}}
+{{- else -}}
+{{- fail "gatewayRouting.remoteNodeCidrs requires IPv4 or IPv6 CIDRs with a nonzero prefix" -}}
+{{- end -}}
+{{- include "openclaw.trustedProxy.validateCidrRange" $value -}}
+{{- end -}}
 {{- if $routing.sandbox.enabled -}}
 {{- if not (regexMatch "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$" $routing.sandbox.domain) -}}{{- fail "gatewayRouting.sandbox.domain must be a DNS hostname without wildcard, scheme, port or path" -}}{{- end -}}
 {{- /* Dedicated Agent routes use agent-<32 hex>.<domain>, which must fit the 253-character Gateway API hostname limit. */ -}}
