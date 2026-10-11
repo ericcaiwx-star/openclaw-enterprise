@@ -4526,12 +4526,16 @@ test("explicit missing-file readback settles an uncertain workspace create witho
     `/namespaces/${namespace.id}/agents/agt_${randomUUID()}/workspace/files/USER.md`,
   );
   assert.equal(missingAgent.status, 404);
+  assert.deepEqual(missingAgent.body.error, {
+    code: "NOT_FOUND",
+    message: "The requested platform resource was not found.",
+  });
   await page.route(fixture.origin + path, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({
-        status: 404,
+        status: missingAgent.status,
         contentType: "application/json",
-        body: JSON.stringify({ error: missingAgent.error }),
+        body: JSON.stringify(missingAgent.body),
       });
     } else {
       await route.fallback();
