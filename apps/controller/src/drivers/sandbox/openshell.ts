@@ -86,7 +86,7 @@ export interface OpenShellSandboxDriverOptions {
     readonly readiness?: {
       readonly serviceName: string;
       readonly podSelector: Readonly<Record<string, string>>;
-      readonly timeoutMs?: number;
+      readonly timeoutMs: number;
       readonly pollIntervalMs?: number;
     };
     readonly operatorWorkspaceResources?: readonly KubernetesNamespacedResource[];
