@@ -187,7 +187,8 @@ selected Driver. It serializes Kubernetes, filesystem, process, and
 binary-scoped network policy against the exact `v0.1.3-pre.2` wire contract.
 Landlock is a hard requirement; unsupported enum spellings, inherited object
 keys, the old `passthrough` TLS spelling, or policies without executable paths
-fail before launch.
+fail before launch. Gateway readiness, when set, also requires a positive
+`timeoutMs`; startup names that field and stops before Kubernetes calls.
 
 Kubernetes Compute invokes `provisionHarness` only after the workspace-node
 setup Secret exists. The Driver creates or adopts the runtime provider with the

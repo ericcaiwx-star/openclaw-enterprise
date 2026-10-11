@@ -11,6 +11,22 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-12: OpenShell gateway readiness requires timeoutMs
+
+**What breaks.** An Installation that sets `gateway.readiness` with only
+`serviceName` and `podSelector` now fails controller startup. The field
+`timeoutMs` is required and must be a positive safe integer.
+
+**Who is affected.** Operators and the in-tree Kubernetes OpenShell helper that
+omitted the timeout. Omitted readiness is unchanged.
+
+**How to tell.** Startup says the OpenShell gateway readiness timeout must be a
+positive safe integer.
+
+**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond budget
+(the real helper uses 120000), then start again. _untested_ against a live
+Installation.
+
 ## 2026-10-11: named Harness authentication and Docker workspace refusals
 
 **What breaks.**
