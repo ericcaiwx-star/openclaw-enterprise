@@ -22,8 +22,10 @@ kept only the last rule for a duplicate name.
 policy named `workspace-node-enrollment` and no separate workspace-node binding
 that should keep that name.
 
-**How to tell.** Startup says the network policy name must be unique, or that
-`workspace-node-enrollment` is reserved.
+**How to tell.** Startup logs `startup-error` with code
+`OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
+does not include the policy name. Loading the Installation configuration names
+the duplicate or reserved policy.
 
 **Steps.** Rename or merge duplicate policies. Rename a policy called
 `workspace-node-enrollment`. Keep each policy's binaries and endpoints. _untested_
