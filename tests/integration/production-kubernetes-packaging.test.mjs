@@ -2111,7 +2111,8 @@ test(
       [{ "repositoryCredentials.appKeySecretName": "occ-auth" }, /dedicated Secret/],
       [{ "repositoryCredentials.tlsSecretName": "repository-config" }, /dedicated Secret/],
       [{ "repositoryCredentials.upstreamCidrs[0]": "0.0.0.0/0" }, /explicit IPv4 CIDRs/],
-      [{ "repositoryCredentials.upstreamCidrs[0]": "999.1.1.1/32" }, /invalid IPv4 address/],
+      [{ "repositoryCredentials.upstreamCidrs[0]": "999.1.1.1/32" }, /explicit IPv4 CIDRs/],
+      [{ "repositoryCredentials.upstreamCidrs[0]": "192.168.001.10/32" }, /explicit IPv4 CIDRs/],
       ...[
         "external.example.com",
         "git.other-namespace.svc",
@@ -3200,7 +3201,12 @@ test(
       [
         "GitHub sign-in with an invalid egress address",
         { ...githubLoginValues, "auth.github.egressCidrs[0]": "140.82.312.0/20" },
-        /invalid IPv4 address/,
+        /explicit IPv4 CIDRs/,
+      ],
+      [
+        "GitHub sign-in with a leading-zero egress octet",
+        { ...githubLoginValues, "auth.github.egressCidrs[0]": "140.82.112.08/20" },
+        /explicit IPv4 CIDRs/,
       ],
       [
         "GitHub sign-in with a /0 egress entry",
