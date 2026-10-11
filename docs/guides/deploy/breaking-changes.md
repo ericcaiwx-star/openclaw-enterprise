@@ -11,6 +11,24 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-12: OpenShell network policy names must be unique
+
+**What breaks.** Controller startup now refuses an Installation whose
+`policy.networkPolicies` repeat a name, or use the reserved name
+`workspace-node-enrollment`. Those configurations used to start, and OpenShell
+kept only the last rule for a duplicate name.
+
+**Who is affected.** Installations with duplicate policy names, or with a
+policy named `workspace-node-enrollment` and no separate workspace-node binding
+that should keep that name.
+
+**How to tell.** Startup says the network policy name must be unique, or that
+`workspace-node-enrollment` is reserved.
+
+**Steps.** Rename or merge duplicate policies. Rename a policy called
+`workspace-node-enrollment`. Keep each policy's binaries and endpoints. _untested_
+against a live Installation.
+
 ## 2026-10-11: the chart refuses malformed Secret, ConfigMap and GatewayClass names
 
 **What breaks.** `helm template`, `install` and `upgrade` fail when a Secret
