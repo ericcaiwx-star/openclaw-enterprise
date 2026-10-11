@@ -1449,11 +1449,10 @@ function buildRendered(profile, parsed, diagnostics) {
                 description: "a simple basename",
               }) ?? "ca.pem",
             caMountPath:
-              optionalString(
-                databaseCa,
-                ["controlPlane", "databaseCa", "mountPath"],
-                diagnostics,
-              ) ?? "/etc/openclaw/database-ca",
+              optionalString(databaseCa, ["controlPlane", "databaseCa", "mountPath"], diagnostics, {
+                validate: (value) => value.startsWith("/"),
+                description: "an absolute path",
+              }) ?? "/etc/openclaw/database-ca",
           }),
     },
     api: {

@@ -817,6 +817,7 @@ test(
       for (const mountPath of [
         undefined,
         "/etc/company/postgres-ca",
+        "relative/database-ca",
         "/etc/openclaw/execution", // Profiles do not enable executionCluster mounts.
         "/etc/openclaw/installation",
         "/run/openclaw-worker",
@@ -838,7 +839,10 @@ test(
           accepted:
             mountPath === undefined ||
             ["/etc/company/postgres-ca", "/etc/openclaw/execution"].includes(mountPath),
-          chartError,
+          chartError:
+            mountPath === "relative/database-ca"
+              ? /database.caMountPath must be an absolute path/
+              : chartError,
         });
       }
       // No CA mount creates no collision, even when every other feature uses its defaults.

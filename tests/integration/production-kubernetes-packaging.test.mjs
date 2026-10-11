@@ -2833,6 +2833,10 @@ test(
 );
 
 test("database CA mounts stay distinct from active production volume mounts", tooling, async () => {
+  await assert.rejects(
+    render({ ...databaseCaValues, "database.caMountPath": "relative/database-ca" }),
+    /database.caMountPath must be an absolute path/,
+  );
   const optionalFeatures = {
     ...repositoryCredentialValues,
     ...gatewayRoutingValues,

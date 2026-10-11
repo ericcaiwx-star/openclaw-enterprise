@@ -1,7 +1,7 @@
 ---
 created: 2026-09-28
-updated: 2026-10-10
-last_updated_session: authoring-run/c4350829-13f6-40e0-902f-9d96e622a27c
+updated: 2026-10-11
+last_updated_session: authoring-run/72d140a6-4dae-42b8-8f6e-89cd314e5085
 ---
 
 # Installation Profile Rendering Flow
@@ -151,18 +151,16 @@ follow their rule within 200 UTF-16 code units, as in the chart.
 
 `scripts/render-installation-profile.mjs:buildRendered`
 
-An optional `controlPlane.databaseCa.key` must be a simple basename. The chart
-refuses `.`, `..`, and any other key that is not letters, digits, `.`, `_`, or
-`-`. Omit the key to use `ca.pem`.
+An optional `controlPlane.databaseCa.key` must be a simple basename; omit it for
+`ca.pem`. Its `mountPath` must be absolute; omit it for
+`/etc/openclaw/database-ca`.
 
-`validateDatabaseCaMount` checks the generated values against the chart's active
-database-client mounts. With a database CA Secret, `mountPath` cannot equal the
-Installation, worker runtime, bootstrap, gateway key, or private gateway CA mount.
-Repository mounts are reserved only when repository credentials are enabled;
-the ChatGPT mount is reserved only when managed service accounts are configured.
-Profiles do not enable execution-cluster mounts. No CA configuration adds no
-restriction; an omitted path keeps `/etc/openclaw/database-ca`. A collision adds
-a field-specific preflight error and prevents both deployable files.
+`validateDatabaseCaMount` checks generated values against active database-client
+mounts. A database CA path cannot equal the Installation, worker, bootstrap,
+gateway key, or private gateway CA mount. Repository and ChatGPT mounts are
+reserved only when their features are enabled; profiles do not enable
+execution-cluster mounts. Invalid paths add field-specific errors and prevent
+both deployable files.
 
 The Helm values select the control-plane image, Better Auth base URL,
 bootstrap administrator, database and cluster egress CIDRs, API client
@@ -283,6 +281,8 @@ activation, and repository registry creation need separate evidence.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-11 18:23: Reject relative database CA mount paths. (authoring-run/72d140a6-4dae-42b8-8f6e-89cd314e5085 - d61deee9631f7fe6144e6d4256ef87af97d82b10)
 
 - 2026-10-10: Public CA Secrets may share one Secret, as in the chart.
 

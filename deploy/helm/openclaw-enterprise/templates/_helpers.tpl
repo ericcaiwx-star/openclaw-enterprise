@@ -303,7 +303,10 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if or (eq .Values.database.caKey ".") (eq .Values.database.caKey "..") (not (regexMatch "^[A-Za-z0-9._-]+$" .Values.database.caKey)) -}}
 {{- fail "database.caKey must be a simple basename" -}}
 {{- end -}}
-{{- /* The CA is mounted in API, worker, migration and bootstrap. Kubernetes requires each container's mount paths to be unique. */ -}}
+{{- if not (hasPrefix "/" (toString .Values.database.caMountPath)) -}}
+{{- fail "database.caMountPath must be an absolute path" -}}
+{{- end -}}
+{{- /* The CA is mounted in API, worker, migration and bootstrap. Kubernetes requires absolute, unique mount paths in each container. */ -}}
 {{- $reservedCaMounts := list "/etc/openclaw/installation" "/run/openclaw-worker" (toString .Values.bootstrap.password.mountPath) -}}
 {{- if .Values.executionCluster.enabled -}}
 {{- $reservedCaMounts = append $reservedCaMounts "/etc/openclaw/execution" -}}

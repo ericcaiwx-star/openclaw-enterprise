@@ -1978,6 +1978,19 @@ test("channel proxy validation preserves omitted-port endpoint diagnostics", (t)
   }
 });
 
+test("profiles refuse relative database CA mount paths Kubernetes refuses", () => {
+  assertPreflightFailure(
+    "openclaw",
+    baseInput({
+      controlPlane: {
+        ...baseInput().controlPlane,
+        databaseCa: { secretName: "occ-db-ca", mountPath: "relative/database-ca" },
+      },
+    }),
+    /controlPlane.databaseCa.mountPath must be an absolute path/,
+  );
+});
+
 test("profiles refuse database CA keys the chart refuses", () => {
   const withCa = (key) =>
     baseInput({

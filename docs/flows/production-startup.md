@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
-updated: "2026-10-10"
-last_updated_session: "authoring-run/pr1903-peerlabels-sync"
+updated: "2026-10-11"
+last_updated_session: "authoring-run/72d140a6-4dae-42b8-8f6e-89cd314e5085"
 ---
 
 # Production Startup Flow
@@ -181,12 +181,11 @@ on reviewed control-plane nodes; empty defaults omit it.
 to `EnvoyProxy.spec.provider.kubernetes.envoyDeployment.pod`, keeping the private
 proxy on that pool. Tenant gateway and Agent placement remain Compute-owned.
 
-`database.caSecretName` selects read-only CA mounts at `database.caMountPath`
-for all four database clients.
-`deploy/helm/openclaw-enterprise/templates/_helpers.tpl` rejects equality with
-another active client mount, including bootstrap output. Disabled optional
-features reserve no paths; disabling the CA leaves its path unused. Kubernetes
-requires unique mount paths within each container.
+`database.caSecretName` mounts its CA at the absolute
+`database.caMountPath` in four database clients.
+`deploy/helm/openclaw-enterprise/templates/_helpers.tpl` rejects relative paths
+and active-mount equality, including bootstrap output. Disabled
+features reserve no paths; disabling the CA leaves its path unused.
 
 The [shared egress policy](../../deploy/helm/openclaw-enterprise/templates/networkpolicies.yaml)
 selects only `api`, `worker`, and `initialization` Pods with the release identity.
@@ -316,6 +315,8 @@ until tenant deployment/TUI procedures run.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-11 18:23: Reject relative database CA mount paths. (authoring-run/72d140a6-4dae-42b8-8f6e-89cd314e5085 - d61deee9631f7fe6144e6d4256ef87af97d82b10)
 
 - 2026-10-10 08:22: Retain Namespace and bootstrap guidance with peer-map validation. (authoring-run/3cecc2d2-5f5c-4ce3-9901-928542c3d370 - ac237c12f504fd8f49a5e66c05a8d3865b13444e)
 
