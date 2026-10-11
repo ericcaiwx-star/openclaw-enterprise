@@ -699,6 +699,17 @@ test(
         /executionCluster\.apiPort must be an integer TCP port/,
       );
     }
+    await assert.rejects(
+      render({}, { strings: { "cluster.port": "9223372036854775808" } }),
+      /cluster\.port must be an integer TCP port/,
+    );
+    await assert.rejects(
+      render(
+        { ...executionValues },
+        { strings: { "executionCluster.apiPort": "99999999999999999999" } },
+      ),
+      /executionCluster\.apiPort must be an integer TCP port/,
+    );
     const objects = await resources(
       (await render({ ...executionValues, "executionCluster.apiPort": "6443" })).stdout,
     );

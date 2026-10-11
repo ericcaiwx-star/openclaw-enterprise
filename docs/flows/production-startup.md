@@ -112,8 +112,9 @@ installs initialization isolation before the Job. It and later workload policies
 grant configured DNS peers UDP/TCP `53` and `5353`
 ([Helm DNS contract](../reference/settings/production.md#required-production-controller-environment)).
 
-`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` validates routing ports and hostnames against Compute. `database.port`
-must be decimal 1–65535 without leading zeros. Empty hostnames retain Service DNS
+`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` validates routing ports and hostnames against Compute. `database.port`,
+`cluster.port`, and `executionCluster.apiPort` must be decimals 1–65535 with no
+leading zero and at most five digits. Empty hostnames retain Service DNS
 for Gateway listeners and Certificate SANs.
 `deploy/helm/openclaw-enterprise/templates/_network-policies.tpl:openclaw.networkPolicy.matchLabels`
 refuses peer maps Kubernetes rejects, preserving null/empty semantics and accepted labels.
@@ -130,8 +131,7 @@ dedicated role and canonical receipt/catalog state, and holds one advisory lock
 on the connection used by Drizzle's normal transaction. It accepts fresh
 databases, canonical history through migration 0023, or the completed history
 through 0025. Unsupported or mixed development histories fail before migration
-DDL, preventing bootstrap from running. Development and production share this preflight; see [migration history and recovery](../reference/settings/operations.md#migration-history)
-for the read-only check and developer-selected recreation procedure.
+DDL, preventing bootstrap from running. See [migration history and recovery](../reference/settings/operations.md#migration-history).
 
 `scripts/bootstrap-installation.mjs:authBaseURL` checks an HTTP(S) origin before
 database access. Production requires HTTPS except for HTTP loopback verification
