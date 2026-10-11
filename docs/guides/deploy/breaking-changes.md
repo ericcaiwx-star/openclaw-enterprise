@@ -26,11 +26,68 @@ says it must be an integer TCP port from 1 to 65535.
 **Steps.** Replace a leading-zero value with its effective decimal port (`010`
 becomes `8`) before the next Helm upgrade. _untested_ against a live release.
 
+## 2026-10-11: named Harness authentication and Docker workspace refusals
+
+**What breaks.**
+
+- On Kubernetes Compute, an Agent whose `harnessAuth.method` its topology
+  cannot use (for example `runtime` or `codex_pat` on embedded OpenClaw, or
+  `oauth` on dedicated OpenClaw) gets `400` naming `harnessAuth.method`, where
+  it got a fixed `409`: at provisioning and deployment, and at Agent create and
+  update for `runtime` and Secret bindings. Nothing new is refused.
+- On Docker Compute, Agent create, and update while initial workspace files
+  are pending, answer `400` for an `agents.entries` roster other than `main`
+  alone, a workspace other than `/home/node/.openclaw/workspace` or
+  `/home/node/workspace`, or a true `skipBootstrap` or
+  `skipOptionalBootstrapFiles`. Before, the first deployment's preparation
+  failed. The messages match Kubernetes Compute's.
+
+**Who is affected.** Clients that branch on the `409`, and Docker Compute
+users who saved such an Agent. Stored Agents still read.
+
+**How to tell.** The `400` names the setting.
+
+**Steps.** Change the named setting, `harnessAuth` or `executionMode`, then save
+again.
+
+## 2026-10-11: Agent and Configuration saves refuse what deployment refuses
+
+**What breaks.** On Kubernetes Compute, Configuration create and update,
+provisioning and Preset saves answer `400` for an enabled unsupported
+`channels.<provider>`, a non-empty `auth`, an `env` or `env.vars` name starting
+`OPENAI_` or `ANTHROPIC_` (or a Codex login variable), and an authorization
+header on a selected model provider. Agent create and update refuse what
+deployment refused for the same Agent and Configuration: an Agent that is not
+`dedicated` (including an omitted `executionMode`) when a Sandbox Driver is
+selected (`400`; deployment answered `404`), a Harness the Configuration
+selects for the other execution mode (`400`), a Harness authentication,
+repository or initial workspace file setup the Compute Driver cannot deliver
+(`400` naming the setting, or `409`). Deployment names those Kubernetes
+settings too, instead of answering with fixed Harness authentication text:
+
+- Deployment answers `400` naming the setting, where it answered `409`, for
+  the dedicated OpenClaw model catalog, a provider `apiKey`, channel Secret
+  bindings and `cloudWorkers.requiredProfile`.
+- Deployment refuses a pending initial workspace setup the Configuration
+  cannot deliver with `400`, where the first deployment's preparation failed.
+- Switching an embedded OpenClaw Agent to `dedicated` needs the Configuration
+  to carry the dedicated model catalog first: save the Configuration, then
+  the Agent.
+
+**Who is affected.** Clients that saved such values and fixed them before
+deploying. Stored Configurations and Agents still read.
+
+**How to tell.** The `400` names the setting or the execution mode.
+
+**Steps.** Fix the named setting or the Agent's `executionMode`, then save
+again.
+
 ## 2026-10-11: the chart refuses malformed Secret, ConfigMap and GatewayClass names
 
 **What breaks.** `helm template`, `install` and `upgrade` fail when a Secret
-name the chart reads, `repositoryCredentials.registryConfigMapName` or
-`gatewayRouting.gatewayClassName` is not a Kubernetes resource name: lowercase
+name the chart reads, `repositoryCredentials.registryConfigMapName`,
+`gatewayRouting.gatewayClassName` or `gatewayRouting.issuerRef.name` is not a
+Kubernetes resource name: lowercase
 letters, digits, `-` and `.`, starting and ending with a letter or digit, at
 most 253 characters. Examples are `database.caSecretName`,
 `gatewayRouting.apiKeySecretName`, `auth.*.secretName` and
