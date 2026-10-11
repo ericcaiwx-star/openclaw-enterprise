@@ -363,7 +363,7 @@ function observabilityDestination(value) {
 
 // The chart refuses ".", "..", and any database.caKey that is not a basename.
 function simpleBasename(value) {
-  return value !== "." && value !== ".." && /^[A-Za-z0-9._-]+$/.test(value);
+  return value !== "." && value !== ".." && value.length <= 253 && /^[A-Za-z0-9._-]+$/.test(value);
 }
 
 function validateDatabaseCaMount(values, diagnostics) {
