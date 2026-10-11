@@ -7,10 +7,10 @@ export function githubHeadingVisibleText(inlineToken) {
   if (inlineToken === undefined || inlineToken === null) {
     return "";
   }
-  if (inlineToken.type === "text" || inlineToken.type === "code_inline") {
-    return inlineToken.content;
-  }
   if (inlineToken.type === "image") {
+    return "";
+  }
+  if (inlineToken.type === "text" || inlineToken.type === "code_inline") {
     return inlineToken.content;
   }
   if (Array.isArray(inlineToken.children)) {
