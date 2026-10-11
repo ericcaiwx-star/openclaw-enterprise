@@ -11,6 +11,30 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-11: named Harness authentication and Docker workspace refusals
+
+**What breaks.**
+
+- On Kubernetes Compute, an Agent whose `harnessAuth.method` its topology
+  cannot use (for example `runtime` or `codex_pat` on embedded OpenClaw, or
+  `oauth` on dedicated OpenClaw) gets `400` naming `harnessAuth.method`, where
+  it got a fixed `409`: at provisioning and deployment, and at Agent create and
+  update for `runtime` and Secret bindings. Nothing new is refused.
+- On Docker Compute, Agent create, and update while initial workspace files
+  are pending, answer `400` for an `agents.entries` roster other than `main`
+  alone, a workspace other than `/home/node/.openclaw/workspace` or
+  `/home/node/workspace`, or a true `skipBootstrap` or
+  `skipOptionalBootstrapFiles`. Before, the first deployment's preparation
+  failed. The messages match Kubernetes Compute's.
+
+**Who is affected.** Clients that branch on the `409`, and Docker Compute
+users who saved such an Agent. Stored Agents still read.
+
+**How to tell.** The `400` names the setting.
+
+**Steps.** Change the named setting, `harnessAuth` or `executionMode`, then save
+again.
+
 ## 2026-10-11: Agent and Configuration saves refuse what deployment refuses
 
 **What breaks.** On Kubernetes Compute, Configuration create and update,
@@ -46,8 +70,9 @@ again.
 ## 2026-10-11: the chart refuses malformed Secret, ConfigMap and GatewayClass names
 
 **What breaks.** `helm template`, `install` and `upgrade` fail when a Secret
-name the chart reads, `repositoryCredentials.registryConfigMapName` or
-`gatewayRouting.gatewayClassName` is not a Kubernetes resource name: lowercase
+name the chart reads, `repositoryCredentials.registryConfigMapName`,
+`gatewayRouting.gatewayClassName` or `gatewayRouting.issuerRef.name` is not a
+Kubernetes resource name: lowercase
 letters, digits, `-` and `.`, starting and ending with a letter or digit, at
 most 253 characters. Examples are `database.caSecretName`,
 `gatewayRouting.apiKeySecretName`, `auth.*.secretName` and
