@@ -363,11 +363,19 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- fail "executionCluster requires explicit API CIDRs and kubeconfig key" -}}
 {{- end -}}
 {{- range $cidr := $execution.apiCidrs -}}
-{{- if not (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|3[0-2])$" $cidr) -}}
-{{- fail "executionCluster.apiCidrs requires explicit IPv4 CIDRs with prefixes 1 through 32" -}}
+{{- $value := toString $cidr -}}
+{{- if regexMatch "^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])){3}/([1-9]|[12][0-9]|3[0-2])$" $value -}}
+{{- else if regexMatch "^[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*/([1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$" $value -}}
+{{- $addr := first (splitList "/" $value) -}}
+{{- $tail := regexFind ":(?:0|[1-9][0-9]{0,2})(?:\\.(?:0|[1-9][0-9]{0,2})){3}$" $addr -}}
+{{- range $octet := splitList "." (default ":0.0.0.0" $tail | trimPrefix ":") -}}
+{{- if gt (int $octet) 255 -}}{{- fail "executionCluster.apiCidrs contains an invalid IPv6 address" -}}{{- end -}}
 {{- end -}}
-{{- range $octet := splitList "." (first (splitList "/" $cidr)) -}}
-{{- if gt (int $octet) 255 -}}{{- fail "executionCluster.apiCidrs contains an invalid IPv4 address" -}}{{- end -}}
+{{- $hex := ternary (printf "%s:0:0" (trimSuffix $tail $addr)) $addr (ne $tail "") -}}
+{{- $groups := len (regexFindAll "[0-9A-Fa-f]+" $hex -1) -}}
+{{- if or (not (regexMatch "^(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)?(?:::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)?)?$" $hex)) (ternary (gt $groups 7) (ne $groups 8) (contains "::" $hex)) -}}{{- fail "executionCluster.apiCidrs contains an invalid IPv6 address" -}}{{- end -}}
+{{- else -}}
+{{- fail "executionCluster.apiCidrs requires an explicit IPv4 or IPv6 CIDR with a nonzero prefix" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
