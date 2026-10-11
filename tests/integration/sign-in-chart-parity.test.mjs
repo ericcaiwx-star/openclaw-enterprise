@@ -1031,7 +1031,7 @@ describe("sign-in chart parity", { concurrency: true }, () => {
         [
           "an invalid egress address",
           { ...google, "auth.google.egressCidrs[0]": "142.250.300.0/24" },
-          /auth\.google\.egressCidrs contains an invalid IPv4 address/,
+          /auth\.google\.egressCidrs requires explicit IPv4 CIDRs/,
         ],
         [
           "a /0 egress entry",
