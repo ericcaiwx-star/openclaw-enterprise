@@ -11,25 +11,45 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
-## 2026-10-12: OpenShell network policy names must be unique
+## 2026-10-13: OpenShell network policy names must be unique
 
-**What breaks.** Controller startup now refuses an Installation whose
-`policy.networkPolicies` repeat a name, or use the reserved name
-`workspace-node-enrollment`. Those configurations used to start, and OpenShell
-kept only the last rule for a duplicate name.
+**What breaks.** Controller startup refuses an Installation whose
+`policy.networkPolicies` repeat a name, or name a policy
+`workspace-node-enrollment`. Those configurations start today. A duplicate name
+keeps only the last rule. A policy named `workspace-node-enrollment` is replaced
+when a workspace-node binding exists.
 
-**Who is affected.** Installations with duplicate policy names, or with a
-policy named `workspace-node-enrollment` and no separate workspace-node binding
-that should keep that name.
+**Who is affected.** Installations with duplicate policy names, or with a policy
+named `workspace-node-enrollment`.
 
 **How to tell.** Startup logs `startup-error` with code
 `OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
 does not include the policy name. Loading the Installation configuration names
 the duplicate or reserved policy.
 
-**Steps.** Rename or merge duplicate policies. Rename a policy called
-`workspace-node-enrollment`. Keep each policy's binaries and endpoints. _untested_
-against a live Installation.
+**Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
+policy called `workspace-node-enrollment`. Keep each policy's binaries and
+endpoints. _untested_ against a live Installation.
+
+## 2026-10-12: demo NetworkPolicy ports must be canonical decimals
+
+**What breaks.** `helm upgrade` of the observability demo fails when
+`cluster.port` or `occ.metricsPort` is not a decimal integer from 1 through
+65535 with no leading zero. A saved string `"010"` used to install, and
+Kubernetes applied port 8. The upgrade now stops before it writes that policy.
+
+**Who is affected.** Demo releases whose saved values use a leading zero or a
+port outside that range. Defaults 443 and 9464, and an ordinary decimal such as
+6443, upgrade unchanged.
+
+**How to tell.** Helm stops in `prometheus.yaml` with
+`cluster.port must be an integer TCP port from 1 to 65535`, or the same
+sentence for `occ.metricsPort`.
+
+**Steps.** Set the field to the decimal Kubernetes already applied (`8` for a
+saved `"010"`) and upgrade again. The NetworkPolicy port stays that decimal.
+The [demo install](../observability/demo.md#install-private-backends) states the
+same contract.
 
 ## 2026-10-11: named Harness authentication and Docker workspace refusals
 
