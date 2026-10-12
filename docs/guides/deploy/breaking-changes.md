@@ -11,6 +11,50 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-12: demo NetworkPolicy ports must be canonical decimals
+
+**What breaks.** `helm upgrade` of the observability demo fails when
+`cluster.port` or `occ.metricsPort` is not a decimal integer from 1 through
+65535 with no leading zero. A saved string `"010"` used to install, and
+Kubernetes applied port 8. The upgrade now stops before it writes that policy.
+
+**Who is affected.** Demo releases whose saved values use a leading zero or a
+port outside that range. Defaults 443 and 9464, and an ordinary decimal such as
+6443, upgrade unchanged.
+
+**How to tell.** Helm stops in `prometheus.yaml` with
+`cluster.port must be an integer TCP port from 1 to 65535`, or the same
+sentence for `occ.metricsPort`.
+
+**Steps.** Set the field to the decimal Kubernetes already applied (`8` for a
+saved `"010"`) and upgrade again. The NetworkPolicy port stays that decimal.
+The [demo install](../observability/demo.md#install-private-backends) states the
+same contract.
+
+## 2026-10-11: named Harness authentication and Docker workspace refusals
+
+**What breaks.**
+
+- On Kubernetes Compute, an Agent whose `harnessAuth.method` its topology
+  cannot use (for example `runtime` or `codex_pat` on embedded OpenClaw, or
+  `oauth` on dedicated OpenClaw) gets `400` naming `harnessAuth.method`, where
+  it got a fixed `409`: at provisioning and deployment, and at Agent create and
+  update for `runtime` and Secret bindings. Nothing new is refused.
+- On Docker Compute, Agent create, and update while initial workspace files
+  are pending, answer `400` for an `agents.entries` roster other than `main`
+  alone, a workspace other than `/home/node/.openclaw/workspace` or
+  `/home/node/workspace`, or a true `skipBootstrap` or
+  `skipOptionalBootstrapFiles`. Before, the first deployment's preparation
+  failed. The messages match Kubernetes Compute's.
+
+**Who is affected.** Clients that branch on the `409`, and Docker Compute
+users who saved such an Agent. Stored Agents still read.
+
+**How to tell.** The `400` names the setting.
+
+**Steps.** Change the named setting, `harnessAuth` or `executionMode`, then save
+again.
+
 ## 2026-10-11: Agent and Configuration saves refuse what deployment refuses
 
 **What breaks.** On Kubernetes Compute, Configuration create and update,
