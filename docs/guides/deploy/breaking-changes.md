@@ -11,23 +11,41 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
-## 2026-10-12: OpenShell gateway readiness requires timeoutMs
+## 2026-10-13: OpenShell gateway readiness requires timeoutMs
 
-**What breaks.** An Installation that sets `gateway.readiness` with only
-`serviceName` and `podSelector` now fails controller startup. The field
-`timeoutMs` is required and must be a positive safe integer.
+**What breaks.** Controller startup fails when `gateway.readiness` is set and
+`timeoutMs` is omitted. That configuration starts today. The field must be a
+positive safe integer. Omitted readiness is unchanged.
 
-**Who is affected.** Operators and the in-tree Kubernetes OpenShell helper that
-omitted the timeout. Omitted readiness is unchanged.
+**Who is affected.** Installations, and the real k3d helper, that set
+`gateway.readiness` with only `serviceName` and `podSelector`.
 
-**How to tell.** Startup logs `startup-error` with code `STARTUP_FAILED` and
-does not name `timeoutMs`. Loading the Installation configuration reports that
-the OpenShell gateway readiness timeout must be a positive safe integer.
+**How to tell.** Startup logs `startup-error` with code `STARTUP_FAILED`. The
+Installation loader reports `OpenShell gateway readiness timeout must be a
+positive safe integer.` The message does not name `timeoutMs`.
 
-**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond budget
-(the real helper uses 120000), then start again. A disposable Installation
-bootstrapped before that restart kept its installation row, default namespace,
-administrator account, and IAM identities.
+**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window.
+The real helper uses 120000. Then start again.
+
+## 2026-10-12: demo NetworkPolicy ports must be canonical decimals
+
+**What breaks.** `helm upgrade` of the observability demo fails when
+`cluster.port` or `occ.metricsPort` is not a decimal integer from 1 through
+65535 with no leading zero. A saved string `"010"` used to install, and
+Kubernetes applied port 8. The upgrade now stops before it writes that policy.
+
+**Who is affected.** Demo releases whose saved values use a leading zero or a
+port outside that range. Defaults 443 and 9464, and an ordinary decimal such as
+6443, upgrade unchanged.
+
+**How to tell.** Helm stops in `prometheus.yaml` with
+`cluster.port must be an integer TCP port from 1 to 65535`, or the same
+sentence for `occ.metricsPort`.
+
+**Steps.** Set the field to the decimal Kubernetes already applied (`8` for a
+saved `"010"`) and upgrade again. The NetworkPolicy port stays that decimal.
+The [demo install](../observability/demo.md#install-private-backends) states the
+same contract.
 
 ## 2026-10-11: named Harness authentication and Docker workspace refusals
 
