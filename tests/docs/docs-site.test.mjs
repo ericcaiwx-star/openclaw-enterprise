@@ -5,6 +5,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
+import {
+  createGithubAnchorReader,
+  githubHeadingVisibleText,
+} from "../../scripts/docs-site/github-anchors.mjs";
+import { createMarkdownRenderer } from "../../scripts/docs-site/vendor/mdx-ish.mjs";
 import { renderMatrixMarkdown } from "../../scripts/generate-compute-matrix.mjs";
 import {
   buildDocs,
@@ -372,3 +377,22 @@ for (const [kind, label] of [
     assert.equal(await readFile(page, "utf8"), generated);
   });
 }
+
+// GitHub's heading fragment uses rendered text. A linked heading such as
+// `## A & [B](./guide.md)` is visible text `A & B`, and its alias is `a--b`.
+test("github heading aliases slug visible text for a linked heading", async (t) => {
+  const md = createMarkdownRenderer();
+  const source = "## A & [B](./guide.md)\n";
+  const tokens = md.parse(source, {});
+  const headingOpen = tokens.findIndex((token) => token.type === "heading_open");
+  const inline = tokens[headingOpen + 1];
+  const visible = githubHeadingVisibleText(inline);
+  assert.equal(visible, "A & B");
+  assert.notEqual(visible, inline.content);
+
+  const directory = await mkdtemp(join(tmpdir(), "enterprise-github-heading-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const page = join(directory, "page.md");
+  await writeFile(page, source);
+  assert.ok(createGithubAnchorReader(md)(page).has("a--b"));
+});
