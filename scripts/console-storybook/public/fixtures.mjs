@@ -486,16 +486,17 @@ export function installFixture(scenario, evidence) {
       });
     }
   }
-  const response = (
-    data,
-    status = 200,
-    errorCode,
-    meta = {},
-    errorMessage = "The selected preview simulates this failure.",
-  ) =>
+  const response = (data, status = 200, errorCode, meta = {}, errorMessage) =>
     new Response(
       JSON.stringify({
-        ...(errorCode ? { error: { code: errorCode, message: errorMessage } } : { data }),
+        ...(errorCode
+          ? {
+              error: {
+                code: errorCode,
+                message: errorMessage ?? "The selected preview simulates this failure.",
+              },
+            }
+          : { data }),
         meta: { requestId: "req_00000000-0000-4000-8000-000000000001", ...meta },
       }),
       { status, headers: { "content-type": "application/json" } },
