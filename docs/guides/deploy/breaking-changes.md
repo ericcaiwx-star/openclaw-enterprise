@@ -25,8 +25,9 @@ does not name `timeoutMs`. Loading the Installation configuration reports that
 the OpenShell gateway readiness timeout must be a positive safe integer.
 
 **Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond budget
-(the real helper uses 120000), then start again. _untested_ against a live
-Installation.
+(the real helper uses 120000), then start again. A disposable Installation
+bootstrapped before that restart kept its installation row, default namespace,
+administrator account, and IAM identities.
 
 ## 2026-10-11: named Harness authentication and Docker workspace refusals
 
