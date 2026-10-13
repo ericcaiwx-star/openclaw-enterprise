@@ -4804,6 +4804,7 @@ test("the canonical Kubernetes runtime validates channel proxy configuration", (
   for (const proxyUrl of [
     "http://10.42.0.15:3128",
     "http://127.0.0.1:8080",
+    " http://192.0.2.10:8080 ",
     "https://[2001:db8::15]:8443",
   ]) {
     const channels = { proxyUrl };

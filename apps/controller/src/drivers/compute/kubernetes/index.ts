@@ -1850,9 +1850,14 @@ function channelProxy(
   }
   // The URL parser rewrites octal, shorthand, integer, and hex IPv4 hosts.
   // Egress must name the host that was written, so only four decimal octets
-  // with no leading zeros are accepted. IPv6 is unchanged.
+  // with no leading zeros are accepted. IPv6 is unchanged. Leading C0
+  // controls and spaces are not part of that host; new URL strips them.
   if (isIP(address) === 4) {
-    const writtenHost = /^https?:\/\/([^:/?#\\]+)/i.exec(raw)?.[1];
+    let hostSource = raw;
+    while (hostSource.charCodeAt(0) <= 0x20) {
+      hostSource = hostSource.slice(1);
+    }
+    const writtenHost = /^https?:\/\/([^:/?#\\]+)/i.exec(hostSource)?.[1];
     if (
       writtenHost === undefined ||
       writtenHost !== parsed.hostname ||
