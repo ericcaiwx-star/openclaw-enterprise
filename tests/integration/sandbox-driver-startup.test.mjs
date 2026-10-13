@@ -2132,6 +2132,12 @@ test("startup rejects an invalid OpenShell gateway readiness wait", async (t) =>
     loadInstallationFile(t, configuration),
     /OpenShell gateway readiness timeout must be a positive safe integer/,
   );
+
+  delete configuration.drivers.sandbox.configuration.gateway.readiness.timeoutMs;
+  await assert.rejects(
+    loadInstallationFile(t, configuration),
+    /OpenShell gateway readiness timeout must be a positive safe integer/,
+  );
 });
 
 /**
