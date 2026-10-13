@@ -22,6 +22,12 @@ idempotency or cache key, a last word of `bearer`, `credential`, `passcode`,
 and provisioning, and on Kubernetes Compute also Preset saves, Agent saves and
 deployment, answer `400` for a `models.providers.<provider>.models` that is
 not a list, which OpenClaw refused only when the Gateway started.
+A later change also matches the words `authentication`, `assertion`, `hmac`,
+`jwt`, `license`, `otp`, `pass`, `pin` and `pwd`, suffixes such as `-v2` and
+`.` separators, but saves partition, shard, sort and dedup keys; on every
+Compute, Configuration and Preset saves refuse a header name that is not a
+valid HTTP field name, and Preset saves check `models`, `baseUrl` and `api`
+(a variable without a default is checked once filled).
 
 **Who is affected.** Configurations with such a header, or with a `models`
 record, `null` or string on any provider.
@@ -73,6 +79,25 @@ values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
 **Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
 `::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.
 
+## 2026-10-13: execution API CIDRs must be explicit and nonzero
+
+**What breaks.** `helm upgrade` fails when a saved `executionCluster.apiCidrs`
+entry is `0.0.0.0/0`, `::/0`, or a leading-zero address such as `010.44.0.2/32`.
+Those values used to render. A `/0` became egress to any address on the
+execution API port, and the apiserver accepted the leading-zero form with a
+warning. The upgrade now stops before it writes that policy.
+
+**Who is affected.** Saved releases that use one of those spellings. A canonical
+IPv4 CIDR with prefix 1 through 32, such as `192.0.2.0/28`, and a canonical
+IPv6 CIDR with a nonzero prefix, such as `2001:db8::/64`, still upgrade. A
+disabled execution cluster is not checked.
+
+**How to tell.** Helm stops with
+`executionCluster.apiCidrs requires an explicit IPv4 or IPv6 CIDR with a nonzero prefix`.
+
+**Steps.** Replace `0.0.0.0/0` or `::/0` with the execution API addresses you
+mean to allow. Rewrite `010.44.0.2/32` as `10.44.0.2/32`. Upgrade again.
+
 ## 2026-10-13: demo cluster CIDRs must be one canonical IPv4 host
 
 **What breaks.** `helm upgrade` of the observability demo fails when a
@@ -91,6 +116,21 @@ such as `10.43.0.1/32` upgrades unchanged.
 **Steps.** Replace the saved value with its canonical spelling (`010.0.0.1/32`
 becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
 `/32`.
+
+## 2026-10-12: cluster and execution API ports must be canonical decimals
+
+**What breaks.** Helm now refuses `cluster.port` and `executionCluster.apiPort`
+values that are not a canonical decimal from 1 to 65535 with at most five
+digits. `010` and integers Sprig cannot convert, such as
+`9223372036854775808`, no longer render.
+
+**Who is affected.** Installations that set either port with a leading zero.
+
+**How to tell.** Helm names `cluster.port` or `executionCluster.apiPort` and
+says it must be an integer TCP port from 1 to 65535.
+
+**Steps.** Replace a leading-zero value with its effective decimal port (`010`
+becomes `8`) before the next Helm upgrade. _untested_ against a live release.
 
 ## 2026-10-12: model credentials in provider headers and request auth
 
