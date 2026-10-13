@@ -113,15 +113,16 @@ grant configured DNS peers UDP/TCP `53` and `5353`
 ([Helm DNS contract](../reference/settings/production.md#required-production-controller-environment)).
 
 `deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` validates routing ports and hostnames against Compute. `database.port`,
-`cluster.port`, and `executionCluster.apiPort` must be decimals 1–65535 with no
-leading zero and at most five digits. Empty hostnames retain Service DNS
-for Gateway listeners and Certificate SANs.
+`cluster.port`, and `executionCluster.apiPort` must be decimals 1–65535.
+Empty hostnames retain Service DNS for Gateway listeners and Certificate SANs.
 `deploy/helm/openclaw-enterprise/templates/_network-policies.tpl:openclaw.networkPolicy.matchLabels`
 refuses peer maps Kubernetes rejects, preserving null/empty semantics and accepted labels.
 
 The hook keeps the release name and bounds its suffix to 63 characters. Both
 containers optionally mount the CA. Helm validates distinct application and
-migration Secret keys against Kubernetes syntax before use. Bootstrap also
+migration Secret keys against Kubernetes syntax before use.
+`executionCluster.kubeconfigKey` must be a Secret key of at most 253 characters,
+not `.` or a `..` prefix. Bootstrap
 receives auth, administrator, Installation and output settings.
 
 `scripts/migrate-production.mjs:1`, `scripts/migration-history.mjs:migrateWithHistory`
