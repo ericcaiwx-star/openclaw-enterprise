@@ -156,6 +156,10 @@ for the supported installation workflow, prerequisites, and Teams deployment lim
 
 Repository previews cover access levels, empty or pending discovery, unavailable
 choices, denied or unverified authorization, and reselection after a rejected save.
+In **Locale-stable repository search**, confirm that `ibm` keeps the approved
+`IBM-platform` reference visible as `acme/platform`, then select it and confirm the
+stored reference. This story uses simulated repository data and does not prove
+GitHub App access or credential delivery.
 In **Repository choices unavailable**, follow the setup link or retry; creation
 without repository access stays available. The recovery story keeps its saved
 Configuration and needs a current nonempty repository selection to retry.
