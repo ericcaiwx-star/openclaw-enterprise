@@ -12,6 +12,22 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-13: channel proxy IPv4 hosts must be four decimal octets
+
+**What breaks.** Startup refuses a channel proxy IPv4 host that is not four
+decimal octets from 0 to 255 with no leading zeros. Shorthand, a single
+integer, hex, and leading zeros used to allow egress to a different address.
+
+**Who is affected.** Installations whose `channels.proxyUrl` uses one of those
+spellings. Canonical decimals, IPv6 literals, and a managed Service proxy URL
+still start.
+
+**How to tell.** Startup fails with
+`Channel proxy URL IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.`
+
+**Steps.** Write the host as four decimal octets (`127.0.0.1` for
+`0177.0.0.1`) and restart.
+
 ## 2026-10-13: shorthand observability IPv4 hosts are refused
 
 **What breaks.** An observability URL whose IPv4 host is not four decimal
@@ -73,7 +89,12 @@ a trailing algorithm word such as `-sha256` or `-ed25519` and a digit glued
 to `key`, and matches `protection-bypass`. A later change quotes the header in
 the Kubernetes message instead of a word list: `must not set the credential
 header "X-Upstream-Pwd" (its name marks a credential)`; on Kubernetes a Preset
-header name that waits on a variable saves, checked once filled.
+header name that waits on a variable saves, checked once filled. A later change
+checks an escaped token (`\{{ vars.name }}`), or a default that reads like a
+token, as written: it stays literal once filled, so such a header name,
+`baseUrl` or `api` is refused at save instead of failing every launch. The
+invalid header name refusal now quotes the header up to its first invalid
+character: `must use valid HTTP header names, not "Bad…"`.
 
 **Who is affected.** Configurations with such a header, or with a `models`
 record, `null` or string on any provider.
