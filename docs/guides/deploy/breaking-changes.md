@@ -12,6 +12,24 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-13: shorthand observability IPv4 hosts are refused
+
+**What breaks.** An observability URL whose IPv4 host is not four decimal
+octets from 0 to 255, with no leading zeros, is refused. Shorthand, hex, a
+single integer, and leading zeros used to be stored as a different address
+(`192.168.1` became `192.168.0.1`; `2130706433` became `127.0.0.1`).
+
+**Who is affected.** Profiles with `controlPlane.observabilityUrl`, and
+Installations whose startup `observability.url` uses one of those spellings.
+A canonical host such as `192.168.1.1`, and any DNS name, still loads.
+
+**How to tell.** The profile reports `controlPlane.observabilityUrl IPv4 host
+must be four decimal octets from 0 to 255 with no leading zeros; other
+spellings parse as a different address.` Startup reports that sentence for
+`observability.url`.
+
+**Steps.** Write the four decimal octets you mean, then render or restart.
+
 ## 2026-10-13: IP database hosts are verified against the certificate
 
 **What breaks.** A PostgreSQL URL whose host is an IP literal and whose TLS

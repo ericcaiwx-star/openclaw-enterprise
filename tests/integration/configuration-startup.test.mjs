@@ -53,6 +53,8 @@ test("Installation startup validates the optional external observability URL", a
   assert.equal(loaded.installation.observability.url, configuration.observability.url);
 
   const url = configuration.observability.url;
+  const rewrittenIpv4ObservabilityUrl =
+    /observability\.url IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address\./;
   for (const [observability, message] of [
     ...[
       "javascript:alert(1)",
@@ -73,9 +75,36 @@ test("Installation startup validates the optional external observability URL", a
         mode: "development",
         environment: { OCC_CONFIG_PATH: path },
       }),
-      message,
+      (error) => {
+        assert.match(error.message, message);
+        assert.doesNotMatch(error.message, rewrittenIpv4ObservabilityUrl);
+        return true;
+      },
     );
   }
+  for (const shorthand of ["http://192.168.1", "http://2130706433"]) {
+    configuration.observability = { url: shorthand };
+    await writeFile(path, JSON.stringify(configuration), "utf8");
+    await assert.rejects(
+      loadInstallationConfiguration({
+        mode: "development",
+        environment: { OCC_CONFIG_PATH: path },
+      }),
+      (error) => {
+        assert.match(error.message, rewrittenIpv4ObservabilityUrl);
+        assert.doesNotMatch(error.message, /must be an absolute HTTP or HTTPS URL/);
+        return true;
+      },
+    );
+  }
+  configuration.observability = { url: "http://192.168.1.1" };
+  await writeFile(path, JSON.stringify(configuration), "utf8");
+  const canonical = await loadInstallationConfiguration({
+    mode: "development",
+    environment: { OCC_CONFIG_PATH: path },
+  });
+  assert.equal(canonical.installation.observability.url, "http://192.168.1.1/");
+  assert.equal(new URL(canonical.installation.observability.url).hostname, "192.168.1.1");
 });
 
 test("Installation startup declares native worker support only as a custom runtime image", async (t) => {
