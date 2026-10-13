@@ -23,6 +23,7 @@ import {
 } from "../../packages/occ/src/index.ts";
 import {
   createAccessTokenServiceAccount,
+  createBackendController,
   poolWithOneBackendBindingReadFault,
   backendDefinition,
   requiresPostgres,
@@ -421,7 +422,9 @@ revisionTest(
       "uncertain provider retirement must not be replayed",
     );
   },
-  { timeout: 30_000 },
+  // First in its file, so it also absorbs the file's cold start (finding 1171):
+  // about 12.5 s typically, 31.7 s once on a slow runner.
+  { timeout: 60_000 },
 );
 
 revisionTest(
@@ -3793,6 +3796,41 @@ revisionTest(
 );
 
 revisionTest(
+  "deployment status judges claim liveness by the database clock, not the controller clock",
+  async (fixture) => {
+    const { owner, candidate } = await fixture.admitInitialRevision("deployment-clock");
+    const queue = new fixture.PostgresWorkQueue(fixture.observerPool, { leaseDurationMs: 60_000 });
+    // Both controllers read the same durable work with clocks skewed far from PostgreSQL's.
+    const statusFrom = (instant) => {
+      const controller = createBackendController(fixture, {
+        backends: [],
+        now: () => new Date(instant),
+      });
+      return async () =>
+        (
+          await controller.getDeploymentStatus(
+            fixture.actor.id,
+            fixture.namespace.id,
+            owner.id,
+            candidate.id,
+          )
+        ).status;
+    };
+    const statusAhead = statusFrom("2999-01-01T00:00:00Z");
+    const statusBehind = statusFrom("1970-01-01T00:00:00Z");
+
+    const claim = await queue.claim();
+    assert.equal(claim.idempotencyKey, candidate.idempotencyKey);
+    // A controller clock ahead of the lease still reports the live claim.
+    assert.equal(await statusAhead(), "running");
+
+    await fixture.expireClaim(candidate, claim.claimToken);
+    // A controller clock behind the lease still reports the expired claim as waiting.
+    assert.equal(await statusBehind(), "queued");
+  },
+);
+
+revisionTest(
   "real PostgreSQL preserves the failure budget while an Agent runtime converges",
   async (fixture) => {
     const { owner, candidate } = await fixture.admitInitialRevision("slow-runtime");
@@ -4308,6 +4346,59 @@ revisionTest(
       data: { timeoutMs: 1, runtimeFailure },
     });
     assert.deepEqual(status.warnings, []);
+    // A runtime that failed by itself stays for diagnosis: nothing retires it.
+    assert.equal(status.cleanup, null);
+  },
+);
+
+revisionTest(
+  "an OAuth bootstrap still running at the convergence deadline retires its revision with the failure",
+  async (fixture) => {
+    const { owner, candidate } = await fixture.admitInitialRevision("expired-bootstrap");
+    const stopped = [];
+    await fixture.start(
+      {
+        ...fixture.compute,
+        async prepareRevision(revision) {
+          return {
+            ...(await fixture.compute.prepareRevision(revision)),
+            ready: false,
+            pendingReason: "HARNESS_CREDENTIAL_BOOTSTRAP_PENDING",
+          };
+        },
+        async stopRevision(revision) {
+          stopped.push(revision.id);
+          await fixture.compute.stopRevision(revision);
+        },
+      },
+      { convergenceTimeoutMs: 1 },
+    );
+
+    await fixture.work(candidate, "failed_permanent");
+    // The retirement obligation commits with the failure, so the bootstrap Job and its
+    // seed Secret (the OAuth token bundle) cannot outlive the failed revision.
+    const cleanupRow = async () =>
+      (
+        await fixture.observerPool.query(
+          "SELECT state FROM occ.controller_work WHERE revision_id = $1 AND idempotency_key LIKE '%:repository_cleanup:retire:%'",
+          [candidate.id],
+        )
+      ).rows;
+    assert.equal((await cleanupRow()).length, 1);
+    const status = await fixture.deploymentStatus(owner, candidate);
+    assert.equal(status.status, "failed");
+    assert.deepEqual(status.error, {
+      code: "CONVERGENCE_DEADLINE_EXCEEDED",
+      message: "Deployment convergence deadline exceeded.",
+      data: { timeoutMs: 1 },
+    });
+    assert.notEqual(status.cleanup, null);
+    await waitFor("the expired bootstrap's revision cleanup", async () => {
+      const [row] = await cleanupRow();
+      return row?.state === "succeeded" ? row : undefined;
+    });
+    assert.ok(stopped.includes(candidate.id));
+    assert.equal((await fixture.activePointer(owner)).rows[0].active_revision_id, null);
   },
 );
 
