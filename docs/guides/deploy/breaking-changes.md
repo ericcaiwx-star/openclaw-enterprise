@@ -12,6 +12,23 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-13: runtime images follow the control-plane image rule
+
+**What breaks.** Profile preflight refuses a `runtime.image` that does not start
+with a letter or digit, or that contains a character other than letters, digits,
+`.`, `_`, `:`, `/`, or `-`, before `@sha256:` and 64 lowercase hexadecimal
+characters. Helm already refuses that reference on `images.gateway` and
+`images.agent`.
+
+**Who is affected.** Profiles whose runtime reference uses another character,
+such as `+`. An ordinary registry reference with a lowercase SHA-256 digest
+still renders.
+
+**How to tell.** Preflight reports `runtime.image must be an immutable image
+reference with a SHA-256 digest` and writes no deployment files.
+
+**Steps.** Use the runtime image's registry reference with its digest.
+
 ## 2026-10-13: channel proxy IPv4 hosts must be four decimal octets
 
 **What breaks.** Startup refuses a channel proxy IPv4 host that is not four
@@ -41,8 +58,8 @@ A canonical host such as `192.168.1.1`, and any DNS name, still loads.
 
 **How to tell.** The profile reports `controlPlane.observabilityUrl IPv4 host
 must be four decimal octets from 0 to 255 with no leading zeros; other
-spellings parse as a different address.` Startup reports that sentence for
-`observability.url`.
+spellings parse as a different address.` API and worker startup log
+`OBSERVABILITY_URL_INVALID`.
 
 **Steps.** Write the four decimal octets you mean, then render or restart.
 
@@ -219,21 +236,6 @@ the duplicate or reserved policy.
 **Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
 policy called `workspace-node-enrollment`. Keep each policy's binaries and
 endpoints. _untested_ against a live Installation.
-
-## 2026-10-12: cluster and execution API ports must be canonical decimals
-
-**What breaks.** Helm now refuses `cluster.port` and `executionCluster.apiPort`
-values that are not a canonical decimal from 1 to 65535 with at most five
-digits. `010` and integers Sprig cannot convert, such as
-`9223372036854775808`, no longer render.
-
-**Who is affected.** Installations that set either port with a leading zero.
-
-**How to tell.** Helm names `cluster.port` or `executionCluster.apiPort` and
-says it must be an integer TCP port from 1 to 65535.
-
-**Steps.** Replace a leading-zero value with its effective decimal port (`010`
-becomes `8`) before the next Helm upgrade. _untested_ against a live release.
 
 ## 2026-10-12: model credentials in provider headers and request auth
 
