@@ -1848,6 +1848,22 @@ function channelProxy(
       "Channel proxy URL must identify one credential-free HTTP(S) IP endpoint.",
     );
   }
+  // The URL parser rewrites octal, shorthand, integer, and hex IPv4 hosts.
+  // Egress must name the host that was written, so only four decimal octets
+  // with no leading zeros are accepted. IPv6 is unchanged.
+  if (isIP(address) === 4) {
+    const writtenHost = /^https?:\/\/([^:/?#\\]+)/i.exec(raw)?.[1];
+    if (
+      writtenHost === undefined ||
+      writtenHost !== parsed.hostname ||
+      !/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(writtenHost) ||
+      writtenHost.split(".").some((octet) => Number(octet) > 255)
+    ) {
+      throw new ConfigurationFailure(
+        "Channel proxy URL IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
+      );
+    }
+  }
   validatePort(port, "Channel proxy port");
   return { kind: "ip", address, port };
 }
