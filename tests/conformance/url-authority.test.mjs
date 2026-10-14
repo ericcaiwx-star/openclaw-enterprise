@@ -3,7 +3,7 @@ import test from "node:test";
 import { validateModelCredentialReferences } from "../../apps/controller/src/drivers/configuration/model-auth.ts";
 
 const message = (field) =>
-  `Configuration field ${field} has an empty authority or a missing //, which parses as a different host.`;
+  `Configuration field ${field} has an empty authority or a missing //, which parses as a different host. Write an absolute http:// or https:// URL with the host you mean, and save again.`;
 
 test("proxy, channel, MCP and plugin URLs refuse an empty authority or a missing scheme slash pair", () => {
   const refused = [
@@ -57,4 +57,26 @@ test("proxy, channel, MCP and plugin URLs refuse an empty authority or a missing
     mcp: { servers: { demo: { url: "https://mcp.example.test/mcp" } } },
     models: { providers: { gateway: { baseUrl: "https:///v1" } } },
   });
+
+  // The variable can supply `//host`. The filled Configuration is checked later.
+  validateModelCredentialReferences(
+    { proxy: { proxyUrl: "https:{{ vars.endpoint }}" } },
+    {
+      unresolved: (path) => (path.at(-1) === "proxyUrl" ? ["https:", ""] : undefined),
+    },
+  );
+  // An empty authority is already in the literal, so a later variable cannot repair it.
+  assert.throws(
+    () =>
+      validateModelCredentialReferences(
+        { proxy: { proxyUrl: "https:///{{ vars.path }}" } },
+        {
+          unresolved: (path) => (path.at(-1) === "proxyUrl" ? ["https:///", ""] : undefined),
+        },
+      ),
+    (error) => {
+      assert.equal(error.message, message("/proxy/proxyUrl"));
+      return true;
+    },
+  );
 });
