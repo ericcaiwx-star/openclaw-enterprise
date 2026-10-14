@@ -13,24 +13,38 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-14: every model selection must use the Harness provider
+
+**What breaks.** On Kubernetes Compute, Agent create and update and deployment
+refuse a model selection on another provider than the Agent's primary model:
+fallbacks, Agent entries, `subagents.model`, `imageModel`, `pdfModel` and the
+other `*Model` settings, `models` policy keys, hook models and
+`channels.modelByChannel`. They also refuse an `apiKey` on any other
+`models.providers` entry. Dedicated Codex refuses one on every entry, and a
+`models` policy key without a provider.
+
+**Who is affected.** Configurations that select a second provider or give it
+an `apiKey`, or that set any provider `apiKey` for Dedicated Codex.
+
+**How to tell.** A `400` names the setting (a mismatched fallback used to get
+a fixed-text `409`): `... must select <provider>/<model>, the provider of the
+Agent's Harness authentication binding`, `... must be provider/model
+references`, or `models.providers.<name>.apiKey must be unset`.
+
+**Steps.** Select only the primary model's provider and remove the other
+provider's `apiKey`, then save and deploy again.
+
 ## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
 
 **What breaks.** Startup and both gateway clients refuse an OpenShell
-`endpoint` whose IPv4 host is not four decimal octets from 0 to 255 with no
-leading zeros. Shorthand, a single integer, hex, and leading zeros used to be
-dialed as a different address (`192.168.1` became `192.168.0.1`; `2130706433`
-became `127.0.0.1`).
+`endpoint` whose IPv4 host is not four decimal octets with no leading zeros.
 
 **Who is affected.** Backends whose `configuration.endpoint` uses one of those
-spellings, bare `host:port` or an `http`/`https` origin. A canonical host such
-as `192.168.1.1`, a DNS name, and an IPv6 literal still connect.
+spellings.
 
-**How to tell.** Startup reports `configuration.endpoint IPv4 host must be four
-decimal octets from 0 to 255 with no leading zeros; other spellings parse as a
-different address.` The gateway client reports that sentence for `OpenShell
-gateway endpoint`.
+**How to tell.** The report says `IPv4 host must be four decimal octets`.
 
-**Steps.** Write the four decimal octets you mean, then restart.
+**Steps.** Write those four octets, then restart.
 
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 
