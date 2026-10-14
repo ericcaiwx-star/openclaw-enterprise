@@ -113,10 +113,20 @@ managed environment SecretRef; explicit trusted proxy retains its configured tru
 
 The helper creates or verifies a deterministic per-Agent system user and
 private group, then creates the Agent directory and reserves the lowest free
-port across the shared root. Root-owned account markers bind the UID/GID to the
-exact Driver, Namespace, Agent, and ServicePrincipal. Existing unowned accounts
-or conflicting markers fail closed. Agent-owned `home/` and `state/` use mode
-`0700` and persist across revisions.
+port across the shared root. Before `groupadd` or `useradd`, and only when that
+account name is absent, it writes `accounts/<runtimeUser>.json` with
+`pending: true` and no UID/GID. A killed helper can leave that claim and any
+account already created. The next preparation with the same Driver, Namespace,
+Agent, and ServicePrincipal resumes the claim, creates whichever of the group
+or user is missing, and replaces the marker with the recorded UID/GID. A
+different ServicePrincipal does not match the claim and is refused before
+account commands. An account or group with no marker is refused and is not
+adopted. A failed `useradd` that leaves neither account removes the claim, so a
+later foreign account is not adopted. The
+[SSH Compute reference](../reference/drivers/ssh-compute.md) states this marker
+contract. A finalized marker, including one written before pending claims
+existed, is verified by its recorded UID/GID and is not rewritten. Agent-owned
+`home/` and `state/` use mode `0700` and persist across revisions.
 
 The helper creates `gateway-password.env` only when needed and missing,
 preserving its value across later revisions. It does not migrate historical
@@ -170,7 +180,11 @@ Relinking permits cleanup after `disable` removed a custom directory's load-path
 Deletion runs `beforeNamespaceDelete` hooks, then validates every Agent, revision,
 and unit in the deletion set before stopping gateways. The helper stops and
 disables owned units through `stopOwnedUnit`, removes their unit files, reloads systemd, and removes the
-Namespace tree, including persistent state, and its owned runtime accounts. The driver clears its in-memory
+Namespace tree, including persistent state, and its owned runtime accounts. A
+pending claim for that Namespace is part of the owned set: deletion removes the
+claim and any account it already created, and does not remove another
+Namespace's account. An account with no marker is not adopted or deleted here.
+The driver clears its in-memory
 bindings only after the host operation succeeds.
 
 Agent deletion (`ssh/index.ts:deleteAgentRuntimeCredentials`,
@@ -209,6 +223,8 @@ retire, which frees its gateway port.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14: Trace the pending account claim written before `useradd`, its resume, and Namespace cleanup of that incomplete account. The marker contract stays in the SSH Compute reference.
 
 - 2026-10-10 06:15: Trace absolute unit enablement and relinking for owned cleanup outside systemd's load path. (authoring-run/f50ad5ce-853f-4d20-9c15-8da39cbe292e - 792304b6a09b5df4f46e3889066f231610b294cf)
 
