@@ -48,8 +48,19 @@ contain a tab or newline, or a backslash before the query`. Startup logs
 `OBSERVABILITY_URL_INVALID`.
 
 **Steps.** Write the host you mean, with no tab, newline, or backslash before the
-query, and
-upgrade. _untested_ against a live Installation.
+query, and upgrade. _untested_ against a live Installation.
+
+## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
+
+**What breaks.** Startup and both gateway clients refuse an OpenShell
+`endpoint` whose IPv4 host is not four decimal octets with no leading zeros.
+
+**Who is affected.** Backends whose `configuration.endpoint` uses one of those
+spellings.
+
+**How to tell.** The report says `IPv4 host must be four decimal octets`.
+
+**Steps.** Write those four octets, then restart.
 
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 
