@@ -117,18 +117,17 @@ managed environment SecretRef; explicit trusted proxy retains its configured tru
 
 The helper creates or verifies a deterministic per-Agent system user and
 private group, then creates the Agent directory and reserves the lowest free
-port across the shared root. Before `groupadd` or `useradd`, and only when that
-account name is absent, it writes `accounts/<runtimeUser>.json` with
-`pending: true` and no UID/GID. A killed helper can leave that claim and any
-account already created. The next preparation with the same Driver, Namespace,
-Agent, and ServicePrincipal resumes the claim, creates whichever of the group
-or user is missing, and replaces the marker with the recorded UID/GID. A
-different ServicePrincipal does not match the claim and is refused before
-account commands. An account or group with no marker is refused and is not
-adopted. A failed `useradd` that leaves neither account removes the claim only
-when this attempt wrote it, so a later foreign account is not adopted. A claim
-left by an earlier attempt is kept when those lookups fail. A lookup error is
-not treated as absence, so it cannot authorize a claim for an existing account. The
+port across the shared root. It writes `accounts/<runtimeUser>.json` with
+`pending: true` before `groupadd`. `id` exit 1 and a merged `getent` exit 2 are
+not proof the name is free, because a name service can return those statuses
+while the account exists. `groupadd` must create the group. If the name is
+already in use, the fresh claim is removed and that account is not adopted.
+After `groupadd` succeeds, the claim records that this helper created the group
+and the gid from the local files database. A killed `useradd` can leave that
+user in place. The next preparation accepts it only when the local user's gid
+is the recorded gid, then stores the uid. A different ServicePrincipal does not
+match the claim and is refused before account commands. An account with no
+marker is not adopted. The
 [SSH Compute reference](../reference/drivers/ssh-compute.md) states this marker
 contract. A finalized marker, including one written before pending claims
 existed, is verified by its recorded UID/GID and is not rewritten. Agent-owned
@@ -229,6 +228,8 @@ retire, which frees its gateway port.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15: A pending claim records a group this helper created. `id` and merged `getent` not-found statuses do not prove a name is free, and an existing group is not adopted.
 
 - 2026-10-14: Trace the pending account claim written before `useradd`, its resume, and Namespace cleanup of that incomplete account. The marker contract stays in the SSH Compute reference.
 

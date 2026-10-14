@@ -22,7 +22,7 @@ group_file="$OCC_SSH_FIXTURE_STATE/accounts/groups/$group"
 [ -f "$group_file" ] || exit 1
 users="$OCC_SSH_FIXTURE_STATE/accounts/users"
 mkdir -p "$users"
-[ ! -e "$users/$name" ] || exit 1
+[ ! -e "$users/$name" ] || exit 9
 {
   node -p 'process.getuid()'
   cat "$group_file"

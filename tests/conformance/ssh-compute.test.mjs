@@ -1345,11 +1345,39 @@ test("SSH does not claim a foreign account when the first lookup fails", async (
     writeFile(join(f.state, "id.fail"), "once"),
     writeFile(join(f.state, "getent.fail"), "once"),
   ]);
-  await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
   await missing(join(f.root, "accounts", `${account}.json`));
   assert.equal((await stat(join(f.state, "accounts", "users", account))).isFile(), true);
   await rm(join(f.state, "id.fail"), { force: true });
   await rm(join(f.state, "getent.fail"), { force: true });
+  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
+  await missing(join(f.root, "accounts", `${account}.json`));
+});
+
+test("SSH does not adopt an account when native absence codes recover", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-absence-recover");
+  const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+  assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+  bind(f.driver, rev);
+  await Promise.all([
+    mkdir(join(f.state, "accounts", "users"), { recursive: true }),
+    mkdir(join(f.state, "accounts", "groups"), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(
+      join(f.state, "accounts", "users", account),
+      `${process.getuid()}\n${process.getgid()}\n`,
+    ),
+    writeFile(join(f.state, "accounts", "groups", account), `${process.getgid()}\n`),
+    writeFile(join(f.state, "id.absent"), "once"),
+    writeFile(join(f.state, "getent.absent"), "once"),
+  ]);
+  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
+  await missing(join(f.root, "accounts", `${account}.json`));
+  assert.equal((await stat(join(f.state, "accounts", "users", account))).isFile(), true);
+  await rm(join(f.state, "id.absent"), { force: true });
+  await rm(join(f.state, "getent.absent"), { force: true });
   await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
   await missing(join(f.root, "accounts", `${account}.json`));
 });

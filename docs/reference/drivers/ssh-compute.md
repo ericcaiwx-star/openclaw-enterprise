@@ -125,11 +125,13 @@ Each Agent uses a distinct system user and private group. The account name is
 the first 19 characters of `runtime.user`, a hyphen, and the first 12 hex
 characters of SHA-256 of `<namespaceId>:<agentId>`. The Driver creates accounts
 with a non-login shell and records their exact ownership and UID/GID under
-`accounts/`. Before `groupadd` or `useradd`, it writes that marker with
-`pending: true` and no UID/GID. A later attempt resumes the claim: it creates
-whichever of the group or user is still missing, then replaces the marker with
-the recorded UID/GID. Namespace deletion removes a pending claim and any
-account it already created. An account or group that exists without this marker
+`accounts/`. It writes that marker with `pending: true` before `groupadd`.
+`groupadd` must create the group; an existing name is not adopted, and `id` or
+merged `getent` not-found statuses are not proof the name is free. The claim
+then records the local gid of the group this helper created. An interrupted
+`useradd` is resumed only when the local user's gid is that gid. The marker
+then stores the uid and gid. Namespace deletion removes a pending claim and the
+account that claim records creating. An account that exists without this marker
 is refused and is not adopted. Accounts persist across revision retirement and
 are removed with the Namespace.
 

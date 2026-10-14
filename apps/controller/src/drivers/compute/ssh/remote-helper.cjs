@@ -126,8 +126,11 @@ async function stopOwnedUnit(input, agent) {
 }
 
 async function userOwner(user) {
-  const uid = Number((await command("id", ["-u", user])).stdout);
-  const gid = Number((await command("id", ["-g", user])).stdout);
+  // The files service reads the local account database. A merged NSS lookup can
+  // report the same not-found status when the name service is unavailable.
+  const result = await command("getent", ["-s", "files", "passwd", user]);
+  const uid = Number(result.stdout.split(":")[2]);
+  const gid = Number(result.stdout.split(":")[3]);
   if (!Number.isSafeInteger(uid) || !Number.isSafeInteger(gid)) {
     throw new ConfigurationFailure("Runtime user is unavailable.");
   }
@@ -343,30 +346,39 @@ function revisionMetadata(input) {
   };
 }
 
-// `id` exits 1 when the user is absent. `getent` exits 2 when the group is absent.
-// Any other failure, including a timeout, is not absence and must not authorize a claim.
-async function lookupExists(file, args, absentCode) {
-  const result = await command(file, args, true);
+// shadow-utils uses exit 9 when the user or group name is already in use.
+const ACCOUNT_NAME_IN_USE = 9;
+
+// Local files only. Exit 2 means that database has no entry. It is not a merged
+// NSS result, so a down name service cannot look like a free name.
+async function localEntry(database, name) {
+  const result = await command("getent", ["-s", "files", database, name], true);
   if (result.success) {
-    return true;
+    return result.stdout;
   }
-  if (result.code === absentCode) {
-    return false;
+  if (result.code === 2) {
+    return undefined;
   }
   throw new Error("Host command failed.");
 }
 
-async function userExists(name) {
-  return lookupExists("id", ["-u", name], 1);
-}
-
-async function groupExists(name) {
-  return lookupExists("getent", ["group", name], 2);
+async function creationResult(file, args) {
+  const result = await command(file, args, true);
+  if (result.success) {
+    return "created";
+  }
+  if (result.code === ACCOUNT_NAME_IN_USE) {
+    return "exists";
+  }
+  throw new Error("Host command failed.");
 }
 
 async function groupGid(name) {
-  const result = await command("getent", ["group", name]);
-  const gid = Number(result.stdout.split(":")[2]);
+  const entry = await localEntry("group", name);
+  if (entry === undefined) {
+    throw new Error("Host command failed.");
+  }
+  const gid = Number(entry.split(":")[2]);
   if (!Number.isSafeInteger(gid) || gid === 0) {
     throw new OwnershipFailure("Runtime group ownership marker differs.");
   }
@@ -379,7 +391,7 @@ async function ensureRuntimeIdentity(input) {
   directory(input.runtime.root, true);
   directory(accounts, true);
   const markerPath = accountMarker(input, name);
-  const marker = inspect(markerPath) === undefined ? undefined : readJson(markerPath);
+  let marker = inspect(markerPath) === undefined ? undefined : readJson(markerPath);
   const expected = accountOwnership(input, name);
   if (marker !== undefined && marker.pending !== true) {
     verify(marker, expected);
@@ -390,74 +402,64 @@ async function ensureRuntimeIdentity(input) {
     return owner;
   }
 
-  // Claim the name before groupadd/useradd. A killed helper can leave the OS
-  // account behind; the next attempt resumes this marker instead of treating
-  // that account as foreign. An account with no marker is still refused.
+  // A pending claim records intent. It does not authorize an account this helper
+  // did not create. id exit 1 and merged getent exit 2 are not proof of absence:
+  // a name service can return those codes while the account exists.
   let claimedThisRun = false;
   if (marker === undefined) {
-    if ((await userExists(name)) || (await groupExists(name))) {
-      throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
-    }
     atomicWrite(markerPath, JSON.stringify({ ...expected, pending: true }));
     claimedThisRun = true;
+    marker = { ...expected, pending: true };
   } else {
     verify(marker, expected);
-    if (marker.uid !== undefined || marker.gid !== undefined) {
+    if (marker.uid !== undefined || (marker.gid !== undefined && marker.groupCreated !== true)) {
       throw new OwnershipFailure("Runtime account ownership marker differs.");
     }
   }
 
-  let groupCreated = false;
-  let userCreated = false;
+  let groupCreatedThisRun = false;
+  let userCreatedThisRun = false;
   try {
-    if (!(await groupExists(name))) {
-      await command("groupadd", ["--system", name]);
-      groupCreated = true;
+    if (marker.groupCreated !== true) {
+      if ((await creationResult("groupadd", ["--system", name])) === "exists") {
+        throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
+      }
+      groupCreatedThisRun = true;
+      marker = { ...expected, pending: true, groupCreated: true, gid: await groupGid(name) };
+      atomicWrite(markerPath, JSON.stringify(marker));
     }
-    if (!(await userExists(name))) {
-      await command("useradd", [
-        "--system",
-        "--gid",
-        name,
-        "--home-dir",
-        join(
-          namespaceDirectory(input),
-          "agents",
-          hash(input.revision.agentId).slice(0, 12),
-          "home",
-        ),
-        "--shell",
-        "/usr/sbin/nologin",
-        "--no-create-home",
-        name,
-      ]);
-      userCreated = true;
+    const createdUser = await creationResult("useradd", [
+      "--system",
+      "--gid",
+      name,
+      "--home-dir",
+      join(namespaceDirectory(input), "agents", hash(input.revision.agentId).slice(0, 12), "home"),
+      "--shell",
+      "/usr/sbin/nologin",
+      "--no-create-home",
+      name,
+    ]);
+    if (createdUser === "created") {
+      userCreatedThisRun = true;
     }
     const owner = await userOwner(name);
-    if (owner.gid !== (await groupGid(name))) {
-      throw new OwnershipFailure("Runtime group ownership marker differs.");
+    if (owner.gid !== marker.gid) {
+      throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
+    }
+    if (createdUser === "exists" && marker.groupCreated !== true) {
+      throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
     }
     atomicWrite(markerPath, JSON.stringify({ ...expected, uid: owner.uid, gid: owner.gid }));
     return owner;
   } catch (error) {
-    if (userCreated) {
+    if (userCreatedThisRun) {
       await command("userdel", [name], true);
     }
-    if (groupCreated) {
+    if (groupCreatedThisRun) {
       await command("groupdel", [name], true);
-    }
-    // Keep a claim from an earlier attempt even when id/getent fail. Those
-    // lookups treat every non-zero exit as absence, including a timeout.
-    // Drop the claim only when this run wrote it and neither account remains,
-    // so a later foreign account is not adopted.
-    if (claimedThisRun) {
-      try {
-        if (!(await userExists(name)) && !(await groupExists(name))) {
-          fs.rmSync(markerPath, { force: true });
-        }
-      } catch {
-        // A lookup error does not prove the account is gone, so keep the claim.
-      }
+      fs.rmSync(markerPath, { force: true });
+    } else if (claimedThisRun) {
+      fs.rmSync(markerPath, { force: true });
     }
     throw error;
   }
@@ -486,34 +488,36 @@ async function removeRuntimeIdentity(input, agent) {
   const marker = readJson(markerPath);
   verify(marker, accountOwnership(input, name));
   if (marker.pending === true) {
-    if (marker.uid !== undefined || marker.gid !== undefined) {
+    if (marker.groupCreated !== true) {
+      fs.unlinkSync(markerPath);
+      return;
+    }
+    if (!Number.isSafeInteger(marker.gid) || marker.gid === 0) {
       throw new OwnershipFailure("Runtime account ownership marker differs.");
     }
-    if (await userExists(name)) {
+    const localUser = await localEntry("passwd", name);
+    if (localUser !== undefined) {
       const owner = await userOwner(name);
-      if (owner.uid === 0) {
-        throw new OwnershipFailure("Runtime account ownership marker differs.");
-      }
-      if ((await groupExists(name)) && owner.gid !== (await groupGid(name))) {
-        throw new OwnershipFailure("Runtime group ownership marker differs.");
+      if (owner.gid !== marker.gid) {
+        throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
       }
       await command("userdel", [name]);
     }
-    if (await groupExists(name)) {
-      await groupGid(name);
-      await command("groupdel", [name]);
+    if ((await groupGid(name)) !== marker.gid) {
+      throw new OwnershipFailure("Runtime group ownership marker differs.");
     }
+    await command("groupdel", [name]);
     fs.unlinkSync(markerPath);
     return;
   }
-  if (await userExists(name)) {
+  if ((await localEntry("passwd", name)) !== undefined) {
     const owner = await userOwner(name);
     if (marker.uid !== owner.uid || marker.gid !== owner.gid) {
       throw new OwnershipFailure("Runtime account ownership marker differs.");
     }
     await command("userdel", [name]);
   }
-  if (await groupExists(name)) {
+  if ((await localEntry("group", name)) !== undefined) {
     if (marker.gid !== (await groupGid(name))) {
       throw new OwnershipFailure("Runtime group ownership marker differs.");
     }
