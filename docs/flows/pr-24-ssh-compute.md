@@ -125,7 +125,9 @@ already in use, the fresh claim is removed and that account is not adopted.
 After `groupadd` succeeds, the claim records that this helper created the group
 and the gid from the local files database. A killed `useradd` can leave that
 user in place. The next preparation accepts it only when the local user's gid
-is the recorded gid, then stores the uid. A different ServicePrincipal does not
+is the recorded gid, then stores the uid. If `useradd` creates the account and
+then fails before it returns, the claim stays so that resume can finish. Namespace
+deletion still clears the claim when the recorded group is already gone. A different ServicePrincipal does not
 match the claim and is refused before account commands. An account with no
 marker is not adopted. The
 [SSH Compute reference](../reference/drivers/ssh-compute.md) states this marker

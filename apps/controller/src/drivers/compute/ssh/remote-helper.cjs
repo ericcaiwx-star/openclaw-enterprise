@@ -456,8 +456,12 @@ async function ensureRuntimeIdentity(input) {
       await command("userdel", [name], true);
     }
     if (groupCreatedThisRun) {
-      await command("groupdel", [name], true);
-      fs.rmSync(markerPath, { force: true });
+      // useradd can create the account and still fail before it returns. groupdel
+      // then fails while that user remains, so the claim has to stay for resume.
+      const removed = await command("groupdel", [name], true);
+      if (removed.success && (await localEntry("group", name)) === undefined) {
+        fs.rmSync(markerPath, { force: true });
+      }
     } else if (claimedThisRun) {
       fs.rmSync(markerPath, { force: true });
     }
@@ -503,10 +507,16 @@ async function removeRuntimeIdentity(input, agent) {
       }
       await command("userdel", [name]);
     }
-    if ((await groupGid(name)) !== marker.gid) {
-      throw new OwnershipFailure("Runtime group ownership marker differs.");
+    // userdel removes a private group of the same name. A retry after that
+    // groupdel, or after a kill between groupdel and unlink, must still clear
+    // the marker.
+    const localGroup = await localEntry("group", name);
+    if (localGroup !== undefined) {
+      if ((await groupGid(name)) !== marker.gid) {
+        throw new OwnershipFailure("Runtime group ownership marker differs.");
+      }
+      await command("groupdel", [name]);
     }
-    await command("groupdel", [name]);
     fs.unlinkSync(markerPath);
     return;
   }

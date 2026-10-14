@@ -28,6 +28,11 @@ mkdir -p "$users"
   cat "$group_file"
 } > "$users/$name"
 printf 'useradd %s %s\n' "$name" "$group" >> "$OCC_SSH_FIXTURE_STATE/accounts.log"
+# The account exists, but the command has not returned success.
+if [ -f "$OCC_SSH_FIXTURE_STATE/useradd.fail-after" ]; then
+  rm -f "$OCC_SSH_FIXTURE_STATE/useradd.fail-after"
+  exit 1
+fi
 # Hold only this fixture after the account exists, so a test can kill the helper.
 if [ -f "$OCC_SSH_FIXTURE_STATE/useradd.hold" ]; then
   target=$(cat "$OCC_SSH_FIXTURE_STATE/useradd.hold")

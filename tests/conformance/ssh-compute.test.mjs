@@ -1382,6 +1382,38 @@ test("SSH does not adopt an account when native absence codes recover", async (t
   await missing(join(f.root, "accounts", `${account}.json`));
 });
 
+test("SSH keeps a pending claim when useradd leaves the account and then fails", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-useradd-fail-after");
+  const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+  assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+  bind(f.driver, rev);
+  await writeFile(join(f.state, "useradd.fail-after"), "once");
+  await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+  const marker = await json(join(f.root, "accounts", `${account}.json`));
+  assert.equal(marker.pending, true);
+  assert.equal(marker.groupCreated, true);
+  assert.equal((await stat(join(f.state, "accounts", "users", account))).isFile(), true);
+  assert.equal((await f.driver.prepareRevision(rev)).ready, true);
+  const resumed = await json(join(f.root, "accounts", `${account}.json`));
+  assert.equal(resumed.pending, undefined);
+  assert.equal(resumed.uid, process.getuid());
+});
+
+test("SSH Namespace deletion finishes when the pending group is already gone", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-group-already-gone");
+  const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+  assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+  bind(f.driver, rev);
+  await writeFile(join(f.state, "useradd.fail-after"), "once");
+  await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+  await rm(join(f.state, "accounts", "users", account));
+  await rm(join(f.state, "accounts", "groups", account));
+  assert.equal((await f.driver.deleteNamespace(tenant)).namespaceDeleted, true);
+  await missing(join(f.root, "accounts", `${account}.json`));
+});
+
 test("SSH local executor cancellation terminates the real helper waiting for the host lock", async (t) => {
   const f = await fixture(t);
   // Simulate a live concurrent host operation; this tests manual cancellation, not lease loss.
