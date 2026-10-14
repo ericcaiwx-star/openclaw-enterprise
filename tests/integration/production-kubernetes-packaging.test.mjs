@@ -252,6 +252,10 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
     "public-ingress",
   );
   assert.deepEqual(publicRule.ports, [{ protocol: "TCP", port: 8443 }]);
+  await assert.rejects(
+    render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "127.1" }),
+    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+  );
   for (const domain of ["example.invalid", "preview.example.invalid"]) {
     await assert.rejects(
       render({ ...sandboxValues, "gatewayRouting.sandbox.domain": domain }),
@@ -898,6 +902,8 @@ test(
       "0177.0.0.1",
       "0x7f000001",
       "0x7f.0.0.1",
+      "0x",
+      "0x.0.0.1",
       "Bad_Host",
       "proxy.example.test:443",
       "https://proxy.example.test",
@@ -907,6 +913,7 @@ test(
     ];
     const valid = [
       "192.168.1.1",
+      "0xdead.gateway.example.test",
       "proxy.example.test",
       `${"a".repeat(63)}.test`,
       `${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(61)}`,
@@ -929,7 +936,7 @@ test(
       // Helm --set reads a bare integer or 0x hex as a number. Pass those spellings
       // with --set-string so the chart sees the hostname the Installation stores.
       const numericHostname =
-        typeof hostname === "string" && /^(?:0x[0-9a-f]+|\d+)$/.test(hostname);
+        typeof hostname === "string" && /^(?:0x[0-9a-f]*|\d+)$/.test(hostname);
       const helmValues =
         hostname === undefined || numericHostname
           ? gatewayRoutingValues
@@ -5361,7 +5368,14 @@ test("execution chart refuses a harness hostname Compute refuses", tooling, asyn
       hostname,
     );
   }
-  for (const hostname of ["123", "agents.example.invalid"]) {
+  for (const hostname of ["123", "127.1", "0x", "0x.0.0.1"]) {
+    await assert.rejects(
+      template("--set-string", `routing.hostname=${hostname}`),
+      /routing\.hostname must be a DNS hostname without a port or path/,
+      hostname,
+    );
+  }
+  for (const hostname of ["agents.example.invalid", "0xdead.gateway.example.test"]) {
     const { stdout } = await template("--set-string", `routing.hostname=${hostname}`);
     const gateway = (await resources(stdout)).find((object) => object.kind === "Gateway");
     assert.equal(gateway?.spec.listeners[0].hostname, hostname);

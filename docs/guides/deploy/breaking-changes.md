@@ -36,11 +36,13 @@ provider's `apiKey`, then save and deploy again.
 
 ## 2026-10-14: gateway hostnames must not be rewritten IPv4
 
-**What breaks.** Helm and Compute refuse a `gatewayRouting.hostname`, and
-Compute also refuses a harness or sandbox hostname, that is shorthand, a single
-integer, hexadecimal, or leading-zero IPv4 (`192.168.1`, `2130706433`, `127.1`,
-`0177.0.0.1`). Those names are legal DNS labels, but a URL parser dials a
-different address. Four decimal octets such as `192.168.1.1` still pass.
+**What breaks.** Helm and Compute refuse a `gatewayRouting.hostname`, a harness
+`routing.hostname`, and `gatewayRouting.sandbox.domain` that is shorthand, a
+single integer, hexadecimal, or leading-zero IPv4 (`192.168.1`, `2130706433`,
+`127.1`, `0177.0.0.1`, `0x`, `0x.0.0.1`). Those names are legal DNS labels, but
+a URL parser dials a different address. Four decimal octets such as
+`192.168.1.1` still pass. A DNS name that only contains a hex label, such as
+`0xdead.gateway.example.test`, stays.
 
 **Who is affected.** Helm values or Installation YAML that set one of those
 hostnames to such a spelling. An ordinary DNS name is unchanged.
