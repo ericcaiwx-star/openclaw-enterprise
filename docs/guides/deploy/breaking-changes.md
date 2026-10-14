@@ -13,13 +13,31 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-14: every model selection must use the Harness provider
+
+**What breaks.** On Kubernetes Compute, Agent create and update and deployment
+refuse a model selection on another provider than the Agent's primary model:
+fallbacks, Agent entries, `subagents.model`, `imageModel`, `pdfModel` and the
+other `*Model` settings, `models` policy keys, hook models and
+`channels.modelByChannel`. They also refuse an `apiKey` on any other
+`models.providers` entry. Dedicated Codex refuses one on every entry, and a
+`models` policy key without a provider.
+
+**Who is affected.** Configurations that select a second provider or give it
+an `apiKey`, or that set any provider `apiKey` for Dedicated Codex.
+
+**How to tell.** A `400` names the setting (a mismatched fallback used to get
+a fixed-text `409`): `... must select <provider>/<model>, the provider of the
+Agent's Harness authentication binding`, `... must be provider/model
+references`, or `models.providers.<name>.apiKey must be unset`.
+
+**Steps.** Select only the primary model's provider and remove the other
+provider's `apiKey`, then save and deploy again.
+
 ## 2026-10-14: Codex model IPv4 hosts must be four decimal octets
 
 **What breaks.** `runtime.codexModelBaseUrl` whose IPv4 host is not four decimal
-octets from 0 to 255, with no leading zeros, is refused. Shorthand, a single
-integer, hex, and leading zeros were stored as a different address (`192.168.1`
-became `192.168.0.1`). A canonical host such as `192.0.2.1`, and any DNS name,
-still loads.
+octets with no leading zeros is refused.
 
 **Who is affected.** Kubernetes Compute settings that set
 `runtime.codexModelBaseUrl` to one of those spellings.
@@ -27,7 +45,8 @@ still loads.
 **How to tell.** Compute reports `Codex model endpoint IPv4 host must be four
 decimal octets`.
 
-**Steps.** Write the four decimal octets you mean, then start again.
+**Steps.** Write those four octets, then start again.
+
 
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 
