@@ -13,6 +13,27 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-14: every model selection must use the Harness provider
+
+**What breaks.** On Kubernetes Compute, Agent create and update and deployment
+refuse a model selection on another provider than the Agent's primary model:
+fallbacks, Agent entries, `subagents.model`, `imageModel`, `pdfModel` and the
+other `*Model` settings, `models` policy keys, hook models and
+`channels.modelByChannel`. They also refuse an `apiKey` on any other
+`models.providers` entry. Dedicated Codex refuses one on every entry, and a
+`models` policy key without a provider.
+
+**Who is affected.** Configurations that select a second provider or give it
+an `apiKey`, or that set any provider `apiKey` for Dedicated Codex.
+
+**How to tell.** A `400` names the setting (a mismatched fallback used to get
+a fixed-text `409`): `... must select <provider>/<model>, the provider of the
+Agent's Harness authentication binding`, `... must be provider/model
+references`, or `models.providers.<name>.apiKey must be unset`.
+
+**Steps.** Select only the primary model's provider and remove the other
+provider's `apiKey`, then save and deploy again.
+
 ## 2026-10-14: gateway hostnames must not be rewritten IPv4
 
 **What breaks.** Helm and Compute refuse a `gatewayRouting.hostname`, and
@@ -296,22 +317,3 @@ such as `10.43.0.1/32` upgrades unchanged.
 becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
 `/32`.
 
-## 2026-10-13: OpenShell network policy names must be unique
-
-**What breaks.** Controller startup refuses an Installation whose
-`policy.networkPolicies` repeat a name, or name a policy
-`workspace-node-enrollment`. Those configurations start today. A duplicate name
-keeps only the last rule. A policy named `workspace-node-enrollment` is replaced
-when a workspace-node binding exists.
-
-**Who is affected.** Installations with duplicate policy names, or with a policy
-named `workspace-node-enrollment`.
-
-**How to tell.** Startup logs `startup-error` with code
-`OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
-does not include the policy name. Loading the Installation configuration names
-the duplicate or reserved policy.
-
-**Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
-policy called `workspace-node-enrollment`. Keep each policy's binaries and
-endpoints. _untested_ against a live Installation.
