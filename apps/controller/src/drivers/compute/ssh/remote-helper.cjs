@@ -362,15 +362,39 @@ async function ensureRuntimeIdentity(input) {
   directory(accounts, true);
   const markerPath = accountMarker(input, name);
   const marker = inspect(markerPath) === undefined ? undefined : readJson(markerPath);
+  const expected = accountOwnership(input, name);
+  if (marker !== undefined && marker.pending !== true) {
+    verify(marker, expected);
+    const owner = await userOwner(name);
+    if (marker.uid !== owner.uid || marker.gid !== owner.gid) {
+      throw new OwnershipFailure("Runtime account ownership marker differs.");
+    }
+    return owner;
+  }
+
+  // Claim the name before groupadd/useradd. A killed helper can leave the OS
+  // account behind; the next attempt resumes this marker instead of treating
+  // that account as foreign. An account with no marker is still refused.
   if (marker === undefined) {
     if ((await userExists(name)) || (await groupExists(name))) {
       throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
     }
-    let groupCreated = false;
-    let userCreated = false;
-    try {
+    atomicWrite(markerPath, JSON.stringify({ ...expected, pending: true }));
+  } else {
+    verify(marker, expected);
+    if (marker.uid !== undefined || marker.gid !== undefined) {
+      throw new OwnershipFailure("Runtime account ownership marker differs.");
+    }
+  }
+
+  let groupCreated = false;
+  let userCreated = false;
+  try {
+    if (!(await groupExists(name))) {
       await command("groupadd", ["--system", name]);
       groupCreated = true;
+    }
+    if (!(await userExists(name))) {
       await command("useradd", [
         "--system",
         "--gid",
@@ -388,29 +412,26 @@ async function ensureRuntimeIdentity(input) {
         name,
       ]);
       userCreated = true;
-      const owner = await userOwner(name);
-      atomicWrite(
-        markerPath,
-        JSON.stringify({ ...accountOwnership(input, name), uid: owner.uid, gid: owner.gid }),
-      );
-      return owner;
-    } catch (error) {
-      if (userCreated) {
-        await command("userdel", [name], true);
-      }
-      if (groupCreated) {
-        await command("groupdel", [name], true);
-      }
-      throw error;
     }
+    const owner = await userOwner(name);
+    if (owner.gid !== (await groupGid(name))) {
+      throw new OwnershipFailure("Runtime group ownership marker differs.");
+    }
+    atomicWrite(markerPath, JSON.stringify({ ...expected, uid: owner.uid, gid: owner.gid }));
+    return owner;
+  } catch (error) {
+    if (userCreated) {
+      await command("userdel", [name], true);
+    }
+    if (groupCreated) {
+      await command("groupdel", [name], true);
+    }
+    // Keep the claim when the account survived, so the next attempt can resume.
+    if (!(await userExists(name)) && !(await groupExists(name))) {
+      fs.rmSync(markerPath, { force: true });
+    }
+    throw error;
   }
-
-  verify(marker, accountOwnership(input, name));
-  const owner = await userOwner(name);
-  if (marker.uid !== owner.uid || marker.gid !== owner.gid) {
-    throw new OwnershipFailure("Runtime account ownership marker differs.");
-  }
-  return owner;
 }
 
 async function verifyRuntimeIdentity(input, agent) {
@@ -435,6 +456,27 @@ async function removeRuntimeIdentity(input, agent) {
   const markerPath = accountMarker(input, name);
   const marker = readJson(markerPath);
   verify(marker, accountOwnership(input, name));
+  if (marker.pending === true) {
+    if (marker.uid !== undefined || marker.gid !== undefined) {
+      throw new OwnershipFailure("Runtime account ownership marker differs.");
+    }
+    if (await userExists(name)) {
+      const owner = await userOwner(name);
+      if (owner.uid === 0) {
+        throw new OwnershipFailure("Runtime account ownership marker differs.");
+      }
+      if ((await groupExists(name)) && owner.gid !== (await groupGid(name))) {
+        throw new OwnershipFailure("Runtime group ownership marker differs.");
+      }
+      await command("userdel", [name]);
+    }
+    if (await groupExists(name)) {
+      await groupGid(name);
+      await command("groupdel", [name]);
+    }
+    fs.unlinkSync(markerPath);
+    return;
+  }
   if (await userExists(name)) {
     const owner = await userOwner(name);
     if (marker.uid !== owner.uid || marker.gid !== owner.gid) {
