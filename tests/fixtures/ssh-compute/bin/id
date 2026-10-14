@@ -2,7 +2,8 @@
 set -eu
 : "${OCC_SSH_FIXTURE_STATE:?fixture state required}"
 if [ -f "$OCC_SSH_FIXTURE_STATE/id.fail" ]; then
-  exit 1
+  rm -f "$OCC_SSH_FIXTURE_STATE/id.fail"
+  exit 99
 fi
 accounts="$OCC_SSH_FIXTURE_STATE/accounts"
 flag=${1:-}

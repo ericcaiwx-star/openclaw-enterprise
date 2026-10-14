@@ -127,7 +127,8 @@ different ServicePrincipal does not match the claim and is refused before
 account commands. An account or group with no marker is refused and is not
 adopted. A failed `useradd` that leaves neither account removes the claim only
 when this attempt wrote it, so a later foreign account is not adopted. A claim
-left by an earlier attempt is kept when those lookups fail. The
+left by an earlier attempt is kept when those lookups fail. A lookup error is
+not treated as absence, so it cannot authorize a claim for an existing account. The
 [SSH Compute reference](../reference/drivers/ssh-compute.md) states this marker
 contract. A finalized marker, including one written before pending claims
 existed, is verified by its recorded UID/GID and is not rewritten. Agent-owned

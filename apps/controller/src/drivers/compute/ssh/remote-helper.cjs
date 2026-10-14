@@ -96,7 +96,12 @@ async function command(file, args, allowFailure = false) {
         if (error && !allowFailure) {
           reject(new Error("Host command failed."));
         } else {
-          resolve({ success: !error, stdout: stdout.trim() });
+          resolve({
+            success: !error,
+            stdout: typeof stdout === "string" ? stdout.trim() : "",
+            // Numeric only for a normal non-zero exit. Timeouts and signals are not absence.
+            code: typeof error?.code === "number" ? error.code : error ? null : 0,
+          });
         }
       },
     );
@@ -338,12 +343,25 @@ function revisionMetadata(input) {
   };
 }
 
+// `id` exits 1 when the user is absent. `getent` exits 2 when the group is absent.
+// Any other failure, including a timeout, is not absence and must not authorize a claim.
+async function lookupExists(file, args, absentCode) {
+  const result = await command(file, args, true);
+  if (result.success) {
+    return true;
+  }
+  if (result.code === absentCode) {
+    return false;
+  }
+  throw new Error("Host command failed.");
+}
+
 async function userExists(name) {
-  return (await command("id", ["-u", name], true)).success;
+  return lookupExists("id", ["-u", name], 1);
 }
 
 async function groupExists(name) {
-  return (await command("getent", ["group", name], true)).success;
+  return lookupExists("getent", ["group", name], 2);
 }
 
 async function groupGid(name) {
@@ -432,8 +450,14 @@ async function ensureRuntimeIdentity(input) {
     // lookups treat every non-zero exit as absence, including a timeout.
     // Drop the claim only when this run wrote it and neither account remains,
     // so a later foreign account is not adopted.
-    if (claimedThisRun && !(await userExists(name)) && !(await groupExists(name))) {
-      fs.rmSync(markerPath, { force: true });
+    if (claimedThisRun) {
+      try {
+        if (!(await userExists(name)) && !(await groupExists(name))) {
+          fs.rmSync(markerPath, { force: true });
+        }
+      } catch {
+        // A lookup error does not prove the account is gone, so keep the claim.
+      }
     }
     throw error;
   }

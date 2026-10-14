@@ -1326,6 +1326,34 @@ test("SSH resume keeps a pending claim when account lookups fail", async (t) => 
   assert.equal(resumed.uid, process.getuid());
 });
 
+test("SSH does not claim a foreign account when the first lookup fails", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-lookup-foreign");
+  const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+  assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+  bind(f.driver, rev);
+  await Promise.all([
+    mkdir(join(f.state, "accounts", "users"), { recursive: true }),
+    mkdir(join(f.state, "accounts", "groups"), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(
+      join(f.state, "accounts", "users", account),
+      `${process.getuid()}\n${process.getgid()}\n`,
+    ),
+    writeFile(join(f.state, "accounts", "groups", account), `${process.getgid()}\n`),
+    writeFile(join(f.state, "id.fail"), "once"),
+    writeFile(join(f.state, "getent.fail"), "once"),
+  ]);
+  await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+  await missing(join(f.root, "accounts", `${account}.json`));
+  assert.equal((await stat(join(f.state, "accounts", "users", account))).isFile(), true);
+  await rm(join(f.state, "id.fail"), { force: true });
+  await rm(join(f.state, "getent.fail"), { force: true });
+  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
+  await missing(join(f.root, "accounts", `${account}.json`));
+});
+
 test("SSH local executor cancellation terminates the real helper waiting for the host lock", async (t) => {
   const f = await fixture(t);
   // Simulate a live concurrent host operation; this tests manual cancellation, not lease loss.
