@@ -16,6 +16,8 @@ import type {
   Agent,
   AgentCredentialSourceBinding,
   AgentRead,
+  AgentRevisionSummary,
+  AgentRevisionSummaryPage,
   AgentRevisionRead,
   InitialWorkspaceFiles,
   AgentDeploymentDiagnostics,
@@ -61,6 +63,7 @@ import type {
   ManagedIAMResourceKind,
   Permission,
   Preset,
+  PresetSummary,
   PresetTemplate,
   PermissionAction,
   PluginDesiredSelection,
@@ -2162,17 +2165,16 @@ export class OpenClawController {
     matches: (agent: Pick<Agent, "id" | "namespaceId">) => boolean,
   ): Promise<Pick<Agent, "id" | "namespaceId"> | undefined> {
     return this.read(async (state) => {
+      // One read of Agent identities in live Namespaces; no saved settings are decoded.
       let selected: Pick<Agent, "id" | "namespaceId"> | undefined;
-      for (const namespace of await state.namespaces.listNamespaces()) {
-        for (const agent of await state.agents.listAgents(namespace.id)) {
-          if (agent.namespaceId !== namespace.id || !matches(agent)) {
-            continue;
-          }
-          if (selected !== undefined) {
-            return undefined;
-          }
-          selected = { id: agent.id, namespaceId: agent.namespaceId };
+      for (const agent of await state.agents.listAgentReferences()) {
+        if (!matches(agent)) {
+          continue;
         }
+        if (selected !== undefined) {
+          return undefined;
+        }
+        selected = { id: agent.id, namespaceId: agent.namespaceId };
       }
       return selected;
     });
@@ -2625,7 +2627,7 @@ export class OpenClawController {
         record.status === "cancelled" ||
         record.revisionId !== undefined ||
         (record.agentId !== undefined &&
-          (await state.revisions.listRevisions(namespaceId, record.agentId)).length !== 0)
+          (await state.revisions.listRevisionMetadata(namespaceId, record.agentId)).length !== 0)
       ) {
         throw new ResourceStateConflictError(
           "Provisioning cannot retry after cancellation or deployment handoff.",
@@ -3458,29 +3460,59 @@ export class OpenClawController {
     });
   }
 
+  /**
+   * One page of the Agent's revisions the principal may read, newest first, as summaries: a
+   * list never decodes a saved snapshot (finding 1323). The page covers `limit` revisions
+   * numbered below `before`; unreadable ones are left out, so it can hold fewer, even none.
+   * `nextBefore` continues below the page's last revision, readable or not.
+   */
   async listRevisions(
     principalId: string,
     namespaceId: string,
     agentId: string,
-  ): Promise<readonly Readonly<AgentRevisionRead>[]> {
+    page: { readonly before?: number; readonly limit: number } = { limit: 50 },
+  ): Promise<Readonly<AgentRevisionSummaryPage>> {
+    if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 100) {
+      throw new ScopeViolationError("The revision page size is invalid.");
+    }
+    if (page.before !== undefined && (!Number.isSafeInteger(page.before) || page.before < 1)) {
+      throw new ScopeViolationError("The revision page cursor is invalid.");
+    }
     const agent = await this.getAgentForBrowsing(principalId, namespaceId, agentId);
+    // Read checks stay per revision. Scanning on past unreadable revisions keeps the cursor on
+    // a readable one, so a page never names a revision the caller cannot read.
     return this.read(async (state) => {
-      const readable: Readonly<AgentRevisionRead>[] = [];
-      for (const revision of await state.revisions.listRevisionsForBrowsing(
-        agent.namespaceId,
-        agent.id,
-      )) {
-        if (
-          await this.canRead(principalId, {
-            kind: "agent_revision",
-            id: revision.id,
-            namespaceId: agent.namespaceId,
-          })
-        ) {
+      const readable: Readonly<AgentRevisionSummary>[] = [];
+      let before = page.before;
+      for (;;) {
+        const listed = await state.revisions.pageRevisionSummaries(agent.namespaceId, agent.id, {
+          ...(before === undefined ? {} : { before }),
+          limit: page.limit,
+        });
+        for (const [index, revision] of listed.revisions.entries()) {
+          if (
+            !(await this.canRead(principalId, {
+              kind: "agent_revision",
+              id: revision.id,
+              namespaceId: agent.namespaceId,
+            }))
+          ) {
+            continue;
+          }
           readable.push(revision);
+          if (readable.length === page.limit) {
+            const more = index < listed.revisions.length - 1 || listed.nextBefore !== undefined;
+            return Object.freeze({
+              revisions: Object.freeze(readable),
+              ...(more ? { nextBefore: revision.revision } : {}),
+            });
+          }
         }
+        if (listed.nextBefore === undefined) {
+          return Object.freeze({ revisions: Object.freeze(readable) });
+        }
+        before = listed.nextBefore;
       }
-      return Object.freeze(readable);
     });
   }
 
@@ -3772,8 +3804,8 @@ export class OpenClawController {
       }
       // Native admin status must know whether a newer deployment is replacing this revision.
       // Only the newest later revision is decoded strictly, so an unreadable older snapshot
-      // cannot make a healthy Agent's native admin unavailable.
-      const newest = (await state.revisions.listRevisionsForBrowsing(namespace.id, agent.id))
+      // cannot make a healthy Agent's native admin unavailable, and no other is decoded at all.
+      const newest = (await state.revisions.listRevisionMetadata(namespace.id, agent.id))
         .filter((candidate) => candidate.revision > revision.revision)
         .sort((left, right) => right.revision - left.revision)[0];
       const successor =
@@ -4084,14 +4116,15 @@ export class OpenClawController {
     });
   }
 
+  /** The Presets the principal may read, without their templates (finding 1323). */
   async listPresets(
     principalId: string,
     namespaceId: string,
-  ): Promise<readonly Readonly<Preset>[]> {
+  ): Promise<readonly Readonly<PresetSummary>[]> {
     const namespace = await this.getNamespace(principalId, namespaceId);
     return this.read(async (state) => {
-      const readable: Readonly<Preset>[] = [];
-      for (const preset of await state.presets.listPresets(namespace.id)) {
+      const readable: Readonly<PresetSummary>[] = [];
+      for (const preset of await state.presets.listPresetSummaries(namespace.id)) {
         if (
           await this.canRead(principalId, {
             kind: "preset",
@@ -6959,7 +6992,7 @@ export class OpenClawController {
       // Agent saves check the plugins against the Configuration they name, but a later
       // Configuration save does not know which Agents use it: check the admitted pair again.
       this.validatePluginConfiguration(pluginState?.plugins, admittedConfiguration);
-      const previous = await state.revisions.listRevisions(namespace.id, lockedAgent.id);
+      const previous = await state.revisions.listRevisionMetadata(namespace.id, lockedAgent.id);
       const createdAt = this.timestamp();
       const repositoryCredentials = this.admitRepositoryCredentials(
         lockedAgent,
@@ -9665,7 +9698,7 @@ export class OpenClawController {
       if (namespace.status !== "ready") {
         throw new NamespaceNotReadyError();
       }
-      if ((await state.revisions.listRevisions(namespace.id, agent.id)).length > 0) {
+      if ((await state.revisions.listRevisionMetadata(namespace.id, agent.id)).length > 0) {
         throw new ResourceStateConflictError(
           "Runtime credentials can be provisioned only before the Agent has historical revisions.",
         );
