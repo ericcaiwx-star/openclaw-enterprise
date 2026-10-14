@@ -1511,6 +1511,134 @@ test("custom Codex endpoints compile explicit providers without changing the adm
   }
 });
 
+// Finding 1297: the projection covers every setting the Harness model rule checks, not only
+// model and subagents.model. An openai source's provider block is dropped, so no selection
+// may be left on it.
+test("custom Codex endpoints qualify every non-primary model selection before dropping the source provider", async () => {
+  for (const sourceProvider of ["codex", "openai"]) {
+    const fixture = dedicatedFirstDeployFixture({
+      modelEndpoint: "https://models.example.test/v1",
+    });
+    const ref = (id) => `${sourceProvider}/${id}`;
+    const nonPrimary = {
+      imageModel: { primary: ref("image"), fallbacks: [ref("image-fallback"), "small"] },
+      pdfModel: ref("pdf"),
+      utilityModel: ref("utility"),
+      heartbeat: { model: ref("small") },
+      compaction: { model: ref("small"), memoryFlush: { model: ref("flush") } },
+      tts: { summaryModel: ref("summary") },
+      // Finding 1306: the /model allowlist, which OpenClaw honors over the models keys.
+      modelPolicy: { allow: [ref("gpt-5"), ref("small"), ref("allow-only")] },
+    };
+    fixture.revision.configuration = admitLoggingConfiguration(
+      {
+        ...fixture.revision.configuration,
+        plugins: createHarnessConfiguration("codex", "gpt-5").plugins,
+        agents: {
+          ownership: "explicit",
+          defaults: {
+            model: ref("gpt-5"),
+            models: { [ref("small")]: { alias: "small" } },
+            ...structuredClone(nonPrimary),
+          },
+          entries: {
+            main: {
+              heartbeat: { model: ref("entry-heartbeat") },
+              models: { [ref("entry-policy")]: {}, [ref("small")]: { alias: "entry-small" } },
+              modelPolicy: { allow: [ref("gpt-5"), ref("entry-allow/*")] },
+            },
+          },
+        },
+        tools: { exec: { reviewer: { model: ref("reviewer") } } },
+        hooks: { gmail: { model: ref("gmail") }, mappings: [{ model: ref("hook") }] },
+        channels: { modelByChannel: { slack: { C1: ref("channel") } } },
+        models: {
+          providers: {
+            [sourceProvider]: {
+              agentRuntime: { id: "codex" },
+              api: "openai-responses",
+              baseUrl: "http://127.0.0.1:9",
+              models: [
+                { id: "gpt-5", name: "Primary model" },
+                { id: "small", name: "Small model", contextWindow: 16000 },
+              ],
+            },
+          },
+        },
+      },
+      "info",
+    );
+    const admitted = structuredClone(fixture.revision.configuration);
+    await fixture.prepare();
+    const snapshot = [...fixture.objects.values()].find(
+      (object) => object.kind === "ConfigMap" && object.data?.["openclaw.json"] !== undefined,
+    );
+    assert.ok(snapshot);
+    const rendered = JSON.parse(snapshot.data["openclaw.json"]);
+    const qualified = (id) => `codex/openai-compatible/${id}`;
+    const { defaults } = rendered.agents;
+    assert.equal(defaults.model, qualified("gpt-5"));
+    assert.deepEqual(defaults.imageModel, {
+      primary: qualified("image"),
+      fallbacks: [qualified("image-fallback"), "small"],
+    });
+    assert.equal(defaults.pdfModel, qualified("pdf"));
+    assert.equal(defaults.utilityModel, qualified("utility"));
+    assert.deepEqual(defaults.heartbeat, { model: qualified("small") });
+    assert.deepEqual(defaults.compaction, {
+      model: qualified("small"),
+      memoryFlush: { model: qualified("flush") },
+    });
+    assert.deepEqual(defaults.tts, { summaryModel: qualified("summary") });
+    // An allowlist entry is qualified like a policy key, so /model back to the projected
+    // primary is allowed; one with no catalog row adds none.
+    assert.deepEqual(defaults.modelPolicy, {
+      allow: [qualified("gpt-5"), qualified("small"), qualified("allow-only")],
+    });
+    assert.deepEqual(rendered.agents.entries.main.modelPolicy, {
+      allow: [qualified("gpt-5"), qualified("entry-allow/*")],
+    });
+    assert.deepEqual(Object.keys(defaults.models), [qualified("small")]);
+    assert.deepEqual(rendered.agents.entries.main.heartbeat, {
+      model: qualified("entry-heartbeat"),
+    });
+    assert.deepEqual(rendered.agents.entries.main.models, {
+      [qualified("entry-policy")]: {},
+      [qualified("small")]: { alias: "entry-small" },
+    });
+    assert.equal(rendered.tools.exec.reviewer.model, qualified("reviewer"));
+    assert.equal(rendered.hooks.gmail.model, qualified("gmail"));
+    assert.equal(rendered.hooks.mappings[0].model, qualified("hook"));
+    assert.deepEqual(rendered.channels.modelByChannel, { slack: { C1: qualified("channel") } });
+    assert.deepEqual(Object.keys(rendered.models.providers), ["codex"]);
+    const byModelId = (left, right) => left.id.localeCompare(right.id);
+    assert.deepEqual(
+      rendered.models.providers.codex.models.toSorted(byModelId),
+      [
+        { id: "openai-compatible/gpt-5", name: "Primary model" },
+        { id: "openai-compatible/small", name: "Small model", contextWindow: 16000 },
+        ...[
+          "image",
+          "image-fallback",
+          "pdf",
+          "utility",
+          "flush",
+          "summary",
+          "gmail",
+          "hook",
+          "channel",
+        ].map((id) => ({
+          id: `openai-compatible/${id}`,
+          name: id,
+        })),
+        { id: "openai-compatible/entry-heartbeat", name: "entry-heartbeat" },
+        { id: "openai-compatible/reviewer", name: "reviewer" },
+      ].toSorted(byModelId),
+    );
+    assert.deepEqual(fixture.revision.configuration, admitted);
+  }
+});
+
 // The node wiring a Deployment-backed Codex Harness renders from its first start.
 function harnessNodeSetup(template) {
   const pod = template.spec;
@@ -9113,6 +9241,8 @@ test("Anthropic API-key admission binds every embedded model to the canonical cr
     undefined,
     "${ANTHROPIC_API_KEY}",
     { source: "env", provider: "model", id: "ANTHROPIC_API_KEY" },
+    // OpenClaw's built-in default env provider reads the process environment unconfigured.
+    { source: "env", provider: "default", id: "ANTHROPIC_API_KEY" },
   ]) {
     assert.doesNotThrow(() =>
       driver.validateHarnessAuth(embedded, apiKeyAuth, {
@@ -9121,6 +9251,24 @@ test("Anthropic API-key admission binds every embedded model to the canonical cr
       }),
     );
   }
+  // With secrets.defaults.env naming another alias, "default" is an unconfigured provider.
+  assert.throws(
+    () =>
+      driver.validateHarnessAuth(embedded, apiKeyAuth, {
+        ...configuration,
+        secrets: { ...configuration.secrets, defaults: { env: "model" } },
+        models: {
+          providers: {
+            anthropic: { apiKey: { source: "env", provider: "default", id: "ANTHROPIC_API_KEY" } },
+          },
+        },
+      }),
+    {
+      name: "ConfigurationHarnessError",
+      message:
+        "Configuration setting models.providers.anthropic.apiKey must be ${ANTHROPIC_API_KEY} or an env SecretRef to ANTHROPIC_API_KEY, which the Agent's Harness authentication binding supplies.",
+    },
+  );
   for (const apiKey of [
     "plaintext-fixture",
     "${OPENAI_API_KEY}",
@@ -9392,6 +9540,53 @@ test("every model selection uses the Harness binding's provider (finding 1291)",
     refused("agents.defaults.models", `keys must select ${requirement("codex")}`),
     "D",
   );
+  // So is an allowlist entry, and an allowlist that is not a list (finding 1306).
+  for (const [allow, rule] of [
+    [["codex/gpt-5", "gpt-5"], `must select ${requirement("codex")}`],
+    ["codex/*", "must be provider/model references"],
+  ]) {
+    refuses(
+      codex,
+      {
+        agents: { defaults: { model: "codex/gpt-5", modelPolicy: { allow } } },
+        models: { providers: catalog("codex", ["gpt-5"]) },
+      },
+      refused("agents.defaults.modelPolicy.allow", rule),
+      `D: allow ${JSON.stringify(allow)}`,
+    );
+  }
+  // A media or voice model with the binding's provider is still refused on Codex, and names the
+  // setting, not its primary.
+  refuses(
+    codex,
+    {
+      agents: {
+        defaults: {
+          model: "codex/gpt-5",
+          mediaModels: { image: { primary: "codex/gpt-image-1" } },
+        },
+      },
+      models: { providers: catalog("codex", ["gpt-5"]) },
+    },
+    refused(
+      "agents.defaults.mediaModels.image",
+      "must be unset: Dedicated Codex serves chat models only, not media or voice models",
+    ),
+    "D: media",
+  );
+  // Embedded OpenClaw keeps them, on the binding's provider, and a bare allowlist alias.
+  for (const admit of admissions(embedded, {
+    agents: {
+      defaults: {
+        model: "openai/gpt-5",
+        mediaModels: { image: "openai/gpt-image-1" },
+        voiceModel: "openai/gpt-realtime",
+        modelPolicy: { allow: ["openai/*", "small"] },
+      },
+    },
+  })) {
+    assert.doesNotThrow(admit, "embedded media, voice and allowlist");
+  }
   // E: fallbacks that are not model references, named instead of failing at deployment.
   for (const [scope, setting] of [
     ["model", "agents.defaults.model.fallbacks"],
@@ -9424,6 +9619,18 @@ test("every model selection uses the Harness binding's provider (finding 1291)",
     [
       { agents: { defaults: { mediaModels: { video: "x/m" } } } },
       "agents.defaults.mediaModels.video",
+    ],
+    [
+      { agents: { entries: { main: { mediaModels: { music: "x/m" } } } } },
+      "agents.entries.main.mediaModels.music",
+    ],
+    [
+      { agents: { defaults: { modelPolicy: { allow: ["x/m"] } } } },
+      "agents.defaults.modelPolicy.allow",
+    ],
+    [
+      { agents: { entries: { main: { modelPolicy: { allow: ["x/*"] } } } } },
+      "agents.entries.main.modelPolicy.allow",
     ],
     [{ agents: { defaults: { utilityModel: "x/m" } } }, "agents.defaults.utilityModel"],
     [{ agents: { defaults: { decisionModel: "x/m" } } }, "agents.defaults.decisionModel"],
@@ -9458,12 +9665,16 @@ test("every model selection uses the Harness binding's provider (finding 1291)",
       [embedded, "openai/gpt-5", "openai"],
     ]) {
       const agents = values.agents ?? {};
+      // Dedicated Codex refuses a media or voice model whatever its provider (finding 1306).
+      const capability = harness === codex && /\.(?:mediaModels\.\w+|voiceModel)$/.test(setting);
       refuses(
         harness,
         { ...values, agents: { ...agents, defaults: { ...agents.defaults, model } } },
         refused(
           setting,
-          `${setting === "agents.defaults.models" ? "keys " : ""}must select ${requirement(provider)}`,
+          capability
+            ? "must be unset: Dedicated Codex serves chat models only, not media or voice models"
+            : `${setting === "agents.defaults.models" ? "keys " : ""}must select ${requirement(provider)}`,
         ),
         `${harness.id}: ${setting}`,
       );
@@ -9479,7 +9690,15 @@ test("every model selection uses the Harness binding's provider (finding 1291)",
   ]) {
     for (const admit of admissions(codex, {
       agents: {
-        defaults: { model: "codex/gpt-5", models: { "codex/*": {} }, subagents, decisionModel: "" },
+        defaults: {
+          model: "codex/gpt-5",
+          models: { "codex/*": {} },
+          modelPolicy: { allow: ["codex/*", "codex/gpt-5"] },
+          subagents,
+          decisionModel: "",
+          // An empty media or voice model selects nothing, so Codex admits it.
+          voiceModel: "",
+        },
       },
       channels: { modelByChannel: { slack: { C1: "codex/gpt-5" } } },
       models: { providers: catalog("codex", ["gpt-5"]) },
