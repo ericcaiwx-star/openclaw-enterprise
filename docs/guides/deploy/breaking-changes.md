@@ -126,7 +126,7 @@ describes. _untested_ against a live Installation.
 **What breaks.** Helm and Compute refuse a `gatewayRouting.hostname`, a harness
 `routing.hostname`, and `gatewayRouting.sandbox.domain` that is shorthand, a
 single integer, hexadecimal, or leading-zero IPv4, and a name the URL
-parser rejects, including a last label of `0x` hex. Four decimal octets stay.
+parser rejects, including a decimal or `0x` last label. Four decimal octets stay.
 A hex label that is not last stays.
 
 **Who is affected.** Helm values or Installation YAML that use one of those

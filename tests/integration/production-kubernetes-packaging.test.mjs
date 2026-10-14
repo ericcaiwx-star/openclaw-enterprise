@@ -260,6 +260,14 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "api.0x10" }),
     /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
   );
+  await assert.rejects(
+    render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "api.123" }),
+    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+  );
+  await assert.rejects(
+    render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "999.1.2.3" }),
+    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+  );
   for (const domain of ["example.invalid", "preview.example.invalid"]) {
     await assert.rejects(
       render({ ...sandboxValues, "gatewayRouting.sandbox.domain": domain }),
@@ -911,6 +919,8 @@ test(
       "1.2.3.4.5",
       "0.0.0.08",
       "api.0x10",
+      "api.123",
+      "999.1.2.3",
       "example.0x10",
       "Bad_Host",
       "proxy.example.test:443",
@@ -921,6 +931,8 @@ test(
     ];
     const valid = [
       "192.168.1.1",
+      "0.0.0.0",
+      "255.255.255.255",
       "0xdead.gateway.example.test",
       "proxy.example.test",
       `${"a".repeat(63)}.test`,
@@ -5383,6 +5395,8 @@ test("execution chart refuses a harness hostname Compute refuses", tooling, asyn
     "0x.0.0.1",
     "1.2.3.4.5",
     "api.0x10",
+    "api.123",
+    "999.1.2.3",
     "example.0x10",
   ]) {
     await assert.rejects(
