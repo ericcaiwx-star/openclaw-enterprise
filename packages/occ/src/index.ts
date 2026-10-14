@@ -134,7 +134,7 @@ import {
   immutableCopy,
   isNonEmptyString,
 } from "@openclaw-enterprise/utils";
-import { resolveConfiguredHarnessId } from "./configured-harness.ts";
+import { requireFallbackProviders, resolveConfiguredHarnessId } from "./configured-harness.ts";
 import { requireDeployableRoster } from "./openclaw-roster.ts";
 import {
   capability,
@@ -407,7 +407,11 @@ export {
   urlHoldsUserinfo,
 } from "./model-provider-settings.ts";
 export { requireOpenClawRoster } from "./openclaw-roster.ts";
-export { CODEX_APPROVAL_POLICY_SETTING, codexApprovalPolicy } from "./configuration-settings.ts";
+export {
+  CODEX_APPROVAL_POLICY_SETTING,
+  codexApprovalPolicy,
+  refuseLiteralGatewayPassword,
+} from "./configuration-settings.ts";
 export { PostgresCommitOutcomeUnknownError };
 export {
   PostgresHumanAuthentication,
@@ -4277,6 +4281,9 @@ export class OpenClawController {
       // written (finding 1214), even where it reads like a placeholder elsewhere (finding 1220).
       const options: ConfigurationValidationOptions = { unresolved, unresolvedType };
       validateModelProviderSettings(values, options);
+      // The agents shape, a fallback on another provider and the Gateway's roster rules, named
+      // as Configuration save names them (findings 1305 and 1308).
+      requireDeployableRoster(values, options);
       this.validateComputeConfiguration(values, options);
       // Validation owns native credential rules; Preset CRUD never creates runtime resources.
       await driver.validateValues(values, options);
@@ -10347,8 +10354,11 @@ export class OpenClawController {
       configuredHarnessId = resolveConfiguredHarnessId(configuration.values);
     } catch (error) {
       // A model selection that names no supported Harness is the Configuration's own fault,
-      // not this Agent's; deployment refuses it with this message. Nothing below can run.
+      // not this Agent's; deployment refuses it with this message. Nothing below can run. A
+      // fallback on another provider is refused here, by name, as the Harness rules below refuse
+      // every other selection on another provider (finding 1298).
       if (error instanceof ConfigurationHarnessError) {
+        requireFallbackProviders(configuration.values);
         return;
       }
       throw error;
