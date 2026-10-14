@@ -37,16 +37,18 @@ provider's `apiKey`, then save and deploy again.
 ## 2026-10-14: observability URLs must not hide another host
 
 **What breaks.** Profile preflight and API and worker startup refuse an
-`observability.url` that contains a tab, newline, or backslash. The parser
-stored a different host.
+`observability.url` that contains a tab, newline, or a backslash before the
+query. The parser stored a different host. A backslash in the query stays.
 
 **Who is affected.** Profiles with `controlPlane.observabilityUrl`, and
 Installations whose startup `observability.url` uses one of those characters.
 
 **How to tell.** Preflight reports `controlPlane.observabilityUrl must not
-contain a tab, newline, or backslash`. Startup logs `OBSERVABILITY_URL_INVALID`.
+contain a tab or newline, or a backslash before the query`. Startup logs
+`OBSERVABILITY_URL_INVALID`.
 
-**Steps.** Write the host you mean, with no tab, newline, or backslash, and
+**Steps.** Write the host you mean, with no tab, newline, or backslash before the
+query, and
 upgrade. _untested_ against a live Installation.
 
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts

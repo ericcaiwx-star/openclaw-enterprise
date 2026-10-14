@@ -1537,11 +1537,18 @@ function buildRendered(profile, parsed, diagnostics) {
       : undefined;
   const rewrittenObservabilityIpv4 =
     parsedObservability !== undefined && !ipv4HostKept(rawObservabilityUrl, parsedObservability);
-  // A tab or newline is deleted and a backslash becomes a slash. Userinfo already has its own
-  // message, including when a tab sits in `http:\t//@host`.
+  // A tab or newline is deleted. A backslash before the query becomes a slash. A backslash
+  // in the query does not change the host. Userinfo already has its own message, including
+  // when a tab sits in `http:\t//@host`.
+  const observabilityQueryAt =
+    typeof rawObservabilityUrl === "string" ? rawObservabilityUrl.search(/[?#]/) : -1;
+  const observabilityBeforeQuery =
+    typeof rawObservabilityUrl === "string" && observabilityQueryAt !== -1
+      ? rawObservabilityUrl.slice(0, observabilityQueryAt)
+      : rawObservabilityUrl;
   const observabilityHostChars =
     typeof rawObservabilityUrl === "string" &&
-    /[\t\n\r\\]/.test(rawObservabilityUrl) &&
+    (/[\t\n\r]/.test(rawObservabilityUrl) || observabilityBeforeQuery.includes("\\")) &&
     !writtenUserinfo(rawObservabilityUrl) &&
     !rewrittenObservabilityIpv4;
   const observabilityUrl =
@@ -1558,7 +1565,7 @@ function buildRendered(profile, parsed, diagnostics) {
   }
   if (observabilityHostChars) {
     diagnostics.errors.push(
-      "controlPlane.observabilityUrl must not contain a tab, newline, or backslash; the URL parser drops or rewrites them into a different host.",
+      "controlPlane.observabilityUrl must not contain a tab or newline, or a backslash before the query; the URL parser drops or rewrites them into a different host.",
     );
   }
 
