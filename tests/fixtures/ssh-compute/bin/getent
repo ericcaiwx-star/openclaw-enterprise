@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 : "${OCC_SSH_FIXTURE_STATE:?fixture state required}"
+if [ -f "$OCC_SSH_FIXTURE_STATE/getent.fail" ]; then
+  exit 1
+fi
 database=${1:-}
 name=${2:-}
 [ "$database" = group ] || exit 1

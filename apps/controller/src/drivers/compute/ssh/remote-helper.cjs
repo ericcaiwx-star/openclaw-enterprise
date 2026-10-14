@@ -375,11 +375,13 @@ async function ensureRuntimeIdentity(input) {
   // Claim the name before groupadd/useradd. A killed helper can leave the OS
   // account behind; the next attempt resumes this marker instead of treating
   // that account as foreign. An account with no marker is still refused.
+  let claimedThisRun = false;
   if (marker === undefined) {
     if ((await userExists(name)) || (await groupExists(name))) {
       throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
     }
     atomicWrite(markerPath, JSON.stringify({ ...expected, pending: true }));
+    claimedThisRun = true;
   } else {
     verify(marker, expected);
     if (marker.uid !== undefined || marker.gid !== undefined) {
@@ -426,8 +428,11 @@ async function ensureRuntimeIdentity(input) {
     if (groupCreated) {
       await command("groupdel", [name], true);
     }
-    // Keep the claim when the account survived, so the next attempt can resume.
-    if (!(await userExists(name)) && !(await groupExists(name))) {
+    // Keep a claim from an earlier attempt even when id/getent fail. Those
+    // lookups treat every non-zero exit as absence, including a timeout.
+    // Drop the claim only when this run wrote it and neither account remains,
+    // so a later foreign account is not adopted.
+    if (claimedThisRun && !(await userExists(name)) && !(await groupExists(name))) {
       fs.rmSync(markerPath, { force: true });
     }
     throw error;

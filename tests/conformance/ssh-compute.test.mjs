@@ -1274,6 +1274,58 @@ test("SSH account creation rolls back a failed useradd without adopting a later 
   await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
 });
 
+test("SSH resume keeps a pending claim when account lookups fail", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-lookup-fail");
+  const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+  const hold = join(f.state, "useradd-hold");
+  assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+  bind(f.driver, rev);
+  await writeFile(join(f.state, "useradd.hold"), hold);
+  const interrupted = f.driver.prepareRevision(rev);
+  const useraddPid = await waitFor("useradd to create the account and wait", () =>
+    readFile(hold, "utf8")
+      .then((contents) => {
+        const pid = Number(contents.trim());
+        return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+      })
+      .catch(() => undefined),
+  );
+  t.after(() => {
+    try {
+      process.kill(useraddPid, "SIGKILL");
+    } catch (error) {
+      if (error.code !== "ESRCH") {
+        throw error;
+      }
+    }
+  });
+  f.children.at(-1).kill("SIGKILL");
+  try {
+    process.kill(useraddPid, "SIGKILL");
+  } catch (error) {
+    if (error.code !== "ESRCH") {
+      throw error;
+    }
+  }
+  await assert.rejects(interrupted, /failed or timed out/);
+  await rm(hold, { force: true });
+  await Promise.all([
+    writeFile(join(f.state, "id.fail"), "lookup"),
+    writeFile(join(f.state, "getent.fail"), "lookup"),
+  ]);
+  await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+  const marker = await json(join(f.root, "accounts", `${account}.json`));
+  assert.equal(marker.pending, true);
+  assert.equal((await stat(join(f.state, "accounts", "users", account))).isFile(), true);
+  await rm(join(f.state, "id.fail"), { force: true });
+  await rm(join(f.state, "getent.fail"), { force: true });
+  assert.equal((await f.driver.prepareRevision(rev)).ready, true);
+  const resumed = await json(join(f.root, "accounts", `${account}.json`));
+  assert.equal(resumed.pending, undefined);
+  assert.equal(resumed.uid, process.getuid());
+});
+
 test("SSH local executor cancellation terminates the real helper waiting for the host lock", async (t) => {
   const f = await fixture(t);
   // Simulate a live concurrent host operation; this tests manual cancellation, not lease loss.
