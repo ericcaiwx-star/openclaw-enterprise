@@ -695,6 +695,41 @@ test("ChatGPT Backend releases rejected HTTPS responses for subsequent account c
   }
 });
 
+test("ChatGPT Backend stops reading an oversized chunked response at its byte limit", async () => {
+  const original = globalThis.fetch;
+  const chunk = new Uint8Array(64 * 1024).fill(0x20);
+  let bytesProduced = 0;
+  let cancelled = false;
+  globalThis.fetch = async () =>
+    new Response(
+      new ReadableStream({
+        pull(controller) {
+          controller.enqueue(chunk);
+          bytesProduced += chunk.byteLength;
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  try {
+    const client = new ChatGPTClient({
+      workspaceId: backend.configuration.workspaceId,
+      adminKey: "synthetic-test-key",
+    });
+    await assert.rejects(
+      client.createServiceAccount({ name: "oversized" }),
+      /ChatGPT Admin API returned an invalid response/,
+    );
+    assert.equal(cancelled, true);
+    assert.ok(bytesProduced > 4 * 1024 * 1024, String(bytesProduced));
+    assert.ok(bytesProduced < 5 * 1024 * 1024, String(bytesProduced));
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 // An in-memory ChatGPT Admin API behind a replaced global fetch. Each fault applies the
 // request first (or not), then answers as the test asks.
 function fakeChatGPT(workspaceId) {
