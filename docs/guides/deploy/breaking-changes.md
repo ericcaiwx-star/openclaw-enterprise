@@ -13,6 +13,25 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
+
+**What breaks.** Startup and both gateway clients refuse an OpenShell
+`endpoint` whose IPv4 host is not four decimal octets from 0 to 255 with no
+leading zeros. Shorthand, a single integer, hex, and leading zeros used to be
+dialed as a different address (`192.168.1` became `192.168.0.1`; `2130706433`
+became `127.0.0.1`).
+
+**Who is affected.** Backends whose `configuration.endpoint` uses one of those
+spellings, bare `host:port` or an `http`/`https` origin. A canonical host such
+as `192.168.1.1`, a DNS name, and an IPv6 literal still connect.
+
+**How to tell.** Startup reports `configuration.endpoint IPv4 host must be four
+decimal octets from 0 to 255 with no leading zeros; other spellings parse as a
+different address.` The gateway client reports that sentence for `OpenShell
+gateway endpoint`.
+
+**Steps.** Write the four decimal octets you mean, then restart.
+
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
 **What breaks.** Profile preflight refuses an uppercase letter in the repository
@@ -267,26 +286,6 @@ positive safe integer.` The message does not name `timeoutMs`.
 
 **Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window.
 The real helper uses 120000. Then start again.
-
-## 2026-10-13: OpenShell network policy names must be unique
-
-**What breaks.** Controller startup refuses an Installation whose
-`policy.networkPolicies` repeat a name, or name a policy
-`workspace-node-enrollment`. Those configurations start today. A duplicate name
-keeps only the last rule. A policy named `workspace-node-enrollment` is replaced
-when a workspace-node binding exists.
-
-**Who is affected.** Installations with duplicate policy names, or with a policy
-named `workspace-node-enrollment`.
-
-**How to tell.** Startup logs `startup-error` with code
-`OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
-does not include the policy name. Loading the Installation configuration names
-the duplicate or reserved policy.
-
-**Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
-policy called `workspace-node-enrollment`. Keep each policy's binaries and
-endpoints. _untested_ against a live Installation.
 
 ## 2026-10-13: OpenShell `openai` credential sources need replacing
 
