@@ -316,4 +316,3 @@ such as `10.43.0.1/32` upgrades unchanged.
 **Steps.** Replace the saved value with its canonical spelling (`010.0.0.1/32`
 becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
 `/32`.
-
