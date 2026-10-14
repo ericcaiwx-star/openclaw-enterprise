@@ -21,9 +21,10 @@ and deployment refuse a model selection off the primary model's provider:
 fallbacks, Agent entries, `subagents.model` and the other `*Model` settings,
 `models` policy keys, `modelPolicy.allow`, hook models,
 `channels.modelByChannel`, and an `apiKey` on another `models.providers`
-entry. Dedicated Codex refuses every `apiKey`, `mediaModels` and `voiceModel`,
-and unqualified policy entries. Every Compute refuses another-provider
-fallbacks at save. A Preset variable's provider is checked at launch; a number
+entry (`openrouter:auto` and `openrouter:free` count as `openrouter`).
+Dedicated Codex refuses every `apiKey`, `mediaModels` and `voiceModel`, and
+unqualified policy entries. Every Compute refuses another-provider fallbacks at
+save. A Preset variable's provider is checked at launch; a number
 or boolean model variable is refused. Preset saves also check `agents` rosters.
 Every Compute also refuses a literal key in `memory.search.remote` (also per
 Agent), `tools.media` requests, speech and Talk provider `apiKey`s, web fetch,
@@ -33,7 +34,8 @@ HTTP field name. It also refuses a literal secret in the other slots OpenClaw
 marks sensitive: Gateway, hooks, sandbox SSH and storage secrets, and channel
 and plugin settings such as `botToken` or `webSearch.apiKey`
 ([list](../../reference/configuration/secrets.md#secret-boundaries)). Preset
-saves also refuse a literal `gateway.auth.password`.
+saves also refuse a literal `gateway.auth.password` or invalid `approvalPolicy`;
+provisioning checks `agents` rosters.
 
 **Who is affected.** Configurations and Presets that select a second provider
 or give it an `apiKey`, set an `apiKey`, media or voice model for Dedicated
@@ -65,18 +67,20 @@ contain a tab or newline, or a backslash before the query`. Startup logs
 **Steps.** Write the host you mean, with no tab, newline, or backslash before the
 query, and upgrade. _untested_ against a live Installation.
 
-## 2026-10-14: Codex model IPv4 hosts must be four decimal octets
+## 2026-10-14: proxy and MCP URLs must name a host
 
-**What breaks.** `runtime.codexModelBaseUrl` whose IPv4 host is not four decimal
-octets with no leading zeros is refused.
+**What breaks.** Configuration and Preset saves refuse a proxy, channel proxy,
+MCP server, or plugin URL whose authority is empty (`https:///v1`) or whose
+`//` is missing (`https:/v1`).
 
-**Who is affected.** Kubernetes Compute settings that set
-`runtime.codexModelBaseUrl` to one of those spellings.
+**Who is affected.** Configurations and Presets that save one of those
+spellings in a proxy, channel, MCP, or plugin URL.
 
-**How to tell.** Compute reports `Codex model endpoint IPv4 host must be four
-decimal octets`.
+**How to tell.** The save answers `400` naming the field: `has an empty
+authority or a missing //, which parses as a different host.`
 
-**Steps.** Write those four octets, then start again.
+**Steps.** Write an absolute http or https URL with the host you mean, and
+save again.
 
 ## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
 
@@ -116,6 +120,19 @@ such a source fails with `The OpenShell endpoint requires HTTPS, ...`.
 DNS name its certificate covers, as the
 [`openai` source replacement notice](breaking-changes-archive.md#2026-10-13-openshell-openai-credential-sources-need-replacing)
 describes. _untested_ against a live Installation.
+
+## 2026-10-14: Codex model IPv4 hosts must be four decimal octets
+
+**What breaks.** `runtime.codexModelBaseUrl` whose IPv4 host is not four decimal
+octets with no leading zeros is refused.
+
+**Who is affected.** Kubernetes Compute settings that set
+`runtime.codexModelBaseUrl` to one of those spellings.
+
+**How to tell.** Compute reports `Codex model endpoint IPv4 host must be four
+decimal octets`.
+
+**Steps.** Write those four octets, then start again.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
@@ -296,24 +313,3 @@ or the same sentence for `auth.google.egressCidrs`, `auth.oidc.egressCidrs`, and
 
 **Steps.** Write the canonical decimal (`140.82.112.8/20` for
 `140.82.112.08/20`) and upgrade again.
-
-## 2026-10-13: remote node CIDRs must be canonical
-
-**What breaks.** `helm upgrade` fails when a saved
-`gatewayRouting.remoteNodeCidrs` entry uses a leading zero, such as
-`010.0.0.1/32` or `::ffff:010.0.0.1/128`. Those values used to render, and the
-apiserver accepted them with a warning. The upgrade now stops before it writes
-that policy.
-
-**Who is affected.** Saved releases that use a leading-zero spelling. Canonical
-values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
-`::ffff:10.0.0.0/120`. An empty list and `null` still omit the ingress block.
-
-**How to tell.** Helm stops with
-`gatewayRouting.remoteNodeCidrs requires an IPv4 or IPv6 CIDR` for
-`010.0.0.1/32`, and with
-`gatewayRouting.remoteNodeCidrs contains an invalid IPv6 address` for
-`::ffff:010.0.0.1/128`.
-
-**Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
-`::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.
