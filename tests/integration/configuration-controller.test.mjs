@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FilesystemConfigurationDriver } from "../../apps/controller/src/drivers/configuration/filesystem/index.ts";
+import { KubernetesConfigurationDriver } from "../../apps/controller/src/drivers/configuration/kubernetes/index.ts";
 import test from "node:test";
 import { resolveApprovedHarness as resolveApprovedDevelopmentHarness } from "../../apps/controller/src/composition/production-harness.ts";
 import { createControllerApp } from "../../apps/controller/src/index.ts";
@@ -772,14 +773,24 @@ test("Preset save refuses an agents roster every deployment refuses, as Configur
     // An ownership no filling makes "explicit", or that a number variable fills.
     [withAgents({ ownership: "shared-{{ vars.ownership }}", entries: { main: {} } }), onlyExplicit],
     [withAgents({ ownership: "{{ vars.count }}", entries: { main: {} } }), onlyExplicit],
+    // Finding 1315: many adjacent variables are matched in linear time. Keep this case last.
+    [
+      withAgents({ ownership: `${"{{ vars.ownership }}".repeat(64)}x`, entries: { main: {} } }),
+      onlyExplicit,
+    ],
   ];
   for (const [index, [values, message]] of refused.entries()) {
     await t.test(`refuses Preset ${index}: ${message}`, async () => {
       const label = JSON.stringify(values);
+      const started = Date.now();
       const saved = await savePreset(`Roster-${index}`, values);
       assert.equal(saved.status, 400, `${label}: ${JSON.stringify(saved.body)}`);
       assert.equal(saved.body.error.code, "INVALID_REQUEST", label);
       assert.equal(saved.body.error.message, message, label);
+      if (index === refused.length - 1) {
+        // Finding 1315: a save blocks the controller while it checks, so it must stay fast.
+        assert.ok(Date.now() - started < 5_000, label);
+      }
     });
   }
   assert.deepEqual((await request(context.app, "GET", presets)).body.data, []);
@@ -940,6 +951,84 @@ test("Configuration save and Kubernetes deployment admission refuse settings pre
     const saved = await request(context.app, "PATCH", item, { body: { values } });
     assert.equal(saved.status, 200, `${JSON.stringify(values)}: ${JSON.stringify(saved.body)}`);
   }
+});
+
+test("Preset save refuses a Codex approval policy every Gateway refuses, as Configuration save does", async (t) => {
+  // Finding 1311: Preset save skipped the settings rules Configuration save and Agent
+  // provisioning run, so a Preset with a retired or unknown Codex approval policy saved and was
+  // refused only when a launch created its Configuration. A policy that waits on an unfilled
+  // variable is checked as far as its written text goes, and in full once filled.
+  const root = await mkdtemp(join(tmpdir(), "occ-preset-settings-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { namespace, ...context } = await fixture({
+    configurationDriver: new FilesystemConfigurationDriver(root),
+    // The rule holds on every Compute, so none of Kubernetes' own rules run here.
+    computeDriver: createReadyComputeDriver("compute-preset-settings"),
+  });
+  await context.controller.transact((state) =>
+    state.namespaces.transitionNamespaceStatus(namespace.id, "provisioning", "ready"),
+  );
+  const configurations = `/namespaces/${namespace.id}/configurations`;
+  const presets = `/namespaces/${namespace.id}/presets`;
+  const variables = { policy: { type: "string" }, count: { type: "number" } };
+  const policy = (approvalPolicy) => ({
+    ...runtimeSelected,
+    plugins: { entries: { codex: { config: { appServer: { approvalPolicy } } } } },
+  });
+  const setting = (path, requirement) => `Configuration setting ${path} ${requirement}.`;
+  const policyEnum = setting(
+    "plugins.entries.codex.config.appServer.approvalPolicy",
+    'must be "never", "on-request" or "on-failure"',
+  );
+  const retired = setting(
+    "plugins.entries.codex.config.appServer.approvalPolicy",
+    'must not be "untrusted", which the OpenClaw runtime retired: use "on-request"',
+  );
+  const savePreset = (name, values) =>
+    request(context.app, "POST", presets, {
+      body: { name, template: { variables, configuration: { values } } },
+    });
+  for (const [index, [values, message]] of [
+    [policy("untrusted"), retired],
+    [policy("always"), policyEnum],
+    [policy({ mode: "never" }), policyEnum],
+    // Written text no filling makes an accepted policy, or a number variable.
+    [policy("un{{ vars.policy }}"), policyEnum],
+    [policy("{{ vars.policy }}-never"), policyEnum],
+    [policy("{{ vars.count }}"), policyEnum],
+  ].entries()) {
+    const label = JSON.stringify(values);
+    const saved = await savePreset(`Refused-${index}`, values);
+    assert.equal(saved.status, 400, `${label}: ${JSON.stringify(saved.body)}`);
+    assert.equal(saved.body.error.code, "INVALID_REQUEST", label);
+    assert.equal(saved.body.error.message, message, label);
+  }
+  assert.deepEqual((await request(context.app, "GET", presets)).body.data, []);
+
+  // A policy a filling can still make accepted saves.
+  for (const [index, values] of [
+    policy("never"),
+    policy("on-request"),
+    policy("on-failure"),
+    policy("{{ vars.policy }}"),
+    policy("on-{{ vars.policy }}"),
+    policy("{{ vars.policy }}ever"),
+  ].entries()) {
+    const saved = await savePreset(`Accepted-${index}`, values);
+    assert.equal(saved.status, 201, `${JSON.stringify(values)}: ${JSON.stringify(saved.body)}`);
+  }
+  // The filled Preset reaches the same rule on the Configuration its launch creates.
+  const launched = await request(context.app, "POST", configurations, {
+    body: {
+      kind: "agent",
+      ...renderPresetTemplate(
+        { variables, configuration: { values: policy("{{ vars.policy }}") } },
+        { policy: "untrusted", count: 1 },
+      ).configuration,
+    },
+  });
+  assert.equal(launched.status, 400, JSON.stringify(launched.body));
+  assert.equal(launched.body.error.message, retired);
 });
 
 test("Configuration save and Kubernetes deployment refuse caller-owned credentials and channels with one named message", async () => {
@@ -1189,6 +1278,18 @@ test("Configuration save refuses a model selection or apiKey off the primary mod
       },
       setting("agents.entries.main.modelPolicy.allow", openai),
     ],
+    // Finding 1310: OpenClaw reads openrouter:auto and openrouter:free, which have no slash, as
+    // the openrouter provider's models, trimmed and in any case.
+    [
+      { agents: { defaults: { ...runtimeDefaults, subagents: { model: "openrouter:auto" } } } },
+      setting("agents.defaults.subagents.model", openai),
+    ],
+    [
+      {
+        agents: { defaults: { ...runtimeDefaults, modelPolicy: { allow: [" OpenRouter:Free "] } } },
+      },
+      setting("agents.defaults.modelPolicy.allow", openai),
+    ],
     [
       {
         ...valid,
@@ -1266,6 +1367,22 @@ test("Configuration save refuses a model selection or apiKey off the primary mod
       assert.deepEqual(revisions.body.data, [], label);
       await writePastOcc(configurationDriver, configurationId, valid);
     }
+  });
+
+  // Finding 1310: deployment reads an OpenRouter compatibility selector as save does, so a row
+  // stored before the rule is refused by name before a revision exists.
+  await t.test("a stored OpenRouter compatibility selector", async () => {
+    const values = {
+      agents: { defaults: { ...runtimeDefaults, heartbeat: { model: "openrouter:auto" } } },
+    };
+    const message = setting("agents.defaults.heartbeat.model", openai);
+    await writePastOcc(configurationDriver, configurationId, values);
+    const deployed = await request(context.app, "POST", `${agentPath}/deploy`);
+    assert.equal(deployed.status, 400, JSON.stringify(deployed.body));
+    assert.equal(deployed.body.error.message, message);
+    const revisions = await request(context.app, "GET", `${agentPath}/revisions`);
+    assert.deepEqual(revisions.body.data, []);
+    await writePastOcc(configurationDriver, configurationId, valid);
   });
 
   // A Configuration whose model policy selects the Codex Harness runs as Dedicated Codex, which
@@ -1473,6 +1590,11 @@ test("Preset save refuses a model selection or apiKey off the primary model's pr
         agents: { defaults: { ...runtimeDefaults, modelPolicy: { allow: ["{{ vars.count }}"] } } },
       },
       setting("agents.defaults.modelPolicy.allow", "must be provider/model references"),
+    ],
+    // Finding 1310: an OpenRouter compatibility selector names the openrouter provider.
+    [
+      { agents: { defaults: { ...templated, utilityModel: "openrouter:free" } } },
+      setting("agents.defaults.utilityModel", openai),
     ],
     // A fallback and a policy key whose provider waits on a variable leave the rest checked.
     [
@@ -3226,6 +3348,71 @@ test("Configuration and Preset saves check a URL of many ${NAME:-fallback} refer
     });
     assert.equal(escaped.status, 201, JSON.stringify(escaped.body));
   });
+});
+
+test("Configuration save refuses a document too large to store before its content rules", async () => {
+  // Finding 1317: the Kubernetes Driver's 1 MiB ConfigMap cap ran after OCC's content rules, so
+  // the rules walked any document up to the 6.2 MiB request limit. OCC now asks the Driver
+  // first. The real Kubernetes Driver checks the values here; the simple substrate stands in for
+  // its ConfigMap storage.
+  const kubernetes = new KubernetesConfigurationDriver({ authentication: { mode: "inCluster" } });
+  const configurationDriver = {
+    ...createConfigurationBackend(),
+    validate: (configuration) => kubernetes.validate(configuration),
+    validateSize: (values) => kubernetes.validateSize(values),
+  };
+  const { namespace, collection, ...context } = await fixture({ configurationDriver });
+  const contentRefusal =
+    "Configuration setting models.providers.openai.models must be an array of model entries.";
+  // A document that breaks a content rule, padded to `bytes` of JSON.
+  const document = (bytes) => {
+    const values = {
+      models: { providers: { openai: { models: "gpt-5" } } },
+      plugins: { entries: { knowledge: { config: { note: "" } } } },
+    };
+    values.plugins.entries.knowledge.config.note = "x".repeat(
+      bytes - JSON.stringify(values).length,
+    );
+    return values;
+  };
+  const limit = 1_048_576;
+  const under = document(limit - 1);
+  const over = document(limit);
+  const save = (method, path, values) =>
+    request(context.app, method, path, {
+      body: method === "POST" ? { kind: "agent", values } : { values },
+    });
+
+  // Just under the cap the content rule refuses it by name; at the cap the size refusal wins.
+  const named = await save("POST", collection, under);
+  assert.equal(named.status, 400, JSON.stringify(named.body));
+  assert.equal(named.body.error.message, contentRefusal);
+  const oversized = await save("POST", collection, over);
+  assert.equal(oversized.status, 400, JSON.stringify(oversized.body));
+  assert.equal(oversized.body.error.message, "The supplied configuration is invalid.");
+  await assert.rejects(
+    context.controller.createConfiguration(context.principal.id, {
+      namespaceId: namespace.id,
+      kind: "agent",
+      values: over,
+    }),
+    { message: "Configuration exceeds the Kubernetes ConfigMap size limit." },
+  );
+
+  // An update is checked in the same order.
+  const created = await save("POST", collection, {});
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const item = `${collection}/${created.body.data.id}`;
+  const renamed = await save("PATCH", item, under);
+  assert.equal(renamed.status, 400, JSON.stringify(renamed.body));
+  assert.equal(renamed.body.error.message, contentRefusal);
+  const replaced = await save("PATCH", item, over);
+  assert.equal(replaced.status, 400, JSON.stringify(replaced.body));
+  assert.equal(replaced.body.error.message, "The supplied configuration is invalid.");
+  assert.deepEqual(
+    configurationDriver.storedConfigurations().map(({ values }) => values),
+    [{}],
+  );
 });
 
 test("Configuration and Preset saves read a git config value as a proxy when its key names one", async (t) => {
