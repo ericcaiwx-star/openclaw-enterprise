@@ -1,7 +1,7 @@
 ---
 created: 2026-09-07
-updated: 2026-10-10
-last_updated_session: authoring-run/f50ad5ce-853f-4d20-9c15-8da39cbe292e
+updated: 2026-10-14
+last_updated_session: authoring-run/a404e7a3-9acf-4b50-9307-31e50b1b3582
 ---
 
 <a id="pr-24-ssh-compute-flow"></a>
@@ -94,7 +94,11 @@ The system SSH client uses an explicit identity and known-hosts file, strict
 host-key checks, batch mode, and a 180-second operation timeout. The helper
 also enforces a 170-second deadline and detects closed output pipes with
 heartbeat writes. Cancellation terminates the local client; a systemd job
-already submitted can still complete.
+already submitted can still complete. Once stdout exceeds 64 Ki UTF-16 code
+units, the executor stops retaining subsequent chunks and reports
+`SSH helper output exceeded its limit.` The crossing chunk can exceed the
+threshold. The local client still receives SIGTERM, then SIGKILL after one
+second if needed; the operation settles on its close event.
 
 Host mutations take `<root>/.compute-lock` through a child holding kernel flock,
 with a 30-second acquisition timeout. The shared root defines the inventory and
@@ -121,8 +125,9 @@ Agent, and ServicePrincipal resumes the claim, creates whichever of the group
 or user is missing, and replaces the marker with the recorded UID/GID. A
 different ServicePrincipal does not match the claim and is refused before
 account commands. An account or group with no marker is refused and is not
-adopted. A failed `useradd` that leaves neither account removes the claim, so a
-later foreign account is not adopted. The
+adopted. A failed `useradd` that leaves neither account removes the claim only
+when this attempt wrote it, so a later foreign account is not adopted. A claim
+left by an earlier attempt is kept when those lookups fail. The
 [SSH Compute reference](../reference/drivers/ssh-compute.md) states this marker
 contract. A finalized marker, including one written before pending claims
 existed, is verified by its recorded UID/GID and is not rewritten. Agent-owned
@@ -225,6 +230,8 @@ retire, which frees its gateway port.
 ## Changelog
 
 - 2026-10-14: Trace the pending account claim written before `useradd`, its resume, and Namespace cleanup of that incomplete account. The marker contract stays in the SSH Compute reference.
+
+- 2026-10-14 12:23: Document stdout retention and local-client settlement on overflow. (authoring-run/a404e7a3-9acf-4b50-9307-31e50b1b3582 - 4727e9b109a2127150e03e39e859d45e0668f82f)
 
 - 2026-10-10 06:15: Trace absolute unit enablement and relinking for owned cleanup outside systemd's load path. (authoring-run/f50ad5ce-853f-4d20-9c15-8da39cbe292e - 792304b6a09b5df4f46e3889066f231610b294cf)
 
