@@ -96,7 +96,7 @@ export function openAiBaseUrlRewritesIpv4(value: string): boolean {
   if (isIP(endpoint.hostname) !== 4) {
     return false;
   }
-  // A backslash is a slash to the URL parser, so it ends the written host the same way `/` does.
-  const written = /^https?:\/\/([^/?#:\\]+)/i.exec(value)?.[1];
+  // A backslash is a slash to the URL parser, including the two separators after the scheme.
+  const written = /^https?:[/\\]{2}([^/?#:\\]+)/i.exec(value)?.[1];
   return written !== endpoint.hostname || !strictDecimalIpv4.test(endpoint.hostname);
 }

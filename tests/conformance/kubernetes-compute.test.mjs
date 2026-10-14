@@ -5112,6 +5112,7 @@ test("the canonical Kubernetes runtime validates the dedicated Codex model endpo
     "https://bücher.example.test/v1",
     "https://192.0.2.1/v1",
     "https://192.0.2.1\\v1",
+    "https:\\\\192.0.2.1/v1",
     // These concrete URL forms remain valid here; this does not prove provider
     // support or reachability through a deployment's network policy.
     "https://[2001:db8::1]/v1",
