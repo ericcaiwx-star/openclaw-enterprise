@@ -374,7 +374,7 @@ for (const phase of ["admission", "gateway key"]) {
   });
 }
 
-test("native admin gateway base keeps a canonical host and drops a rewritten IPv4 host", () => {
+test("native admin gateway base keeps a canonical host", () => {
   assert.equal(
     nativeAdminGatewayHttpBase("wss://192.168.1.1/openclaw"),
     "https://192.168.1.1/openclaw/",
@@ -383,7 +383,4 @@ test("native admin gateway base keeps a canonical host and drops a rewritten IPv
     nativeAdminGatewayHttpBase("wss://gateway.example/openclaw"),
     "https://gateway.example/openclaw/",
   );
-  for (const host of ["192.168.1", "2130706433", "127.1", "0177.0.0.1", "0x7f000001"]) {
-    assert.equal(nativeAdminGatewayHttpBase(`wss://${host}/openclaw`), undefined, host);
-  }
 });

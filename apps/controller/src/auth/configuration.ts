@@ -17,13 +17,14 @@ export function betterAuthIssuer(installationId: string): string {
 // then URL.toString() publishes that other address.
 const strictDecimalIpv4 = /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/;
 
-/** A bare hostname Node would dial as a different IPv4 address (`192.168.1` becomes `192.168.0.1`). */
+/** A bare hostname Node would dial as a different IPv4 address (`192.168.1` becomes `192.168.0.1`).
+ * A hostname the URL parser rejects, such as `1.2.3.4.5` or `example.0x10`, cannot be dialled either. */
 export function rewrittenIpv4Hostname(hostname: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(`http://${hostname}`);
   } catch {
-    return false;
+    return true;
   }
   if (isIP(parsed.hostname) !== 4) {
     return false;
