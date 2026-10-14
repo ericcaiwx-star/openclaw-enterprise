@@ -262,7 +262,7 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
   );
   await assert.rejects(
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "api.123" }),
-    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+    /numeric or 0x last label parses as IPv4; use four decimal octets from 0 to 255 without leading zeros/,
   );
   await assert.rejects(
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "999.1.2.3" }),
@@ -968,13 +968,17 @@ test(
       if (invalid.includes(hostname)) {
         await assert.rejects(
           load(),
-          /Gateway routing hostname must be a DNS hostname without a port or path/,
+          hostname === "api.123"
+            ? /numeric or 0x last label parses as IPv4; use four decimal octets from 0 to 255 without leading zeros/
+            : /Gateway routing hostname must be a DNS hostname without a port or path/,
         );
         await assert.rejects(
           renderHostname(),
           ({ stderr }) =>
             stderr.includes(
-              "gatewayRouting.hostname must be a DNS hostname without a port or path",
+              hostname === "api.123"
+                ? "numeric or 0x last label parses as IPv4; use four decimal octets from 0 to 255 without leading zeros"
+                : "gatewayRouting.hostname must be a DNS hostname without a port or path",
             ),
           hostname,
         );
@@ -5401,7 +5405,7 @@ test("execution chart refuses a harness hostname Compute refuses", tooling, asyn
   ]) {
     await assert.rejects(
       template("--set-string", `routing.hostname=${hostname}`),
-      /routing\.hostname must be a DNS hostname without a port or path/,
+      /numeric or 0x last label parses as IPv4; use four decimal octets from 0 to 255 without leading zeros/,
       hostname,
     );
   }
