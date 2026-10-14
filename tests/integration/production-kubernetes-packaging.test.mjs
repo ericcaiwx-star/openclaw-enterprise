@@ -256,6 +256,10 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "127.1" }),
     /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
   );
+  await assert.rejects(
+    render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "api.0x10" }),
+    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+  );
   for (const domain of ["example.invalid", "preview.example.invalid"]) {
     await assert.rejects(
       render({ ...sandboxValues, "gatewayRouting.sandbox.domain": domain }),
@@ -906,6 +910,8 @@ test(
       "0x.0.0.1",
       "1.2.3.4.5",
       "0.0.0.08",
+      "api.0x10",
+      "example.0x10",
       "Bad_Host",
       "proxy.example.test:443",
       "https://proxy.example.test",
@@ -979,20 +985,6 @@ test(
       );
       assert.deepEqual(certificate.spec.dnsNames, [expected]);
       assert.equal(routing.hostname, hostname);
-    }
-    // Node's URL parser rejects these, so they cannot be dialled. The chart still
-    // renders a trailing hex label because it is not an all-numeric host.
-    for (const hostname of ["api.0x10", "example.0x10"]) {
-      const configuration = structuredClone(example);
-      configuration.drivers.compute.configuration.gatewayRouting.hostname = hostname;
-      await writeFile(installationPath, JSON.stringify(configuration));
-      await assert.rejects(
-        loadInstallationConfiguration({
-          mode: "production",
-          environment: { OCC_CONFIG_PATH: installationPath },
-        }),
-        /Gateway routing hostname must be a DNS hostname without a port or path/,
-      );
     }
   },
 );
@@ -5384,7 +5376,15 @@ test("execution chart refuses a harness hostname Compute refuses", tooling, asyn
       hostname,
     );
   }
-  for (const hostname of ["123", "127.1", "0x", "0x.0.0.1"]) {
+  for (const hostname of [
+    "123",
+    "127.1",
+    "0x",
+    "0x.0.0.1",
+    "1.2.3.4.5",
+    "api.0x10",
+    "example.0x10",
+  ]) {
     await assert.rejects(
       template("--set-string", `routing.hostname=${hostname}`),
       /routing\.hostname must be a DNS hostname without a port or path/,

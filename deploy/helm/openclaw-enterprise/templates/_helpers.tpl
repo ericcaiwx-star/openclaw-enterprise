@@ -521,8 +521,8 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- fail "gatewayRouting.hostname must be a DNS hostname without a port or path" -}}
 {{- end -}}
 {{- /* Shorthand, integer, hex, and leading-zero IPv4 are legal DNS labels, but a URL parser dials another address. Four decimal octets stay. */ -}}
-{{- /* A hex label inside a DNS name, such as 0xdead.gateway.example.test, is not an address. Only a host whose every label is decimal or 0x-hex is. */ -}}
-{{- if and $routing.hostname (or (and (regexMatch "^[0-9.]+$" $routing.hostname) (not (regexMatch "^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}$" $routing.hostname))) (and (regexMatch "^(?:0x[0-9a-f]*|[0-9]+)(?:\\.(?:0x[0-9a-f]*|[0-9]+))*$" $routing.hostname) (regexMatch "(^|\\.)0x" $routing.hostname))) -}}
+{{- /* A hex label that is not last, such as 0xdead.gateway.example.test, is not an address. A last label of 0x-hex cannot be dialled. */ -}}
+{{- if and $routing.hostname (or (and (regexMatch "^[0-9.]+$" $routing.hostname) (not (regexMatch "^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}$" $routing.hostname))) (and (regexMatch "^(?:0x[0-9a-f]*|[0-9]+)(?:\\.(?:0x[0-9a-f]*|[0-9]+))*$" $routing.hostname) (regexMatch "(^|\\.)0x" $routing.hostname)) (regexMatch "(^|\\.)0x[0-9a-f]*$" $routing.hostname)) -}}
 {{- fail "gatewayRouting.hostname must be a DNS hostname without a port or path" -}}
 {{- end -}}
 
@@ -582,8 +582,8 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- end -}}
 {{- if $routing.sandbox.enabled -}}
 {{- if not (regexMatch "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$" $routing.sandbox.domain) -}}{{- fail "gatewayRouting.sandbox.domain must be a DNS hostname without wildcard, scheme, port or path" -}}{{- end -}}
-{{- /* The same rewritten-address rule as gatewayRouting.hostname. A hex label inside a DNS name stays. */ -}}
-{{- if or (and (regexMatch "^[0-9.]+$" $routing.sandbox.domain) (not (regexMatch "^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}$" $routing.sandbox.domain))) (and (regexMatch "^(?:0x[0-9a-f]*|[0-9]+)(?:\\.(?:0x[0-9a-f]*|[0-9]+))*$" $routing.sandbox.domain) (regexMatch "(^|\\.)0x" $routing.sandbox.domain)) -}}
+{{- /* The same rewritten-address rule as gatewayRouting.hostname. A hex label that is not last stays. */ -}}
+{{- if or (and (regexMatch "^[0-9.]+$" $routing.sandbox.domain) (not (regexMatch "^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}$" $routing.sandbox.domain))) (and (regexMatch "^(?:0x[0-9a-f]*|[0-9]+)(?:\\.(?:0x[0-9a-f]*|[0-9]+))*$" $routing.sandbox.domain) (regexMatch "(^|\\.)0x" $routing.sandbox.domain)) (regexMatch "(^|\\.)0x[0-9a-f]*$" $routing.sandbox.domain) -}}
 {{- fail "gatewayRouting.sandbox.domain must be a DNS hostname without wildcard, scheme, port or path" -}}
 {{- end -}}
 {{- /* Dedicated Agent routes use agent-<32 hex>.<domain>, which must fit the 253-character Gateway API hostname limit. */ -}}
