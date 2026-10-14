@@ -13,6 +13,22 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-14: proxy and MCP URLs must name a host
+
+**What breaks.** Configuration and Preset saves refuse a proxy, channel proxy,
+MCP server, or plugin URL whose authority is empty (`https:///v1`) or whose
+`//` is missing (`https:/v1`). Both parse with a different host. Model
+`baseUrl` already refused these. A URL with a host is unchanged.
+
+**Who is affected.** Configurations and Presets that save one of those
+spellings in a proxy, channel, MCP, or plugin URL.
+
+**How to tell.** The save answers `400` naming the field: `has an empty
+authority or a missing //, which parses as a different host.`
+
+**Steps.** Write an absolute http or https URL with the host you mean, and
+save again. _untested_ against a live Installation.
+
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
 **What breaks.** Profile preflight refuses an uppercase letter in the repository
@@ -213,25 +229,6 @@ values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
 
 **Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
 `::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.
-
-## 2026-10-13: execution API CIDRs must be explicit and nonzero
-
-**What breaks.** `helm upgrade` fails when a saved `executionCluster.apiCidrs`
-entry is `0.0.0.0/0`, `::/0`, or a leading-zero address such as `010.44.0.2/32`.
-Those values used to render. A `/0` became egress to any address on the
-execution API port, and the apiserver accepted the leading-zero form with a
-warning. The upgrade now stops before it writes that policy.
-
-**Who is affected.** Saved releases that use one of those spellings. A canonical
-IPv4 CIDR with prefix 1 through 32, such as `192.0.2.0/28`, and a canonical
-IPv6 CIDR with a nonzero prefix, such as `2001:db8::/64`, still upgrade. A
-disabled execution cluster is not checked.
-
-**How to tell.** Helm stops with
-`executionCluster.apiCidrs requires an explicit IPv4 or IPv6 CIDR with a nonzero prefix`.
-
-**Steps.** Replace `0.0.0.0/0` or `::/0` with the execution API addresses you
-mean to allow. Rewrite `010.44.0.2/32` as `10.44.0.2/32`. Upgrade again.
 
 ## 2026-10-13: demo cluster CIDRs must be one canonical IPv4 host
 
