@@ -1,5 +1,5 @@
 import { rewrittenIpv4Hostname } from "../../../auth/configuration.ts";
-import { normalizeOpenAiBaseUrl } from "../../openai-endpoint.ts";
+import { normalizeOpenAiBaseUrl, openAiBaseUrlSpellingMessage } from "../../openai-endpoint.ts";
 import { compareResourceQuantities } from "./resource-quantities.ts";
 import {
   asRecord,
@@ -2956,7 +2956,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
         normalizeOpenAiBaseUrl(options.runtime.codexModelBaseUrl) === undefined
       ) {
         throw new ConfigurationFailure(
-          "Codex model endpoint requires HTTPS, a nonzero port, and a path ending in /v1 without credentials, wildcards, query, or fragment.",
+          openAiBaseUrlSpellingMessage("Codex model endpoint", options.runtime.codexModelBaseUrl) ??
+            "Codex model endpoint requires HTTPS, a nonzero port, and a path ending in /v1 without credentials, wildcards, query, or fragment.",
         );
       }
       if (options.runtime.codexSeccompProfile !== undefined) {
@@ -11511,7 +11512,8 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       const normalized = normalizeOpenAiBaseUrl(openaiBaseUrl);
       if (normalized === undefined) {
         throw new ConfigurationFailure(
-          "Codex model endpoint requires a valid HTTPS /v1 URL with a nonzero port and no hostname wildcards.",
+          openAiBaseUrlSpellingMessage("Codex model endpoint", openaiBaseUrl) ??
+            "Codex model endpoint requires a valid HTTPS /v1 URL with a nonzero port and no hostname wildcards.",
         );
       }
       openaiBaseUrl = normalized;
