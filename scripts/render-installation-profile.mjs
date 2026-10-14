@@ -1537,15 +1537,28 @@ function buildRendered(profile, parsed, diagnostics) {
       : undefined;
   const rewrittenObservabilityIpv4 =
     parsedObservability !== undefined && !ipv4HostKept(rawObservabilityUrl, parsedObservability);
-  const observabilityUrl = rewrittenObservabilityIpv4
-    ? undefined
-    : optionalString(controlPlane, ["controlPlane", "observabilityUrl"], diagnostics, {
-        validate: observabilityDestination,
-        description: "an absolute HTTP or HTTPS URL without credentials or a fragment",
-      });
+  // A tab or newline is deleted and a backslash becomes a slash. Userinfo already has its own
+  // message, including when a tab sits in `http:\t//@host`.
+  const observabilityHostChars =
+    typeof rawObservabilityUrl === "string" &&
+    /[\t\n\r\\]/.test(rawObservabilityUrl) &&
+    !writtenUserinfo(rawObservabilityUrl) &&
+    !rewrittenObservabilityIpv4;
+  const observabilityUrl =
+    rewrittenObservabilityIpv4 || observabilityHostChars
+      ? undefined
+      : optionalString(controlPlane, ["controlPlane", "observabilityUrl"], diagnostics, {
+          validate: observabilityDestination,
+          description: "an absolute HTTP or HTTPS URL without credentials or a fragment",
+        });
   if (rewrittenObservabilityIpv4) {
     diagnostics.errors.push(
       "controlPlane.observabilityUrl IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
+    );
+  }
+  if (observabilityHostChars) {
+    diagnostics.errors.push(
+      "controlPlane.observabilityUrl must not contain a tab, newline, or backslash; the URL parser drops or rewrites them into a different host.",
     );
   }
 

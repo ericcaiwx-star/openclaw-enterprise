@@ -117,6 +117,23 @@ test("Installation startup validates the optional external observability URL", a
       },
     );
   }
+  for (const raw of [
+    "http://good.example\tevil.com/x",
+    "http://evil.com\\.good.example/path",
+    "http://good.example\nevil.com/x",
+    "http://good.example\revil.com/x",
+  ]) {
+    configuration.observability = { url: raw };
+    await writeFile(path, JSON.stringify(configuration), "utf8");
+    await assert.rejects(
+      loadInstallationConfiguration({
+        mode: "development",
+        environment: { OCC_CONFIG_PATH: path },
+      }),
+      /observability\.url must not contain a tab, newline, or backslash; the URL parser drops or rewrites them into a different host\./,
+      JSON.stringify(raw),
+    );
+  }
   configuration.observability = { url: "http://192.168.1.1" };
   await writeFile(path, JSON.stringify(configuration), "utf8");
   const canonical = await loadInstallationConfiguration({

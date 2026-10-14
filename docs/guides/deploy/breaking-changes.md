@@ -13,6 +13,22 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-14: observability URLs must not hide another host
+
+**What breaks.** Profile preflight and API and worker startup refuse an
+`observability.url` that contains a tab, newline, or backslash. The URL parser
+deletes a tab or newline and reads a backslash as a slash, so the stored link
+named a different host. A URL without those characters is unchanged.
+
+**Who is affected.** Profiles with `controlPlane.observabilityUrl`, and
+Installations whose startup `observability.url` uses one of those characters.
+
+**How to tell.** Preflight reports `controlPlane.observabilityUrl must not
+contain a tab, newline, or backslash`. Startup logs `OBSERVABILITY_URL_INVALID`.
+
+**Steps.** Write the host you mean, with no tab, newline, or backslash, and
+upgrade. _untested_ against a live Installation.
+
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
 **What breaks.** Profile preflight refuses an uppercase letter in the repository
@@ -232,25 +248,6 @@ disabled execution cluster is not checked.
 
 **Steps.** Replace `0.0.0.0/0` or `::/0` with the execution API addresses you
 mean to allow. Rewrite `010.44.0.2/32` as `10.44.0.2/32`. Upgrade again.
-
-## 2026-10-13: demo cluster CIDRs must be one canonical IPv4 host
-
-**What breaks.** `helm upgrade` of the observability demo fails when a
-`cluster.cidrs` entry is not one IPv4 address in canonical form with prefix
-`/32`. A saved `010.0.0.1/32` used to install. Kubernetes applied it and named
-`10.0.0.1/32` as the spelling a future release will require. The upgrade now
-stops before it writes that policy.
-
-**Who is affected.** Demo releases whose saved `cluster.cidrs` use a leading
-zero, an octet above 255, or a prefix other than `/32`. A canonical endpoint
-such as `10.43.0.1/32` upgrades unchanged.
-
-**How to tell.** Helm stops in `prometheus.yaml` with
-`cluster.cidrs requires exact IPv4 /32 endpoints`.
-
-**Steps.** Replace the saved value with its canonical spelling (`010.0.0.1/32`
-becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
-`/32`.
 
 ## 2026-10-13: OpenShell gateway readiness requires timeoutMs
 

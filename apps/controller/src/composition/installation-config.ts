@@ -282,6 +282,13 @@ function observabilityConfiguration(value: unknown): { readonly url: string } | 
   refuseWrittenUserinfo("observability.url", raw);
   // Other IPv4 spellings parse as a different address, so startup must not store url.href.
   refuseRewrittenIpv4Host("observability.url", raw, url);
+  // A tab or newline is deleted and a backslash becomes a slash, so the stored href can name
+  // another host than the one that was written.
+  if (/[\t\n\r\\]/.test(raw)) {
+    throw new Error(
+      "observability.url must not contain a tab, newline, or backslash; the URL parser drops or rewrites them into a different host.",
+    );
+  }
   return Object.freeze({ url: url.href });
 }
 
