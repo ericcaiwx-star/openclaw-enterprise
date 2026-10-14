@@ -58,11 +58,18 @@ test("proxy, channel, MCP and plugin URLs refuse an empty authority or a missing
     models: { providers: { gateway: { baseUrl: "https:///v1" } } },
   });
 
-  // The variable can supply `//host`. The filled Configuration is checked later.
+  // The variable can supply `//host` or the second slash plus the host.
+  // The filled Configuration is checked later.
   validateModelCredentialReferences(
     { proxy: { proxyUrl: "https:{{ vars.endpoint }}" } },
     {
       unresolved: (path) => (path.at(-1) === "proxyUrl" ? ["https:", ""] : undefined),
+    },
+  );
+  validateModelCredentialReferences(
+    { proxy: { proxyUrl: "https:/{{ vars.rest }}" } },
+    {
+      unresolved: (path) => (path.at(-1) === "proxyUrl" ? ["https:/", ""] : undefined),
     },
   );
   // An empty authority is already in the literal, so a later variable cannot repair it.

@@ -324,9 +324,10 @@ export function validateModelCredentialReferences(
     // baseUrl keeps the model-provider message. These fields stored the rewritten host.
     if (path.at(-1) !== "baseUrl") {
       const written = head.replaceAll(/[\t\n\r]/g, "");
-      // `https:{{ vars.endpoint }}` is not a finished URL: the variable can supply `//host`.
-      // The filled Configuration is checked again. A literal `https:/` or `https:///` is already wrong.
-      const schemeAwaitingVariable = tail.length > 0 && /^[\0- ]*https?:$/i.test(written);
+      // `https:{{ vars.endpoint }}` and `https:/{{ vars.rest }}` are not finished URLs: the
+      // variable can supply `//host` or `/host`. The filled Configuration is checked again.
+      // A literal `https:///` already has an empty authority.
+      const schemeAwaitingVariable = tail.length > 0 && /^[\0- ]*https?:[/\\]?$/i.test(written);
       if (
         !schemeAwaitingVariable &&
         (/^[\0- ]*https?:[/\\]{3,}/i.test(written) || /^[\0- ]*https?:(?![/\\]{2})/i.test(written))
