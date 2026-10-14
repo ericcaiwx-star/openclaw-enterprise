@@ -4457,7 +4457,7 @@ export class OpenClawController {
     if (!isName(input.name)) {
       throw new ScopeViolationError("The credential source name is invalid.");
     }
-    const config = Object.freeze({ ...(input.config ?? {}) });
+    const written = Object.freeze({ ...(input.config ?? {}) });
     const secretRefs = Object.freeze({ ...(input.secrets ?? {}) });
     this.namespaceIdentity(input.namespaceId);
     const { namespace, gateway, refresh, source, values } = await this.mutate(async (state) => {
@@ -4474,9 +4474,14 @@ export class OpenClawController {
       }
       const selected = this.credentialGatewayDriver();
       const type = await this.credentialSourceType(selected, input.type);
-      credentialSourceFieldsMatch("config", type.config, config);
+      credentialSourceFieldsMatch("config", type.config, written);
       credentialSourceFieldsMatch("secrets", type.secrets, secretRefs);
-      selected.validateSourceConfig({ type: type.type, config });
+      // The Driver may return the configuration in the form it uses, such as a normalized URL:
+      // the stored record, the response and the gateway then agree (finding 1292).
+      const config = Object.freeze({
+        ...(selected.validateSourceConfig({ type: type.type, config: written }) ?? written),
+      });
+      credentialSourceFieldsMatch("config", type.config, config);
       const refreshDriver =
         type.rotation === "refresh" ? this.credentialRefreshDriver() : undefined;
       const read = await this.readCredentialSourceSecrets(state, principalId, locked, secretRefs);
@@ -4501,6 +4506,7 @@ export class OpenClawController {
         values: read,
       };
     });
+    const config = source.config;
     const placed = await this.credentialNamespace(namespace);
     let status: CredentialSourceStatus;
     // A returned result means every gateway effect of this attempt has finished; a throw does not.
