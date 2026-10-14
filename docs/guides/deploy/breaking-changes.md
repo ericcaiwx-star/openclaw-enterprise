@@ -13,22 +13,48 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
-## 2026-10-14: OpenAI-compatible IPv4 hosts must be four decimal octets
+## 2026-10-14: Codex model IPv4 hosts must be four decimal octets
 
-**What breaks.** A Codex model endpoint or an OpenShell `openai` source base URL
-whose IPv4 host is not four decimal octets from 0 to 255, with no leading zeros,
-is refused. Shorthand, a single integer, hex, and leading zeros used to be stored
-as a different address (`192.168.1` became `192.168.0.1`).
+**What breaks.** `runtime.codexModelBaseUrl` whose IPv4 host is not four decimal
+octets from 0 to 255, with no leading zeros, is refused. Shorthand, a single
+integer, hex, and leading zeros were stored as a different address (`192.168.1`
+became `192.168.0.1`). A canonical host such as `192.0.2.1`, and any DNS name,
+still loads.
 
-**Who is affected.** `runtime.codexModelBaseUrl`, and credential sources whose
-`base_url` uses one of those spellings. A canonical host such as `192.0.2.1`,
-and any DNS name, still loads.
+**Who is affected.** Kubernetes Compute settings that set
+`runtime.codexModelBaseUrl` to one of those spellings.
 
-**How to tell.** Compute reports `Codex model endpoint requires` and names the
-four-octet rule. A source create returns `400` and `INVALID_VALUE` on
-`/config/base_url`.
+**How to tell.** Compute reports `Codex model endpoint IPv4 host must be four
+decimal octets`.
 
-**Steps.** Write the four decimal octets you mean, then save again.
+**Steps.** Write the four decimal octets you mean, then start again.
+
+## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
+
+**What breaks.** Creating an OpenShell `openai` credential source refuses a
+`base_url`, and Kubernetes Compute startup refuses `runtime.codexModelBaseUrl`,
+with a space or control character, without the `//` after `https:`, or with an
+`@` before the host (`https://@host/v1`), which the URL parser silently
+rewrote. An `openai` source host must be an exact DNS name, like a
+`bearer-token` host: an IP address in any spelling (`127.0.0.1`,
+`0x7f000001`, `127.1`) or a label with `_` or an edge `-` is refused. A
+deployment or Secret update of an existing source with such a host or spelling
+fails. A new source stores its
+`base_url` normalized (`https://API.example.com:443/v1/` as
+`https://api.example.com/v1`).
+
+**Who is affected.** Sources or Compute settings that use those spellings, and
+`openai` sources with such a host.
+
+**How to tell.** Creation returns `400` for `/config/base_url`, with `... host
+must be an exact DNS name.` or the spelling's message. Compute startup reports
+`Codex model endpoint must ...` or `... requires HTTPS ...`. A deployment with
+such a source fails with `The OpenShell endpoint requires HTTPS, ...`.
+
+**Steps.** Fix the spelling. Replace such a source with one whose endpoint is a
+DNS name its certificate covers, as the
+[`openai` source replacement notice](breaking-changes-archive.md#2026-10-13-openshell-openai-credential-sources-need-replacing)
+describes. _untested_ against a live Installation.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
@@ -284,41 +310,3 @@ positive safe integer.` The message does not name `timeoutMs`.
 
 **Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window.
 The real helper uses 120000. Then start again.
-
-## 2026-10-13: OpenShell `openai` credential sources need replacing
-
-**What breaks.** Each OpenShell credential source now owns its provider profile.
-An `openai` source registered by an earlier build points its provider at the
-shared `oce-openai` profile, so OCC no longer treats that provider as the
-source's. A deployment that lists the source fails. Deleting the source through
-OCC leaves it `deleting` until its provider is removed by hand.
-
-**Who is affected.** Installations with OpenShell `openai` credential sources.
-`bearer-token` and OAuth2 sources already owned their profiles and are
-unaffected.
-
-**How to tell.** The source's `status` is `failed`, with "The OpenShell
-provider is not owned by this source."
-
-**Steps.** After upgrading, replace each such source, _untested_:
-
-1. Register a replacement `openai` source from the same Secret. It gets its own
-   profile.
-2. For each Agent bound to the old source:
-   - Grant the Agent's service principal `operate` on the replacement.
-   - Update the Agent so that `credentialSources` lists the replacement instead
-     of the old source, and `harnessAuth.sourceId` names the replacement.
-   - Deploy it, and wait until the new revision is active.
-
-   OCC refuses to delete a source with `409` while an Agent, its active
-   revision, or a pending deployment still references it.
-
-3. In the Namespace's OpenShell Workspace, delete each old source's provider:
-   the one labeled `openclaw.dev/credential-source-id` with the source's ID.
-   OpenShell refuses while a Sandbox still lists it, so the old revision's
-   Sandbox must be gone. Then delete the old source through OCC. A `404` while
-   `GET` shows `deleting` means the provider remains; a
-   `409 CREDENTIAL_WITHDRAWAL_IN_PROGRESS` means retry after withdrawal work
-   finishes.
-4. Once no old `openai` provider remains, delete the `oce-openai` profile.
-   OpenShell refuses while a provider still uses it.
