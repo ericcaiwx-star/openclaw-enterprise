@@ -520,6 +520,10 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if and $routing.hostname (or (gt (len $routing.hostname) 253) (not (regexMatch "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$" $routing.hostname))) -}}
 {{- fail "gatewayRouting.hostname must be a DNS hostname without a port or path" -}}
 {{- end -}}
+{{- /* Shorthand, integer, hex, and leading-zero IPv4 are legal DNS labels, but a URL parser dials another address. Four decimal octets stay. */ -}}
+{{- if and $routing.hostname (or (and (regexMatch "^[0-9.]+$" $routing.hostname) (not (regexMatch "^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}$" $routing.hostname))) (regexMatch "(^|\\.)0x[0-9a-f]+(\\.|$)" $routing.hostname)) -}}
+{{- fail "gatewayRouting.hostname must be a DNS hostname without a port or path" -}}
+{{- end -}}
 
 {{- if not $routing.gatewayClassName -}}{{- fail "gatewayRouting.gatewayClassName must reference an operator-created GatewayClass" -}}{{- end -}}
 {{- include "openclaw.validateResourceName" (dict "label" "gatewayRouting.gatewayClassName" "value" $routing.gatewayClassName) -}}

@@ -1,3 +1,4 @@
+import { refuseRewrittenIpv4Host } from "../auth/configuration.ts";
 import { createHash } from "node:crypto";
 import { asRecord, isNonEmptyString } from "@openclaw-enterprise/utils";
 import type { Agent, AgentRevision } from "@openclaw-enterprise/contracts";
@@ -45,6 +46,11 @@ export function nativeAdminGatewayHttpBase(endpoint: string): string | undefined
   let parsed: URL;
   try {
     parsed = new URL(endpoint);
+  } catch {
+    return undefined;
+  }
+  try {
+    refuseRewrittenIpv4Host("native admin gateway", endpoint, parsed);
   } catch {
     return undefined;
   }

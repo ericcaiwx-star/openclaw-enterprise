@@ -892,6 +892,12 @@ test(
     );
     const installationPath = join(directory, "installation.yaml");
     const invalid = [
+      "192.168.1",
+      "2130706433",
+      "127.1",
+      "0177.0.0.1",
+      "0x7f000001",
+      "0x7f.0.0.1",
       "Bad_Host",
       "proxy.example.test:443",
       "https://proxy.example.test",
@@ -900,6 +906,7 @@ test(
       `${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(62)}`,
     ];
     const valid = [
+      "192.168.1.1",
       "proxy.example.test",
       `${"a".repeat(63)}.test`,
       `${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(63)}.${"a".repeat(61)}`,
@@ -919,17 +926,25 @@ test(
           mode: "production",
           environment: { OCC_CONFIG_PATH: installationPath },
         });
+      // Helm --set reads a bare integer or 0x hex as a number. Pass those spellings
+      // with --set-string so the chart sees the hostname the Installation stores.
+      const numericHostname =
+        typeof hostname === "string" && /^(?:0x[0-9a-f]+|\d+)$/.test(hostname);
       const helmValues =
-        hostname === undefined
+        hostname === undefined || numericHostname
           ? gatewayRoutingValues
           : { ...gatewayRoutingValues, "gatewayRouting.hostname": hostname };
+      const renderHostname = () =>
+        numericHostname
+          ? render(helmValues, { strings: { "gatewayRouting.hostname": hostname } })
+          : render(helmValues);
       if (invalid.includes(hostname)) {
         await assert.rejects(
           load(),
           /Gateway routing hostname must be a DNS hostname without a port or path/,
         );
         await assert.rejects(
-          render(helmValues),
+          renderHostname(),
           ({ stderr }) =>
             stderr.includes(
               "gatewayRouting.hostname must be a DNS hostname without a port or path",
@@ -939,7 +954,7 @@ test(
         continue;
       }
       const loaded = await load();
-      const objects = await resources((await render(helmValues)).stdout);
+      const objects = await resources((await renderHostname()).stdout);
       const gateway = objects.find((object) => object.kind === "Gateway");
       const envoy = objects.find((object) => object.kind === "EnvoyProxy");
       const certificate = objects.find(

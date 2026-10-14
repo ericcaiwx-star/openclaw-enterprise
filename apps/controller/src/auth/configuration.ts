@@ -17,6 +17,20 @@ export function betterAuthIssuer(installationId: string): string {
 // then URL.toString() publishes that other address.
 const strictDecimalIpv4 = /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/;
 
+/** A bare hostname Node would dial as a different IPv4 address (`192.168.1` becomes `192.168.0.1`). */
+export function rewrittenIpv4Hostname(hostname: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(`http://${hostname}`);
+  } catch {
+    return false;
+  }
+  if (isIP(parsed.hostname) !== 4) {
+    return false;
+  }
+  return parsed.hostname !== hostname || !strictDecimalIpv4.test(parsed.hostname);
+}
+
 // URL parsing strips only C0 controls and spaces from the ends. A character
 // class cannot spell that range: the linter rejects a null in a regex.
 function stripUrlEdges(value: string): string {

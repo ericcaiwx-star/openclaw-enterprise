@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import net from "node:net";
 import test from "node:test";
-import { deriveNativeAdminHost } from "../../apps/controller/src/gateway/native-admin.ts";
+import {
+  deriveNativeAdminHost,
+  nativeAdminGatewayHttpBase,
+} from "../../apps/controller/src/gateway/native-admin.ts";
 import { createNativeAdminAccess } from "../../apps/controller/src/http/native-admin.ts";
 
 const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
@@ -370,3 +373,17 @@ for (const phase of ["admission", "gateway key"]) {
     }
   });
 }
+
+test("native admin gateway base keeps a canonical host and drops a rewritten IPv4 host", () => {
+  assert.equal(
+    nativeAdminGatewayHttpBase("wss://192.168.1.1/openclaw"),
+    "https://192.168.1.1/openclaw/",
+  );
+  assert.equal(
+    nativeAdminGatewayHttpBase("wss://gateway.example/openclaw"),
+    "https://gateway.example/openclaw/",
+  );
+  for (const host of ["192.168.1", "2130706433", "127.1", "0177.0.0.1", "0x7f000001"]) {
+    assert.equal(nativeAdminGatewayHttpBase(`wss://${host}/openclaw`), undefined, host);
+  }
+});

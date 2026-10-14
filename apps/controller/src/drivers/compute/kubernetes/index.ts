@@ -1,3 +1,4 @@
+import { rewrittenIpv4Hostname } from "../../../auth/configuration.ts";
 import { normalizeOpenAiBaseUrl } from "../../openai-endpoint.ts";
 import { compareResourceQuantities } from "./resource-quantities.ts";
 import {
@@ -1718,7 +1719,10 @@ function cidrSetsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): b
 function validateDnsHostname(value: string, description: string): void {
   if (
     value.length > 253 ||
-    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/.test(value)
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/.test(
+      value,
+    ) ||
+    rewrittenIpv4Hostname(value)
   ) {
     throw new ConfigurationFailure(`${description} must be a DNS hostname without a port or path.`);
   }
