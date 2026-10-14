@@ -61,7 +61,7 @@ const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_BASE_URL_CONFIG = "base_url";
 
 const SOURCE_ENDPOINT_REQUIREMENTS =
-  "The OpenShell endpoint requires HTTPS, a nonzero port, and a /v1 path. Wildcards, bracketed IPv6 hosts, empty hostname labels, braces, URL credentials, query, and fragment are unsupported.";
+  "The OpenShell endpoint requires HTTPS, a nonzero port, and a /v1 path. Wildcards, bracketed IPv6 hosts, empty hostname labels, braces, URL credentials, query, and fragment are unsupported. An IPv4 host must be four decimal octets from 0 to 255 with no leading zeros.";
 
 /** How the paired Credential Refresh Driver configures one `refresh` type. */
 export interface OpenShellRefreshSourceType {

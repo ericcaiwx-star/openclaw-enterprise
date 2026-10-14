@@ -165,6 +165,10 @@ test("credential source HTTP admission rejects invalid endpoints without retaini
     "https://{a,b}.example.test/v1",
     "https://{models}.example.test/v1",
     "https://%7Bmodels%7D.example.test/v1",
+    "https://192.168.1/v1",
+    "https://2130706433/v1",
+    "https://0177.0.0.1/v1",
+    "https://127.1/v1",
     "https://models.example.test:0/v1",
     "https://models.example.test:000/v1",
     // URI-valid IPv6 brackets would be character classes in OpenShell host patterns.
