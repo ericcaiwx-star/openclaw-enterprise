@@ -47,7 +47,6 @@ decimal octets`.
 
 **Steps.** Write those four octets, then start again.
 
-
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 
 **What breaks.** Creating an OpenShell `openai` credential source refuses a
