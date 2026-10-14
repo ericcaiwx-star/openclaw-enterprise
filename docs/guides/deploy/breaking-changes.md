@@ -47,6 +47,18 @@ decimal octets`.
 
 **Steps.** Write those four octets, then start again.
 
+## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
+
+**What breaks.** Startup and both gateway clients refuse an OpenShell
+`endpoint` whose IPv4 host is not four decimal octets with no leading zeros.
+
+**Who is affected.** Backends whose `configuration.endpoint` uses one of those
+spellings.
+
+**How to tell.** The report says `IPv4 host must be four decimal octets`.
+
+**Steps.** Write those four octets, then restart.
+
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 
 **What breaks.** Creating an OpenShell `openai` credential source refuses a
@@ -312,19 +324,3 @@ such as `10.43.0.1/32` upgrades unchanged.
 **Steps.** Replace the saved value with its canonical spelling (`010.0.0.1/32`
 becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
 `/32`.
-
-## 2026-10-13: OpenShell gateway readiness requires timeoutMs
-
-**What breaks.** Controller startup fails when `gateway.readiness` is set and
-`timeoutMs` is omitted. That configuration starts today. The field must be a
-positive safe integer. Omitted readiness is unchanged.
-
-**Who is affected.** Installations, and the real k3d helper, that set
-`gateway.readiness` with only `serviceName` and `podSelector`.
-
-**How to tell.** Startup logs `startup-error` with code `STARTUP_FAILED`. The
-Installation loader reports `OpenShell gateway readiness timeout must be a
-positive safe integer.` The message does not name `timeoutMs`.
-
-**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window.
-The real helper uses 120000. Then start again.

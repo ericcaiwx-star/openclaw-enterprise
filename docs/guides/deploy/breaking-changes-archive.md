@@ -28,6 +28,20 @@ the duplicate or reserved policy.
 policy called `workspace-node-enrollment`. Keep each policy's binaries and
 endpoints. _untested_ against a live Installation.
 
+## 2026-10-13: OpenShell gateway readiness requires timeoutMs
+
+**What breaks.** Controller startup fails when `gateway.readiness` is set and
+`timeoutMs` is omitted. Omitted readiness is unchanged.
+
+**Who is affected.** Installations that set `gateway.readiness` without
+`timeoutMs`.
+
+**How to tell.** Startup logs `STARTUP_FAILED`. The loader reports `OpenShell
+gateway readiness timeout must be a positive safe integer.`
+
+**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window,
+then start again.
+
 ## 2026-10-13: OpenShell `openai` credential sources need replacing
 
 **What breaks.** Each OpenShell credential source now owns its provider profile.
