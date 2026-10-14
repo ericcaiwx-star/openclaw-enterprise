@@ -38,20 +38,29 @@ provider's `apiKey`, then save and deploy again.
 
 **What breaks.** Helm and Compute refuse a `gatewayRouting.hostname`, a harness
 `routing.hostname`, and `gatewayRouting.sandbox.domain` that is shorthand, a
-single integer, hexadecimal, or leading-zero IPv4 (`192.168.1`, `2130706433`,
-`127.1`, `0177.0.0.1`, `0x`, `0x.0.0.1`). Those names are legal DNS labels, but
-a URL parser dials a different address. Four decimal octets such as
-`192.168.1.1` still pass. A DNS name that only contains a hex label, such as
-`0xdead.gateway.example.test`, stays.
+single integer, hexadecimal, or leading-zero IPv4. Four decimal octets stay. A
+DNS name that only contains a hex label stays.
 
-**Who is affected.** Helm values or Installation YAML that set one of those
-hostnames to such a spelling. An ordinary DNS name is unchanged.
+**Who is affected.** Helm values or Installation YAML that use one of those
+spellings.
 
-**How to tell.** Helm and Compute both report that the gateway hostname must be
-a DNS hostname without a port or path.
+**How to tell.** Helm and Compute report that the hostname must be a DNS
+hostname without a port or path.
 
 **Steps.** Write four decimal octets, or a DNS name, and upgrade. _untested_
 against a live Installation.
+
+## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
+
+**What breaks.** Startup and both gateway clients refuse an OpenShell
+`endpoint` whose IPv4 host is not four decimal octets with no leading zeros.
+
+**Who is affected.** Backends whose `configuration.endpoint` uses one of those
+spellings.
+
+**How to tell.** The report says `IPv4 host must be four decimal octets`.
+
+**Steps.** Write those four octets, then restart.
 
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 
