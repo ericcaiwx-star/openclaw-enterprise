@@ -219,6 +219,10 @@ validates them in its own
 [startup](native-service-account-credential-delivery.md#5-authenticate-during-runtime-startup).
 Initial and replacement Gateways use the same bounded check. Failures, including
 timeouts/rate limits, hold readiness until repair/restart or redeployment.
+Docker Codex healthchecks also fail immediately when the plugin or runtime status
+response stream is interrupted after its headers arrive. Plugin-status failures
+retain the allowlisted transport code, while an interrupted runtime-status
+enrichment attempt preserves the original readiness reason.
 Readiness polls do not repeat model requests; worker retries do not restart
 unchanged Pods. There is no automatic rollback.
 Embedded activation also deletes embedded predecessor copies when it re-renders
