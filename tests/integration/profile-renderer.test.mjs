@@ -2749,15 +2749,15 @@ test("the codex profile carries a Codex model endpoint under Compute startup's r
     ["https://models.example.com/v1?key=1", general],
     ["https://models.example.com/v1#v1", general],
     [
-      "https://192.168.1/v1",
+      "https://198.51.100/v1",
       "IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
     ],
     [
-      "https://2130706433/v1",
+      "https://3221225985/v1",
       "IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
     ],
     [
-      "https://127.1/v1",
+      "https://192.0.2/v1",
       "IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
     ],
   ]) {

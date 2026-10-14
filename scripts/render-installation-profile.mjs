@@ -306,8 +306,8 @@ function asString(source, path, diagnostics, { pattern, validate, description } 
 function codexModelBaseUrl(runtime, diagnostics) {
   const field = "runtime.codexModelBaseUrl";
   const value = asString(runtime, field.split("."), diagnostics);
-  // Normalize only after the raw spelling is accepted. `https://192.168.1/v1` would otherwise
-  // become `https://192.168.0.1/v1` and pass Compute.
+  // Normalize only after the raw spelling is accepted. `https://198.51.100/v1` would otherwise
+  // become `https://198.51.0.100/v1` and pass Compute.
   if (typeof value === "string" && value !== "" && openAiBaseUrlRewritesIpv4(value)) {
     diagnostics.errors.push(
       `${field} IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.`,
