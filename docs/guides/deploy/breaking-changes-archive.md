@@ -10,22 +10,37 @@ new page named for the date they precede.
 
 ## 2026-10-13: demo cluster CIDRs must be one canonical IPv4 host
 
-**What breaks.** `helm upgrade` of the observability demo fails when a
-`cluster.cidrs` entry is not one IPv4 address in canonical form with prefix
-`/32`. A saved `010.0.0.1/32` used to install. Kubernetes applied it and named
-`10.0.0.1/32` as the spelling a future release will require. The upgrade now
-stops before it writes that policy.
+**What breaks.** The observability demo `helm upgrade` fails when
+`cluster.cidrs` is not one canonical IPv4 `/32`.
 
-**Who is affected.** Demo releases whose saved `cluster.cidrs` use a leading
-zero, an octet above 255, or a prefix other than `/32`. A canonical endpoint
-such as `10.43.0.1/32` upgrades unchanged.
+**Who is affected.** Demo releases whose saved `cluster.cidrs` are not that
+form.
 
-**How to tell.** Helm stops in `prometheus.yaml` with
-`cluster.cidrs requires exact IPv4 /32 endpoints`.
+**How to tell.** Helm stops in `prometheus.yaml` with `cluster.cidrs requires
+exact IPv4 /32 endpoints`.
 
-**Steps.** Replace the saved value with its canonical spelling (`010.0.0.1/32`
-becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
-`/32`.
+**Steps.** Write the canonical spelling (`010.0.0.1/32` becomes `10.0.0.1/32`)
+and upgrade again.
+
+## 2026-10-13: OpenShell network policy names must be unique
+
+**What breaks.** Controller startup refuses an Installation whose
+`policy.networkPolicies` repeat a name, or name a policy
+`workspace-node-enrollment`. Those configurations start today. A duplicate name
+keeps only the last rule. A policy named `workspace-node-enrollment` is replaced
+when a workspace-node binding exists.
+
+**Who is affected.** Installations with duplicate policy names, or with a policy
+named `workspace-node-enrollment`.
+
+**How to tell.** Startup logs `startup-error` with code
+`OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
+does not include the policy name. Loading the Installation configuration names
+the duplicate or reserved policy.
+
+**Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
+policy called `workspace-node-enrollment`. Keep each policy's binaries and
+endpoints. _untested_ against a live Installation.
 
 ## 2026-10-13: OpenShell `openai` credential sources need replacing
 
