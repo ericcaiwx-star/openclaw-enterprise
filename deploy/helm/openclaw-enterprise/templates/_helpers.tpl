@@ -582,9 +582,9 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- end -}}
 {{- if $routing.sandbox.enabled -}}
 {{- if not (regexMatch "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$" $routing.sandbox.domain) -}}{{- fail "gatewayRouting.sandbox.domain must be a DNS hostname without wildcard, scheme, port or path" -}}{{- end -}}
-{{- /* The same rewritten-address rule as gatewayRouting.hostname. A hex label that is not last stays. */ -}}
-{{- if and (regexMatch "(^|\\.)(?:0x[0-9a-f]*|[0-9]+)$" $routing.sandbox.domain) (not (regexMatch "^(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?:\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])){3}$" $routing.sandbox.domain)) -}}
-{{- fail "gatewayRouting.sandbox.domain must be a DNS hostname without wildcard, scheme, port or path. A numeric or 0x last label parses as IPv4; use a DNS name, or four decimal octets from 0 to 255 without leading zeros." -}}
+{{- /* Sandbox domain is a suffix: a direct IPv4 host cannot follow the Agent label. */ -}}
+{{- if regexMatch "(^|\\.)(?:0x[0-9a-f]*|[0-9]+)$" $routing.sandbox.domain -}}
+{{- fail "gatewayRouting.sandbox.domain must be a DNS hostname usable after an Agent label; use a DNS suffix such as previews.example.com, not a numeric or 0x last label." -}}
 {{- end -}}
 {{- /* Dedicated Agent routes use agent-<32 hex>.<domain>, which must fit the 253-character Gateway API hostname limit. */ -}}
 {{- if gt (len $routing.sandbox.domain) 214 -}}{{- fail "gatewayRouting.sandbox.domain must not exceed 214 characters, leaving room for the agent-<32 hex>. prefix of dedicated Agent hostnames" -}}{{- end -}}

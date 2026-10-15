@@ -1789,6 +1789,12 @@ function validateDnsHostname(value: string, description: string): void {
 const SANDBOX_DOMAIN_MAX_LENGTH = 253 - "agent-.".length - 32;
 
 function validateSandboxDomain(value: string): void {
+  // This is a suffix: even canonical IPv4 is invalid after agent-<32 hex>.
+  if (/(^|\.)(?:0x[0-9a-f]*|[0-9]+)$/.test(value)) {
+    throw new ConfigurationFailure(
+      "Sandbox domain must be a DNS hostname usable after an Agent label; use a DNS suffix such as previews.example.com, not a numeric or 0x last label.",
+    );
+  }
   validateDnsHostname(value, "Sandbox domain");
   // Like the chart, require two labels: browsers and Node refuse a wildcard certificate
   // directly under a single label (*.localhost), so such a domain could never serve previews.

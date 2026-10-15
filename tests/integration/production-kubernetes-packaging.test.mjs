@@ -254,19 +254,19 @@ test("sandbox ingress uses a separate listener outside OCE cookie scope", toolin
   assert.deepEqual(publicRule.ports, [{ protocol: "TCP", port: 8443 }]);
   await assert.rejects(
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "127.1" }),
-    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+    /gatewayRouting\.sandbox\.domain must be a DNS hostname usable after an Agent label/,
   );
   await assert.rejects(
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "api.0x10" }),
-    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+    /gatewayRouting\.sandbox\.domain must be a DNS hostname usable after an Agent label/,
   );
   await assert.rejects(
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "api.123" }),
-    /gatewayRouting\.sandbox\.domain must be .*numeric or 0x last label parses as IPv4; use a DNS name, or four decimal octets from 0 to 255 without leading zeros/,
+    /gatewayRouting\.sandbox\.domain must be .*Agent label; use a DNS suffix/,
   );
   await assert.rejects(
     render({ ...sandboxValues, "gatewayRouting.sandbox.domain": "999.1.2.3" }),
-    /gatewayRouting\.sandbox\.domain must be a DNS hostname without wildcard, scheme, port or path/,
+    /gatewayRouting\.sandbox\.domain must be a DNS hostname usable after an Agent label/,
   );
   for (const domain of ["example.invalid", "preview.example.invalid"]) {
     await assert.rejects(
@@ -931,6 +931,7 @@ test(
     ];
     const valid = [
       "192.168.1.1",
+      "192.0.2.1",
       "0.0.0.0",
       "255.255.255.255",
       "0xdead.gateway.example.test",
@@ -1001,6 +1002,28 @@ test(
       );
       assert.deepEqual(certificate.spec.dnsNames, [expected]);
       assert.equal(routing.hostname, hostname);
+    }
+    // A direct IPv4 host works; the same text after agent-<id>. cannot be a URL host.
+    for (const domain of ["192.0.2.1", "previews.example.test", "0xdead.previews.example.test"]) {
+      const configuration = structuredClone(example);
+      configuration.drivers.compute.configuration.gatewayRouting.sandbox = { domain };
+      await writeFile(installationPath, JSON.stringify(configuration));
+      const load = () =>
+        loadInstallationConfiguration({
+          mode: "production",
+          environment: { OCC_CONFIG_PATH: installationPath },
+        });
+      const rendered = () => render({ ...sandboxValues, "gatewayRouting.sandbox.domain": domain });
+      if (domain === "192.0.2.1") {
+        await assert.rejects(load(), /Sandbox domain must be a DNS hostname.*Agent label/);
+        await assert.rejects(
+          rendered(),
+          /gatewayRouting\.sandbox\.domain must be a DNS hostname.*Agent label/,
+        );
+      } else {
+        await load();
+        await rendered();
+      }
     }
   },
 );

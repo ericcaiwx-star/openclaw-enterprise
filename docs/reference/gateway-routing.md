@@ -293,6 +293,7 @@ the API proxies HTTP or WebSocket traffic through the private route.
 
 Optional `gatewayRouting.sandbox` in Kubernetes Compute adds a stable per-Agent
 HTTPS origin for dedicated execution under the operator's preview domain.
+Sandbox DNS suffixes refuse numeric or `0x` final labels, including canonical IPv4.
 Embedded OpenClaw retains its native preview configuration. Compute owns the native
 `sandboxOrigin` and `sandboxPort` values and rejects conflicting Agent settings.
 The sandbox backend port is `network.gatewayPort + 1`, so the main port must be

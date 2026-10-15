@@ -1,7 +1,7 @@
 ---
 created: 2026-08-25
-updated: "2026-10-14"
-last_updated_session: "authoring-run/4a613194-6dc8-454f-9cf8-c2a6b46b25af"
+updated: "2026-10-15"
+last_updated_session: "authoring-run/13774107-9c73-4561-8bb0-6e910588052a"
 ---
 
 # Production Startup Flow
@@ -110,16 +110,17 @@ installs initialization isolation before the Job. It and later workload policies
 grant configured DNS peers UDP/TCP `53` and `5353`
 ([Helm DNS contract](../reference/settings/production.md#required-production-controller-environment)).
 
-`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` validates routing ports and hostnames against Compute. `database.port`,
+`deploy/helm/openclaw-enterprise/templates/_helpers.tpl:openclaw.validate` matches Compute routing validation. `database.port`,
 `cluster.port`, and `executionCluster.apiPort` must be 1–65535 without leading zeros.
-Empty hostnames retain Service DNS for Gateway listeners and Certificate SANs.
+Empty hosts retain Service DNS for listeners and Certificate SANs.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:validateDnsHostname`
-refuses URL-parser-invalid or rewritten IPv4 hostnames with `ConfigurationFailure`
-during Driver loading, before persistence opens. Helm refuses rendering too. `198.51.100` fails; `198.51.100.1` stays accepted.
-Correct Helm values and Installation YAML using the
+refuses rewritten/parser-invalid IPv4 with `ConfigurationFailure` before persistence
+opens. Helm refuses rendering too. Direct host `198.51.100.1` stays accepted;
+`validateSandboxDomain` refuses numeric/hex suffixes, including canonical IPv4.
+Correct Helm values and Installation YAML per the
 [hostname correction procedure](../guides/deploy/breaking-changes.md#2026-10-14-gateway-hostnames-must-not-be-rewritten-ipv4),
-then upgrade or restart.
+then upgrade/restart.
 
 `deploy/helm/openclaw-enterprise/templates/_network-policies.tpl:openclaw.networkPolicy.matchLabels`
 refuses peer maps Kubernetes rejects, preserving null/empty semantics and accepted labels.
@@ -320,6 +321,8 @@ until tenant deployment/TUI procedures run.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 22:24: Validate sandbox suffixes. (authoring-run/13774107-9c73-4561-8bb0-6e910588052a - 417cb2b7b57f)
 
 - 2026-10-14 21:02: Document hostname refusal and correction. (authoring-run/4a613194-6dc8-454f-9cf8-c2a6b46b25af - 44252f8544beb031bf9f9b4d5f9e8093d0b10176)
 
