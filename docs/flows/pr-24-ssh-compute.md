@@ -122,6 +122,7 @@ port across the shared root. It writes `accounts/<runtimeUser>.json` with
 not proof the name is free, because a name service can return those statuses
 while the account exists. `groupadd` must create the group. If the name is
 already in use, the fresh claim is removed and that account is not adopted.
+Before creating a group, the helper refuses any user already in the local files database.
 After `groupadd` succeeds, the claim records that this helper created the group
 and the gid from the local files database. A kill in the gap before that
 record leaves the group unrecorded. Preparation then refuses it. Deletion

@@ -1350,10 +1350,7 @@ test("SSH refuses an existing user even when its primary gid matches a newly cre
   assert.equal(await readFile(join(users, account), "utf8"), foreign);
   assert.equal((await f.driver.deleteNamespace(tenant)).namespaceDeleted, true);
   assert.equal(await readFile(join(users, account), "utf8"), foreign);
-  assert.equal(
-    await readFile(join(f.state, "accounts", "groups", account), "utf8"),
-    `${process.getgid()}\n`,
-  );
+  await missing(join(f.state, "accounts", "groups", account));
 });
 
 test("SSH resume refuses a pending account with a different primary gid", async (t) => {

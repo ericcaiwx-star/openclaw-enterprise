@@ -421,6 +421,9 @@ async function ensureRuntimeIdentity(input) {
   let userCreatedThisRun = false;
   try {
     if (marker.groupCreated !== true) {
+      if ((await localEntry("passwd", name)) !== undefined) {
+        throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
+      }
       if ((await creationResult("groupadd", ["--system", name])) === "exists") {
         throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
       }
