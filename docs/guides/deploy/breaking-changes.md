@@ -174,11 +174,11 @@ spellings.
 
 **How to tell.** Helm and Compute report that the hostname must be a DNS
 hostname without a port or path. For a numeric or `0x` last label, the message
-explains that URL parsing treats it as IPv4 and requires four decimal octets
-from 0 to 255 without leading zeros.
+explains that URL parsing treats it as IPv4. Use a DNS name, or four decimal
+octets from 0 to 255 without leading zeros.
 
-**Steps.** Write four decimal octets, or a DNS name, and upgrade. _untested_
-against a live Installation.
+**Steps.** Correct Helm values and Installation YAML to use a DNS name, or four
+decimal octets, then upgrade.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 

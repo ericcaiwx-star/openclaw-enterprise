@@ -117,7 +117,7 @@ Empty hostnames retain Service DNS for Gateway listeners and Certificate SANs.
 `apps/controller/src/drivers/compute/kubernetes/index.ts:validateDnsHostname`
 refuses URL-parser-invalid or rewritten IPv4 hostnames with `ConfigurationFailure`
 during Driver loading, before persistence opens. Helm refuses rendering too. `198.51.100` fails; `198.51.100.1` stays accepted.
-Correct both configured inputs using the
+Correct Helm values and Installation YAML using the
 [hostname correction procedure](../guides/deploy/breaking-changes.md#2026-10-14-gateway-hostnames-must-not-be-rewritten-ipv4),
 then upgrade or restart.
 
