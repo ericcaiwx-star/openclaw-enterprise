@@ -175,7 +175,8 @@ IPv4 and nonfinal hex labels remain accepted.
 `0x` last labels get an IPv4 parsing hint with DNS-name and canonical IPv4 alternatives.
 
 **Steps.** Correct Helm values and Installation YAML to use a DNS name, or four
-decimal octets from 0 to 255 without leading zeros, then upgrade.
+decimal octets from 0 to 255 without leading zeros, then upgrade. _untested_
+against a live Installation.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
