@@ -7,6 +7,7 @@ const createdAt = "2026-09-01T12:00:00.000Z";
 const namespaceId = "ns_00000000-0000-4000-8000-000000000001";
 const currentRevisionId = "rev_00000000-0000-4000-8000-000000000006";
 const candidateRevisionId = "rev_00000000-0000-4000-8000-000000000007";
+const hiddenRevisionId = "rev_00000000-0000-4000-8000-000000000008";
 const secretRef = (id) => ({ kind: "secret", namespaceId, id });
 const auth = { method: "api_key", source: secretRef("sec_demo_model") };
 
@@ -116,10 +117,25 @@ function candidateDeploymentError(scenario, checkedAt) {
       },
     };
   }
+  if (scenario.candidateSuperseded) {
+    return {
+      code: "REVISION_SUPERSEDED",
+      message: "Deployment was superseded by a newer revision.",
+    };
+  }
+  if (scenario.candidateStopped) {
+    return {
+      code: "REVISION_STOPPED",
+      message: "Deployment ended because the Agent was stopped.",
+    };
+  }
+  // Deployment error messages copy deploymentErrorMessage in
+  // packages/occ/src/state/controller-work.ts; keep them in step.
   if (scenario.candidateModelProbeCause) {
     return {
       code: "RUNTIME_MODEL_PROBE_FAILED",
-      message: "Deployment runtime startup model check failed.",
+      message:
+        "The startup model check failed for a reason other than a rejected credential, such as an unknown model, invalid provider settings, a provider or TLS error, a rate limit or quota, or, with Codex, a provider the runtime cannot reach. Check the model and its provider settings (such as baseUrl and api) in the Configuration, the provider account, and that the runtime can reach the provider, then deploy a new version.",
       data: {
         runtimeFailure: {
           component: "gateway",
@@ -139,7 +155,8 @@ function candidateDeploymentError(scenario, checkedAt) {
   }
   return {
     code: "CONVERGENCE_DEADLINE_EXCEEDED",
-    message: "Deployment convergence deadline exceeded.",
+    message:
+      "Deployment convergence deadline exceeded: the version did not become ready in time. Check its logs and runtime diagnostics, correct the cause if there is one, then deploy a new version.",
     data: {
       timeoutMs: 60000,
       runtimeFailure: { component: "harness", check: "readiness", code: "TIMEOUT", checkedAt },
@@ -175,6 +192,7 @@ export function installFixture(scenario, evidence) {
   const roles = [];
   const bindings = [];
   const deleted = new Set();
+  const clearRevisionOnRead = new Set();
   const session = {
     authenticated: true,
     sessionKey: "storybook-session",
@@ -259,7 +277,10 @@ export function installFixture(scenario, evidence) {
               ? { method: "oauth", source: secretRef("sec_demo_oauth_deployed") }
               : auth;
   let selectedRevisionId = null;
-  if (scenario.candidateDeploymentStatus) {
+  if (scenario.candidateSuperseded) {
+    // A newer v8 the viewer cannot read superseded v7 and is now selected.
+    selectedRevisionId = hiddenRevisionId;
+  } else if (scenario.candidateDeploymentStatus) {
     selectedRevisionId =
       scenario.candidateDeploymentStatus === "succeeded" || scenario.candidateSelected
         ? candidateRevisionId
@@ -904,6 +925,9 @@ export function installFixture(scenario, evidence) {
           return response(saved);
         }
       }
+      if (resource === "permissions" && method === "GET") {
+        return response({ agents: { create: !scenario.readOnlyPermissionSummary } });
+      }
       if (resource === "agents") {
         if (method === "GET") {
           return response([...agents.values()]);
@@ -963,21 +987,37 @@ export function installFixture(scenario, evidence) {
         for (const [filename, content] of Object.entries(initialWorkspaceFiles)) {
           files.set(`${saved.id}/${filename}`, content);
         }
-        const revision = snapshot(saved, nextId("rev"), 1);
-        revisions.set(revision.id, revision);
-        deployments.set(revision.id, {
-          deploymentId: revision.id,
-          namespaceId,
-          agentId: saved.id,
-          status: scenario.provisionedDeploymentStatus ?? "queued",
-          progress: initialDeploymentProgress(scenario.provisionedDeploymentStatus ?? "queued"),
-          reads: scenario.provisionedDeploymentStatus === undefined ? 0 : undefined,
-          error:
-            scenario.provisionedDeploymentStatus === "failed"
-              ? { code: "DEPENDENCY_UNAVAILABLE", message: "Deployment reconciliation failed." }
-              : null,
-          warnings: [],
-        });
+        // A Stop before the first revision cancels provisioning; the stopped Agent keeps its name.
+        const revision = scenario.provisioningCancelledByStop
+          ? null
+          : snapshot(saved, nextId("rev"), 1);
+        if (scenario.provisionedDeploymentStopped || scenario.provisioningCancelledByStop) {
+          saved.desiredRuntimeState = "stopped";
+        }
+        if (revision) {
+          revisions.set(revision.id, revision);
+          deployments.set(revision.id, {
+            deploymentId: revision.id,
+            namespaceId,
+            agentId: saved.id,
+            status: scenario.provisionedDeploymentStatus ?? "queued",
+            progress: initialDeploymentProgress(scenario.provisionedDeploymentStatus ?? "queued"),
+            reads: scenario.provisionedDeploymentStatus === undefined ? 0 : undefined,
+            error:
+              scenario.provisionedDeploymentStatus !== "failed"
+                ? null
+                : scenario.provisionedDeploymentStopped
+                  ? {
+                      code: "REVISION_STOPPED",
+                      message: "Deployment ended because the Agent was stopped.",
+                    }
+                  : {
+                      code: "DEPENDENCY_UNAVAILABLE",
+                      message: "Deployment reconciliation failed.",
+                    },
+            warnings: [],
+          });
+        }
         provisioning.set(saved.id, {
           requestId,
           workId,
@@ -985,7 +1025,7 @@ export function installFixture(scenario, evidence) {
           status: scenario.provisioningStatus ?? "queued",
           agentId: saved.id,
           configurationId: savedConfig.id,
-          revisionId: revision.id,
+          revisionId: revision?.id,
           url: `/namespaces/${namespaceId}/agents/provision/${workId}`,
         });
         provisioning.set(workId, provisioning.get(saved.id));
@@ -1034,7 +1074,8 @@ export function installFixture(scenario, evidence) {
               scenario.provisionedDeploymentStatus === "running"
                 ? "running"
                 : current.reads > 1
-                  ? scenario.provisionedDeploymentStatus === "failed"
+                  ? scenario.provisionedDeploymentStatus === "failed" ||
+                    scenario.provisioningCancelledByStop
                     ? "failed"
                     : "succeeded"
                   : "running";
@@ -1049,16 +1090,26 @@ export function installFixture(scenario, evidence) {
               url: current.url,
               ...(current.status === "failed"
                 ? {
-                    error: {
-                      code:
-                        scenario.provisionedDeploymentStatus === "failed"
-                          ? "HARNESS_CREDENTIAL_BOOTSTRAP_FAILED"
-                          : "PROVISIONING_FAILED",
-                      message:
-                        scenario.provisionedDeploymentStatus === "failed"
-                          ? "Harness credential initialization failed. Correct the cause and deploy again."
-                          : "The worker could not finish provisioning.",
-                    },
+                    error: scenario.provisioningCancelledByStop
+                      ? {
+                          code: "PROVISIONING_CANCELLED",
+                          message: "Provisioning was cancelled because the Agent was stopped.",
+                        }
+                      : scenario.provisionedDeploymentStopped
+                        ? {
+                            code: "REVISION_STOPPED",
+                            message: "The Agent was stopped before its first deployment finished.",
+                          }
+                        : {
+                            code:
+                              scenario.provisionedDeploymentStatus === "failed"
+                                ? "HARNESS_CREDENTIAL_BOOTSTRAP_FAILED"
+                                : "PROVISIONING_FAILED",
+                            message:
+                              scenario.provisionedDeploymentStatus === "failed"
+                                ? "Harness credential initialization failed. Correct the cause and deploy again."
+                                : "The worker could not finish provisioning.",
+                          },
                   }
                 : {}),
               ...(current.status === "succeeded" || current.reads > 1
@@ -1099,6 +1150,9 @@ export function installFixture(scenario, evidence) {
               agents.delete(id);
               return error(404);
             }
+            if (clearRevisionOnRead.delete(id)) {
+              saved.activeRevisionId = null;
+            }
             return response(saved);
           }
           if (method === "PATCH") {
@@ -1112,8 +1166,15 @@ export function installFixture(scenario, evidence) {
             return response(saved, 202);
           }
         }
+        if (suffix === "/permissions" && method === "GET") {
+          const allowed = !scenario.readOnlyPermissionSummary;
+          return response({ update: allowed, deploy: allowed, operate: allowed, delete: allowed });
+        }
         if (suffix === "/stop" && method === "POST") {
           saved.desiredRuntimeState = "stopped";
+          if (scenario.clearRevisionOnStopReadback) {
+            clearRevisionOnRead.add(id);
+          }
           return response(saved, 202);
         }
         if (suffix === "/native-admin" && method === "GET") {

@@ -146,7 +146,10 @@ p {
   color: var(--muted);
 }
 .startup {
-  padding: 36px;
+  margin: 14vh auto;
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
 }
 .auth {
   background: var(--surface);
@@ -245,6 +248,10 @@ p {
 .error {
   color: var(--danger);
   margin-top: 18px;
+}
+/* An Agent stopped by its owner during creation: guidance, not an error (finding 1375). */
+.error .provisioning-stopped {
+  color: var(--text);
 }
 .shell {
   min-height: 100dvh;
@@ -717,6 +724,13 @@ select:not([multiple])[size="1"] {
 .deployment-step-failed .deployment-step-marker {
   border-color: var(--danger);
   background: var(--danger);
+}
+/* Superseded by a newer version or stopped by the owner: neutral, neither success nor failure
+   (findings 1353, 1375). */
+.deployment-step-superseded .deployment-step-marker,
+.deployment-step-stopped .deployment-step-marker {
+  border-color: var(--muted);
+  background: var(--muted);
 }
 .deployment-outcome {
   font-weight: 600;

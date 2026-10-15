@@ -7,6 +7,7 @@ import {
 import { compareResourceQuantities } from "./resource-quantities.ts";
 import {
   asRecord,
+  hasControlCharacter,
   isNonEmptyString,
   numericErrorStatus,
   readCappedBody,
@@ -124,6 +125,7 @@ import {
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsForbiddenByClusterError,
   runtimeFailureCause,
+  SandboxNamespaceRefusedError,
   ServiceAccountCredentialSecretExistsError,
   TransientDependencyError,
   validRuntimeLogFrontierTime,
@@ -131,6 +133,7 @@ import {
 import {
   createKubernetesClientConfiguration,
   KubernetesApiUnavailableError,
+  nonRedirectingHttpLibrary,
 } from "../../kubernetes/client.ts";
 import {
   HARNESS_WORKSPACE,
@@ -195,6 +198,11 @@ import {
   pluginRuntimeEarlierConfigMapData,
   pluginRuntimeSpecForRevision,
 } from "../plugin-runtime.ts";
+import {
+  codexPublicGithubRead,
+  PUBLIC_GITHUB_READ_PORT,
+  PUBLIC_GITHUB_READ_SKILL,
+} from "../../repo/github/public-read/codex.ts";
 import {
   AGENT_RUNTIME_ENTRYPOINT,
   AGENT_WITH_NODE_ENTRYPOINT,
@@ -484,6 +492,8 @@ export interface KubernetesComputeDriverOptions {
     readonly gatewayClients?: readonly KubernetesWorkloadPeer[];
     readonly pluginStatusProxySourceCidrs?: readonly string[];
     readonly repositoryCredentials?: KubernetesWorkloadPeer & { readonly port: number };
+    /** Private ClusterIP of the credential-free reader in this execution cluster. */
+    readonly publicGithubRead?: KubernetesWorkloadPeer & { readonly address: string };
     /** Exact provider ingress used only when the selected Sandbox owns Harness transport. */
     readonly providerHarness?: KubernetesWorkloadPeer & {
       readonly address: string;
@@ -663,16 +673,46 @@ function preparationFailure(
       }
     }
   }
+  // A request timeout is the failure itself. Its cause is whatever the in-flight call threw once
+  // the deadline lapsed, usually the deadline's DOMException (finding 1386). Another
+  // dependency's transient failure, such as the Agent Gateway's, is classified already: its
+  // cause is that dependency's socket error, not a Kubernetes API failure (finding 1391).
   const cause = asRecord(error)?.cause;
-  return cause === undefined
+  return cause === undefined ||
+    error instanceof KubernetesRequestTimeout ||
+    nonKubernetesTransientFailure(error)
     ? { stage: "prepare_revision", error }
     : preparationFailure(cause, depth + 1);
+}
+
+/**
+ * A transient failure of a dependency other than the Kubernetes API. A Kubernetes API one
+ * keeps the walk going: its cause is the API failure, whose status the diagnostic reports.
+ */
+function nonKubernetesTransientFailure(error: unknown): error is TransientDependencyError {
+  return error instanceof TransientDependencyError && error.dependency !== "kubernetes_api";
+}
+
+/** The worker's bound on a diagnostic message: at most 256 printable characters. */
+function diagnosticMessage(message: string): boolean {
+  return message.length <= 256 && !hasControlCharacter(message);
 }
 
 function preparationFailureDiagnostic(error: unknown): ComputePrepareRevisionFailureDiagnostic {
   const failure = preparationFailure(error);
   const cause = privateWriteEvidence(failure.error) ?? failure.error;
   const status = numericErrorStatus(cause);
+  if (nonKubernetesTransientFailure(cause)) {
+    // The code names the dependency (AGENT_GATEWAY_UNAVAILABLE); the message is the
+    // controller's own text, kept only while the worker would accept it: a message it
+    // refuses would drop the whole diagnostic.
+    return {
+      code: cause.code,
+      stage: failure.stage,
+      errorClass: "TransientDependencyError",
+      ...(diagnosticMessage(cause.message) ? { message: cause.message } : {}),
+    };
+  }
   if (cause instanceof ConfigurationFailure || cause instanceof ConfigurationHarnessError) {
     return {
       code: "KUBERNETES_CONFIGURATION_INVALID",
@@ -858,9 +898,8 @@ function kubernetesApiFailureEvidence(
   if (socket !== undefined) {
     return new KubernetesApiFailureEvidence(socket);
   }
-  // Only an HTTP status counts: a DOMException abort also carries a numeric code.
   const status = numericErrorStatus(error);
-  return status === undefined || status < 100 || status > 599
+  return status === undefined
     ? undefined
     : new KubernetesApiFailureEvidence(status, kubernetesStatusReason(error));
 }
@@ -1033,6 +1072,9 @@ function prepareHarnessAuth(
     // The paired Sandbox supplies the credential environment; no Secret is projected here.
     if (harness.id === "codex") {
       environment.push({ name: "CODEX_LOGIN_MODE", value: resolvedAuth.loginMode });
+      if (resolvedAuth.loginMode === "codex_pat") {
+        environment.push({ name: "OCE_CODEX_CREDENTIAL_SOURCE", value: "1" });
+      }
     }
     return {
       loginMode: resolvedAuth.loginMode,
@@ -1153,11 +1195,36 @@ const TRUSTED_PROXY_IDENTITY = "occ-workspace-files";
 const TRUSTED_PROXY_HEADER = "x-occ-identity";
 const MODEL_API_KEY = "OPENAI_API_KEY";
 const SERVICE_ACCOUNT_TOKEN_KEY = "token";
+/** The provider credential whose token an account Secret holds, so a leftover can be revoked. */
+const SERVICE_ACCOUNT_CREDENTIAL_ID_ANNOTATION = "openclaw.dev/provider-credential-id";
+const SERVICE_ACCOUNT_CREDENTIAL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const CODEX_ACCESS_TOKEN = "CODEX_ACCESS_TOKEN";
 const MAX_RUNTIME_CREDENTIAL_BYTES = 65_536;
 const MAX_RUNTIME_STATUS_RESPONSE_BYTES = 65_536;
 
 class RuntimeStatusOversized extends Error {}
+class RuntimeStatusRedirected extends Error {}
+
+/**
+ * undici's refusal of an interim answer the request never asked for: a `100 Continue`
+ * ("bad response") or a `101` without an upgrade request ("bad upgrade"). The peer chose that
+ * answer, so unlike a dropped or reset connection, a retry gets the same one (finding 1355).
+ * The texts are undici's (`lib/dispatcher/client-h1.js` `onHeadersComplete`, undici 8.11.2):
+ * recheck them when undici changes, or these answers fall back to the generic retry.
+ */
+function unsolicitedInterimResponse(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    if (
+      (current as { readonly code?: unknown }).code === "UND_ERR_SOCKET" &&
+      (current.message === "bad response" || current.message === "bad upgrade")
+    ) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
 
 /**
  * Reads a Pod proxy response up to the status limit instead of buffering all of it.
@@ -1165,6 +1232,17 @@ class RuntimeStatusOversized extends Error {}
  */
 async function limitRuntimeStatusBody(response: ResponseContext): Promise<ResponseContext> {
   const stream = response.body.stream();
+  if (response.httpStatusCode >= 300 && response.httpStatusCode <= 399) {
+    // The status is already decisive; do not wait for an untrusted redirect body.
+    try {
+      if (stream !== null) {
+        void stream.cancel().catch(() => {});
+      }
+    } catch {
+      // A cancellation failure must not make this redirect retryable.
+    }
+    throw new RuntimeStatusRedirected();
+  }
   if (stream !== null) {
     let bytes = await readCappedBody(stream, MAX_RUNTIME_STATUS_RESPONSE_BYTES);
     if (bytes === undefined) {
@@ -1188,6 +1266,8 @@ let runtimeStatusRequestOptions: Promise<ConfigurationOptions> | undefined;
 
 function runtimeStatusOptions(): Promise<ConfigurationOptions> {
   runtimeStatusRequestOptions ??= import("@kubernetes/client-node").then((sdk) => ({
+    // The shared clients already refuse redirects; the Pod-written read does not rely on that.
+    httpApi: nonRedirectingHttpLibrary(sdk),
     middleware: [
       {
         pre: (request) => new sdk.Observable(Promise.resolve(request)),
@@ -1417,6 +1497,17 @@ function required(value: unknown, description: string): string {
   return value;
 }
 
+/**
+ * The provider credential ID an account Secret records, or undefined when it records none or
+ * one outside a conservative identifier shape. Anyone with Secret write can edit the
+ * annotation, and the ID becomes a provider URL path segment, so a value like `..` must never
+ * reach a revocation (it would resolve to the provider account itself).
+ */
+function serviceAccountCredentialId(secret: ManagedKubernetesObject<"Secret">): string | undefined {
+  const value = secret.metadata.annotations?.[SERVICE_ACCOUNT_CREDENTIAL_ID_ANNOTATION];
+  return typeof value === "string" && SERVICE_ACCOUNT_CREDENTIAL_ID.test(value) ? value : undefined;
+}
+
 /** Whether an account's credential Secret holds exactly this token (constant-time compare). */
 function storesServiceAccountToken(
   secret: ManagedKubernetesObject<"Secret">,
@@ -1453,6 +1544,7 @@ function failure(error: unknown): "retryable" | "permanent" {
   return error instanceof OwnershipFailure ||
     error instanceof ConfigurationFailure ||
     error instanceof ConfigurationHarnessError ||
+    error instanceof SandboxNamespaceRefusedError ||
     [400, 401, 403, 422].includes(numericErrorStatus(error) ?? 0)
     ? "permanent"
     : "retryable";
@@ -1463,8 +1555,9 @@ const MAX_NAMESPACE_FAILURE_REASON_LENGTH = 256;
 /**
  * The operator reason for a failed Namespace ensure. Only this Driver's own refusal texts
  * pass through: they name this Namespace's own ID and Kubernetes placement, and a foreign
- * marker or object only by its key or kind. Anything else (Kubernetes response bodies,
- * lifecycle hooks, the Sandbox Driver) gets a fixed text, so no response text and no
+ * marker or object only by its key or kind. A Sandbox Driver's refusal of the controller's
+ * identity names only the provider's refusal code. Anything else (Kubernetes response bodies,
+ * lifecycle hooks, other Sandbox Driver errors) gets a fixed text, so no response text and no
  * value of another tenant reaches the worker log. GatewaySettingFailure names settings the
  * caller submitted, so it never passes through. Characters the worker log refuses become
  * `_`, so the log keeps the reason instead of dropping it.
@@ -1473,7 +1566,8 @@ function namespaceFailureReason(error: unknown): string {
   if (
     (error instanceof OwnershipFailure ||
       error instanceof ConfigurationFailure ||
-      error instanceof KubernetesRequestTimeout) &&
+      error instanceof KubernetesRequestTimeout ||
+      error instanceof SandboxNamespaceRefusedError) &&
     !(error instanceof GatewaySettingFailure)
   ) {
     const cleaned = error.message.replace(/[^A-Za-z0-9._: /@-]/gu, "_");
@@ -2900,6 +2994,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
               port: { type: "integer", minimum: 1, maximum: 65535 },
             },
           },
+          publicGithubRead: {
+            type: "object",
+            required: ["namespace", "podLabels", "address"],
+            additionalProperties: false,
+            properties: {
+              ...WORKLOAD_PEER_SCHEMA.properties,
+              address: { type: "string", minLength: 1 },
+            },
+          },
           providerHarness: {
             type: "object",
             required: ["namespace", "podLabels", "address", "port"],
@@ -3134,6 +3237,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
         options.network.repositoryCredentials.port,
         "Repository credential gateway port",
       );
+    }
+    if (options.network.publicGithubRead !== undefined) {
+      const reader = options.network.publicGithubRead;
+      validatePeer(reader, "Public GitHub reader");
+      if (isIP(reader.address) !== 4 || options.executionCluster !== undefined) {
+        throw new ConfigurationFailure(
+          "Public GitHub reader requires an IPv4 ClusterIP in single-cluster execution.",
+        );
+      }
     }
     if (options.network.providerHarness !== undefined) {
       validatePeer(options.network.providerHarness, "Provider Harness gateway");
@@ -3759,11 +3871,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
         this.credentialGatewayDriver === undefined ||
         auth.credentialGatewayId !== this.credentialGatewayDriver.id ||
         credentialSourceType?.type !== auth.sourceType ||
-        credentialSourceType.harnessAuth?.loginMode !== "api_key" ||
+        (credentialSourceType.harnessAuth?.loginMode !== "api_key" &&
+          !(codex && credentialSourceType.harnessAuth?.loginMode === "codex_pat")) ||
         credentialSourceType.harnessAuth.modelProvider !== "openai"
       ) {
         throw new ConfigurationFailure(
-          "Credential-source Harness authentication requires the paired Sandbox and an OpenAI API key source.",
+          "Credential-source Harness authentication requires the paired Sandbox and a compatible OpenAI source.",
         );
       }
     }
@@ -4458,10 +4571,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
   async storeServiceAccountCredential(input: {
     readonly namespaceId: string;
     readonly serviceAccountId: string;
+    readonly credentialId: string;
     readonly accessToken: string;
   }): Promise<{ readonly name: string; readonly key: string }> {
     const namespaceId = required(input.namespaceId, "ServiceAccount Namespace ID");
     const serviceAccountId = required(input.serviceAccountId, "ServiceAccount ID");
+    const credentialId = required(input.credentialId, "ServiceAccount provider credential ID");
     const accessToken = required(input.accessToken, "ServiceAccount access token");
     const namespace = await this.controlNamespace(namespaceId);
     const observed = await this.getNamespace(namespace);
@@ -4475,18 +4590,29 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const existing = await this.getOwned("Secret", name, namespace, ownership);
     if (existing !== undefined) {
       // OCC records no credential for this account, so this is a leftover of an earlier
-      // issuance; name it so the operator can delete it (finding 935).
+      // issuance that appeared after the ServiceAccount Driver's reclaim; name it so the
+      // operator can delete it (findings 935 and 1397).
       throw new ServiceAccountCredentialSecretExistsError(namespace.name, name);
     }
 
     const clients = await this.clients(namespace.plane);
+    const manifest = this.manifest("v1", "Secret", name, ownership, namespace);
     try {
       await this.request(
         () =>
           clients.core.createNamespacedSecret({
             namespace: namespace.name,
             body: {
-              ...this.manifest("v1", "Secret", name, ownership, namespace),
+              ...manifest,
+              metadata: {
+                ...manifest.metadata,
+                annotations: {
+                  ...manifest.metadata.annotations,
+                  // Written with the token, so a Secret an issuance leaves behind (a crash or
+                  // an unknown COMMIT) still names the credential to revoke (finding 1397).
+                  [SERVICE_ACCOUNT_CREDENTIAL_ID_ANNOTATION]: credentialId,
+                },
+              },
               type: "Opaque",
               stringData: {
                 [SERVICE_ACCOUNT_TOKEN_KEY]: accessToken,
@@ -4566,18 +4692,65 @@ export class KubernetesComputeDriver implements ComputeDriver {
   }
 
   /**
-   * Removes the account's credential Secret. Account deletion passes no token and removes the
-   * Secret the account owns. A failed issuance's compensation passes its own token: it runs
-   * after the transaction's ROLLBACK released the account row lock, so another issuance may
-   * already have stored its Secret under this same deterministic name (finding 944). It then
-   * deletes the Secret only while it holds that token, with uid and resourceVersion
-   * preconditions, and leaves another token's Secret alone.
+   * The account's credential Secret, if one exists, and the provider credential it records. It
+   * never returns the token. OCC records no credential for an account while the ServiceAccount
+   * Driver calls this, so a Secret found here is a leftover of an issuance that never
+   * committed (a crash, or an unknown COMMIT that failed), which still holds a live token
+   * (finding 1397). An object under the name that this account does not own is not its
+   * leftover and is not returned.
+   */
+  async findServiceAccountCredential(input: {
+    readonly namespaceId: string;
+    readonly serviceAccountId: string;
+  }): Promise<
+    | {
+        readonly secretNamespace: string;
+        readonly secretRef: { readonly name: string; readonly key: string };
+        readonly credentialId: string | undefined;
+      }
+    | undefined
+  > {
+    const namespaceId = required(input.namespaceId, "ServiceAccount Namespace ID");
+    const serviceAccountId = required(input.serviceAccountId, "ServiceAccount ID");
+    const name = `service-account-${sha256Hex(serviceAccountId, 32)}`;
+    const namespace = await this.controlNamespace(namespaceId);
+    const tenant = await this.getNamespace(namespace);
+    if (tenant === undefined) {
+      return undefined;
+    }
+    this.verifyGatewayNamespace(tenant, { namespaceId });
+    const existing = await this.get("Secret", name, namespace);
+    if (existing === undefined) {
+      return undefined;
+    }
+    try {
+      this.verifyOwnership(existing, { namespaceId, serviceAccountId });
+    } catch {
+      return undefined;
+    }
+    return {
+      secretNamespace: namespace.name,
+      secretRef: { name, key: SERVICE_ACCOUNT_TOKEN_KEY },
+      credentialId: serviceAccountCredentialId(existing),
+    };
+  }
+
+  /**
+   * Removes the account's credential Secret. Account deletion passes neither a token nor a
+   * credential ID and removes the Secret the account owns. A failed issuance's compensation
+   * passes its own token: it runs after the transaction's ROLLBACK released the account row
+   * lock, so another issuance may already have stored its Secret under this same
+   * deterministic name (finding 944). An issuance reclaiming a leftover passes the provider
+   * credential ID it just revoked (finding 1397). Either way it deletes the Secret only while
+   * it holds that token or records that credential, with uid and resourceVersion
+   * preconditions, and leaves any other Secret alone.
    */
   async deleteServiceAccountCredential(input: {
     readonly namespaceId: string;
     readonly serviceAccountId: string;
     readonly secretRef: { readonly name: string; readonly key: string };
     readonly accessToken?: string;
+    readonly credentialId?: string;
   }): Promise<void> {
     const namespaceId = required(input.namespaceId, "ServiceAccount Namespace ID");
     const serviceAccountId = required(input.serviceAccountId, "ServiceAccount ID");
@@ -4585,6 +4758,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
       input.accessToken === undefined
         ? undefined
         : required(input.accessToken, "ServiceAccount access token");
+    const credentialId =
+      input.credentialId === undefined
+        ? undefined
+        : required(input.credentialId, "ServiceAccount provider credential ID");
+    const exact = accessToken !== undefined || credentialId !== undefined;
     const name = `service-account-${sha256Hex(serviceAccountId, 32)}`;
     if (input.secretRef.name !== name || input.secretRef.key !== SERVICE_ACCOUNT_TOKEN_KEY) {
       throw new OwnershipFailure("Refusing another ServiceAccount's credential Secret.");
@@ -4603,15 +4781,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
     try {
       this.verifyOwnership(existing, { namespaceId, serviceAccountId });
     } catch (error) {
-      if (accessToken === undefined) {
+      if (!exact) {
         throw error;
       }
-      // Someone else's object under this name: a compensation leaves it alone, as the
+      // Someone else's object under this name: an exact delete leaves it alone, as the
       // failed-create cleanup does.
       return;
     }
     const clients = await this.clients(namespace.plane);
-    if (accessToken === undefined) {
+    if (!exact) {
       await this.request(
         () =>
           clients.core.deleteNamespacedSecret({
@@ -4625,8 +4803,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
       return;
     }
-    if (!storesServiceAccountToken(existing, accessToken)) {
-      // Another issuance's Secret: this request's own is already gone.
+    const matches =
+      accessToken !== undefined
+        ? storesServiceAccountToken(existing, accessToken)
+        : serviceAccountCredentialId(existing) === credentialId;
+    if (!matches) {
+      // Another issuance's Secret: the one this request meant is already gone.
       return;
     }
     const { uid, resourceVersion } = existing.metadata;
@@ -5142,6 +5324,21 @@ export class KubernetesComputeDriver implements ComputeDriver {
     ) {
       throw new ConfigurationFailure("AgentRevision Configuration ownership is invalid.");
     }
+    if (
+      this.hasPublicGithubReadAdmission(revision) &&
+      this.publicGithubReadForRevision(revision) === undefined
+    ) {
+      const { name: namespace, external } = await this.resolveNamespace(revision.namespaceId);
+      const observed = await this.getNamespace(namespace);
+      if (observed === undefined) {
+        return result;
+      }
+      this.verifyNamespaceOwnership(observed, { namespaceId: revision.namespaceId }, external);
+      if (observed.status?.phase !== "Active") {
+        return result;
+      }
+      await this.revokeUnavailablePublicGithubRead(revision, namespace);
+    }
     const materialInput = this.repositoryMaterialInput(revision, context);
     const repositoryConsumer =
       materialInput === undefined ? undefined : this.repositoryConsumer(revision);
@@ -5214,6 +5411,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     if (observed.status?.phase !== "Active") {
       return result;
     }
+    await this.revokeUnavailablePublicGithubRead(revision, namespace);
     const policyNamespaces =
       gatewayNamespace === namespace ? [namespace] : [namespace, gatewayNamespace];
     for (const policyNamespace of policyNamespaces) {
@@ -5780,6 +5978,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
             namespace,
           );
         }
+        await this.reconcilePublicGithubReadNetworkPolicy(revision, namespace, pluginRuntime);
       }
       if (!providerOwnsHarnessEndpoint) {
         await this.reconcileHarnessRoute(revision, namespace);
@@ -6143,6 +6342,26 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<void> {
+    if (
+      revision.compute.id !== this.id ||
+      revision.compute.implementation !== this.implementation ||
+      typeof revision.servicePrincipalId !== "string" ||
+      revision.servicePrincipalId.trim().length === 0
+    ) {
+      throw new ConfigurationFailure("AgentRevision Compute ownership is invalid.");
+    }
+    if (
+      this.hasPublicGithubReadAdmission(revision) &&
+      this.publicGithubReadForRevision(revision) === undefined
+    ) {
+      const { name: namespace, external } = await this.resolveNamespace(revision.namespaceId);
+      const observed = await this.getNamespace(namespace);
+      if (observed === undefined || observed.status?.phase !== "Active") {
+        throw new DependencyUnavailableError("The AgentRevision Namespace is unavailable.");
+      }
+      this.verifyNamespaceOwnership(observed, { namespaceId: revision.namespaceId }, external);
+      await this.revokeUnavailablePublicGithubRead(revision, namespace);
+    }
     const materialInput = this.repositoryMaterialInput(revision, context);
     const repositoryConsumer =
       materialInput === undefined ? undefined : this.repositoryConsumer(revision);
@@ -6172,6 +6391,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     );
     const channels = this.enabledChannels(admittedRevision);
     const { name: namespace } = await this.resolveNamespace(revision.namespaceId);
+    await this.revokeUnavailablePublicGithubRead(revision, namespace);
     await this.deliverWorkspaceSetup(revision, workspaceSetup, namespace);
     const sourceNamespace =
       this.options.executionCluster === undefined
@@ -6568,6 +6788,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     for (const { resource: policy, namespace: target } of policies) {
       await this.reconcile(policy, gatewayOwnership, target);
     }
+    await this.reconcilePublicGithubReadNetworkPolicy(revision, namespace, pluginRuntime);
     await this.deleteUnwrittenAgentPolicies(revision, namespace, policies);
     if (!(await this.gatewayReady(gatewayOwnership, gatewayName, gatewayNamespace))) {
       throw new Error("The exact AgentRevision gateway is not ready.");
@@ -6658,10 +6879,19 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private async deleteRevisionAgentDeployment(
     revision: AgentRevision,
     namespace: KubernetesNamespaceAddress,
+    {
+      waitForRemoval = false,
+      owner = "current-sandbox",
+    }: {
+      readonly waitForRemoval?: boolean;
+      readonly owner?: "current-sandbox" | "admitted-public-reader";
+    } = {},
   ): Promise<void> {
-    const sandboxDriver = this.sandboxDriverForRevision(revision);
-    if (sandboxDriver?.provisionHarness !== undefined) {
-      return;
+    if (owner === "current-sandbox") {
+      const sandboxDriver = this.sandboxDriverForRevision(revision);
+      if (sandboxDriver?.provisionHarness !== undefined) {
+        return;
+      }
     }
     const name = `agent-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`;
     const deployment = await this.getOwned("Deployment", name, namespace, {
@@ -6673,18 +6903,68 @@ export class KubernetesComputeDriver implements ComputeDriver {
     if (deployment === undefined) {
       return;
     }
+    if (owner === "admitted-public-reader") {
+      const labels = asRecord(asRecord(asRecord(deployment.spec?.template)?.metadata)?.labels);
+      const expected = {
+        [NETWORK_PROFILE_LABEL]: ORDINARY_NETWORK_PROFILE,
+        "openclaw.dev/namespace": revision.namespaceId,
+        "openclaw.dev/agent": revision.agentId,
+        "openclaw.dev/revision": revision.id,
+        "openclaw.dev/workload-role": "agent",
+      };
+      if (
+        !this.hasPublicGithubReadAdmission(revision) ||
+        revision.harness.id !== "codex" ||
+        revision.harness.mode !== "dedicated" ||
+        Object.entries(expected).some(([key, value]) => labels?.[key] !== value)
+      ) {
+        throw new OwnershipFailure("Refusing an ambiguous reader workload profile.");
+      }
+    }
+    const uid = deployment.metadata.uid;
+    if (!isNonEmptyString(uid)) {
+      throw new OwnershipFailure("Refusing to delete an AgentRevision workload without a UID.");
+    }
     const clients = await this.clients(namespace.plane);
     await this.request(
       () =>
         clients.apps.deleteNamespacedDeployment({
           name,
           namespace: namespace.name,
-          ...(deployment.metadata.uid === undefined
-            ? {}
-            : { body: { preconditions: { uid: deployment.metadata.uid } } }),
+          body: {
+            preconditions: { uid },
+            ...(waitForRemoval || owner === "admitted-public-reader"
+              ? { propagationPolicy: "Foreground" as const }
+              : {}),
+          },
         }),
       { mutating: true },
     );
+    if (waitForRemoval) {
+      const signal = this.operationSignal();
+      const deadline = Date.now() + WORKLOAD_TERMINATION_TIMEOUT_MS;
+      for (;;) {
+        signal.throwIfAborted();
+        const remaining = await this.getOwned("Deployment", name, namespace, {
+          namespaceId: revision.namespaceId,
+          agentId: revision.agentId,
+          servicePrincipalId: revision.servicePrincipalId,
+          revisionId: revision.id,
+        });
+        if (remaining === undefined) {
+          break;
+        }
+        if (remaining.metadata.uid !== uid) {
+          throw new OwnershipFailure("The AgentRevision workload changed during withdrawal.");
+        }
+        if (Date.now() >= deadline) {
+          throw new DependencyUnavailableError(
+            "The AgentRevision workload did not terminate before the deadline.",
+          );
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, WORKLOAD_TERMINATION_POLL_MS));
+      }
+    }
   }
 
   /**
@@ -6884,18 +7164,49 @@ export class KubernetesComputeDriver implements ComputeDriver {
     if (revision.harness.mode === "embedded") {
       return;
     }
-    const sandboxDriver = this.sandboxDriverForRevision(revision);
-    const computeOwnsWorkload = sandboxDriver?.provisionHarness === undefined;
-    if (computeOwnsWorkload && isYieldingComputeStop()) {
-      // A refused candidate's Harness goes before the OAuth bootstrap's wait, which may yield.
-      await this.deleteRevisionAgentDeployment(revision, namespace);
-    }
-    if (revision.harnessAuth.method === "oauth") {
-      await this.removeOAuthBootstrap(revision, namespace);
-    }
-    if (computeOwnsWorkload) {
-      await this.deleteRevisionAgentDeployment(revision, namespace);
+    const admittedReader = this.hasPublicGithubReadAdmission(revision);
+    if (admittedReader) {
+      const owner = "admitted-public-reader" as const;
+      if (isYieldingComputeStop()) {
+        // A refused candidate's Harness goes before the OAuth bootstrap's wait, which may yield.
+        await this.deleteRevisionAgentDeployment(revision, namespace, { owner });
+      }
+      if (revision.harnessAuth.method === "oauth") {
+        await this.removeOAuthBootstrap(revision, namespace);
+      }
+      await this.deleteRevisionAgentDeployment(revision, namespace, {
+        owner,
+        waitForRemoval: true,
+      });
       await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
+      await this.deleteOwnedNamespacedResource(
+        "NetworkPolicy",
+        this.publicGithubReadNetworkPolicyName(revision),
+        this.pluginRuntimeOwnership(revision),
+        namespace,
+      );
+    }
+    // Ancillary Sandbox cleanup still requires its current exact driver. If it is
+    // unavailable, report that failure after the admitted reader workload is fenced.
+    const sandboxDriver = this.sandboxDriverForRevision(revision);
+    if (admittedReader && sandboxDriver?.provisionHarness !== undefined) {
+      throw new ConfigurationFailure(
+        "Cannot clean up an admitted reader with a Sandbox-owned Harness driver.",
+      );
+    }
+    const computeOwnsWorkload = sandboxDriver?.provisionHarness === undefined;
+    if (!admittedReader) {
+      if (computeOwnsWorkload && isYieldingComputeStop()) {
+        // A refused candidate's Harness goes before the OAuth bootstrap's wait, which may yield.
+        await this.deleteRevisionAgentDeployment(revision, namespace);
+      }
+      if (revision.harnessAuth.method === "oauth") {
+        await this.removeOAuthBootstrap(revision, namespace);
+      }
+      if (computeOwnsWorkload) {
+        await this.deleteRevisionAgentDeployment(revision, namespace);
+        await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
+      }
     }
     if (sandboxDriver !== undefined) {
       await sandboxDriver.cleanup({
@@ -6906,7 +7217,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         revision,
       });
     }
-    if (!computeOwnsWorkload) {
+    if (!admittedReader && !computeOwnsWorkload) {
       await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
     }
   }
@@ -7153,14 +7464,23 @@ export class KubernetesComputeDriver implements ComputeDriver {
     ) {
       return;
     }
-    await this.deleteRetiredRevisionArtifacts(predecessor, namespace);
+    await this.deleteRetiredRevisionArtifacts(predecessor, namespace, true);
   }
 
   private async deleteRetiredRevisionArtifacts(
     revision: AgentRevision,
     namespace: KubernetesNamespaceAddress,
+    unknownPredecessor = false,
   ): Promise<void> {
     const gatewayNamespace = this.gatewayNamespace(revision, namespace);
+    if (unknownPredecessor || this.hasPublicGithubReadAdmission(revision)) {
+      await this.deleteOwnedNamespacedResource(
+        "NetworkPolicy",
+        this.publicGithubReadNetworkPolicyName(revision),
+        this.pluginRuntimeOwnership(revision),
+        namespace,
+      );
+    }
     await this.deleteOwnedNamespacedResource(
       "ConfigMap",
       `gateway-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
@@ -8856,6 +9176,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
     // 404/503 mean the status port is not serving yet: an answer, not an outage to retry.
     const notServing = Symbol("not serving");
     const oversized = Symbol("oversized");
+    const redirected = Symbol("redirected");
+    const interim = Symbol("interim");
     const options = await runtimeStatusOptions();
     const raw = await this.request(async () => {
       try {
@@ -8872,8 +9194,20 @@ export class KubernetesComputeDriver implements ComputeDriver {
         if (error instanceof RuntimeStatusOversized) {
           return oversized;
         }
+        if (error instanceof RuntimeStatusRedirected) {
+          return redirected;
+        }
+        if (unsolicitedInterimResponse(error)) {
+          return interim;
+        }
         if (numericErrorStatus(error) === 404 || numericErrorStatus(error) === 503) {
           return notServing;
+        }
+        // The client never follows a redirect (finding 1347). Any 3xx here was written by the
+        // Pod: the status is unreadable, and a retry would get the same answer.
+        const status = numericErrorStatus(error);
+        if (status !== undefined && status >= 300 && status <= 399) {
+          return redirected;
         }
         throw error;
       }
@@ -8883,6 +9217,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
     if (raw === oversized) {
       throw new DependencyUnavailableError("Runtime status returned oversized data.");
+    }
+    if (raw === redirected) {
+      throw new DependencyUnavailableError("Runtime status answered with a redirect.");
+    }
+    if (raw === interim) {
+      throw new DependencyUnavailableError(
+        "Runtime status answered with an unrequested 1xx status.",
+      );
     }
     const parsed = this.boundedRuntimeStatusResponse(raw);
     const latestPods = (await this.revisionPods(revision, namespace, container)).filter(
@@ -11772,6 +12114,150 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       domains,
     };
   }
+
+  private publicGithubReadCandidate(revision: AgentRevision) {
+    const reader = this.options.network.publicGithubRead;
+    if (
+      reader === undefined ||
+      this.options.runtime === undefined ||
+      revision.harness.id !== "codex" ||
+      revision.harness.mode !== "dedicated" ||
+      this.harnessNetworkProfile(revision) !== ORDINARY_NETWORK_PROFILE
+    ) {
+      return undefined;
+    }
+    const config = asRecord(
+      asRecord(asRecord(revision.configuration.plugins)?.entries)?.codex,
+    )?.config;
+    const proxy = asRecord(asRecord(asRecord(config)?.appServer)?.networkProxy);
+    return codexPublicGithubRead(reader.address, proxy);
+  }
+
+  private publicGithubReadAdmission(): string | undefined {
+    const reader = this.options.network.publicGithubRead;
+    if (reader === undefined) {
+      return undefined;
+    }
+    const labels = Object.entries(reader.podLabels).sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    return `public-github-read:v1:${sha256Hex(JSON.stringify([reader.address, reader.namespace, labels]))}`;
+  }
+
+  admitRevision(revision: Readonly<AgentRevision>): string | undefined {
+    return this.publicGithubReadCandidate(revision) === undefined
+      ? undefined
+      : this.publicGithubReadAdmission();
+  }
+
+  private publicGithubReadForRevision(revision: AgentRevision) {
+    if (revision.compute.admission !== undefined && !this.hasPublicGithubReadAdmission(revision)) {
+      throw new ConfigurationFailure("AgentRevision Compute admission is invalid.");
+    }
+    const admission = this.publicGithubReadAdmission();
+    return admission !== undefined && revision.compute.admission === admission
+      ? this.publicGithubReadCandidate(revision)
+      : undefined;
+  }
+
+  private hasPublicGithubReadAdmission(revision: AgentRevision): boolean {
+    return /^public-github-read:v1:[a-f0-9]{64}$/.test(revision.compute.admission ?? "");
+  }
+
+  private async revokeUnavailablePublicGithubRead(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<void> {
+    if (
+      this.hasPublicGithubReadAdmission(revision) &&
+      this.publicGithubReadForRevision(revision) === undefined
+    ) {
+      // Removing the grant first prevents new connections, but a CNI may retain existing ones.
+      await this.deleteOwnedNamespacedResource(
+        "NetworkPolicy",
+        this.publicGithubReadNetworkPolicyName(revision),
+        this.pluginRuntimeOwnership(revision),
+        namespace,
+      );
+      // Admission is issued only to a Compute-owned Harness; current Sandbox
+      // configuration may have changed since that immutable decision.
+      await this.deleteRevisionAgentDeployment(revision, namespace, {
+        waitForRemoval: true,
+        owner: "admitted-public-reader",
+      });
+      await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
+      if (
+        (await this.getOwned(
+          "Deployment",
+          `agent-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
+          namespace,
+          this.pluginRuntimeOwnership(revision),
+        )) !== undefined
+      ) {
+        throw new DependencyUnavailableError("The withdrawn AgentRevision workload reappeared.");
+      }
+      if (
+        (await this.getOwned(
+          "NetworkPolicy",
+          this.publicGithubReadNetworkPolicyName(revision),
+          namespace,
+          this.pluginRuntimeOwnership(revision),
+        )) !== undefined
+      ) {
+        throw new DependencyUnavailableError("The withdrawn reader policy reappeared.");
+      }
+      throw new ConfigurationFailure(
+        "Public GitHub reader peer was withdrawn; deploy a new AgentRevision.",
+      );
+    }
+  }
+
+  private publicGithubReadNetworkPolicyName(revision: AgentRevision): string {
+    return `allow-public-github-read-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`;
+  }
+
+  private async reconcilePublicGithubReadNetworkPolicy(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+    pluginRuntime: PluginRuntimeSnapshot | undefined,
+  ): Promise<void> {
+    const reader = this.options.network.publicGithubRead;
+    const runtime = pluginRuntime?.runtime;
+    if (
+      reader === undefined ||
+      runtime?.kind !== "codex" ||
+      runtime.publicGithubRead === undefined
+    ) {
+      return;
+    }
+    // The serving and preparing revisions can make opposite choices. Give the
+    // revision that mounted the skill its own grant, removed only with its artifacts.
+    const ownership = this.pluginRuntimeOwnership(revision);
+    await this.reconcile(
+      {
+        ...this.manifest(
+          "networking.k8s.io/v1",
+          "NetworkPolicy",
+          this.publicGithubReadNetworkPolicyName(revision),
+          ownership,
+          namespace,
+        ),
+        spec: {
+          podSelector: { matchLabels: this.agentServiceSelector(revision) },
+          policyTypes: ["Egress"],
+          egress: [
+            {
+              to: [this.peer(reader)],
+              ports: [{ protocol: "TCP", port: PUBLIC_GITHUB_READ_PORT }],
+            },
+          ],
+        },
+      },
+      ownership,
+      namespace,
+    );
+  }
+
   private pluginRuntimeSnapshot(
     revision: AgentRevision,
     repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy,
@@ -11803,6 +12289,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         revision,
         repositoryBrokerNetworkPolicy,
         openaiBaseUrl,
+        this.publicGithubReadForRevision(revision),
       );
     } catch (error) {
       throw new ConfigurationFailure(
@@ -11970,7 +12457,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     return mounts;
   }
 
-  private privateStateDirectories(role: WorkspaceRole): string[] {
+  private privateStateDirectories(role: WorkspaceRole, projectedSkillPath?: string): string[] {
     const paths =
       role === "gateway"
         ? [
@@ -11978,6 +12465,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
             GATEWAY_SESSION_DIRECTORY,
           ]
         : HARNESS_WORKSPACE_CATEGORIES.map(([, mountPath]) => mountPath);
+    // Both runtimes need writable parents before the read-only skill file mount.
+    if (projectedSkillPath !== undefined) {
+      paths.push(projectedSkillPath);
+    }
     return [
       "/runtime-state/home",
       "/runtime-temporary/tmp",
@@ -11992,8 +12483,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     image: string,
     embedded: boolean,
     writableConfiguration = false,
+    projectedSkillPath?: string,
   ): KubernetesRecord {
-    const directories = this.privateStateDirectories(role);
+    const directories = this.privateStateDirectories(role, projectedSkillPath);
     const volumeMounts: V1VolumeMount[] = [
       { name: "runtime-state", mountPath: "/runtime-state" },
       { name: "runtime-temporary", mountPath: "/runtime-temporary" },
@@ -13816,8 +14308,20 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       providerEndpoint === undefined
         ? undefined
         : providerHarnessUrl(providerEndpoint, providerNetwork!);
+    const publicGithubRead =
+      pluginRuntime?.runtime.kind === "codex" && !embedded
+        ? pluginRuntime.runtime.publicGithubRead
+        : undefined;
     const initContainers = privateHome
-      ? [this.privateStateInitContainer(role, image, embedded, writableConfiguration)]
+      ? [
+          this.privateStateInitContainer(
+            role,
+            image,
+            embedded,
+            writableConfiguration,
+            publicGithubRead?.skillPath,
+          ),
+        ]
       : [];
     if (configuration !== undefined) {
       volumes.push({
@@ -13912,6 +14416,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
           name: pluginRuntime.name,
           items: [
             { key: PLUGIN_RUNTIME_MANIFEST, path: PLUGIN_RUNTIME_MANIFEST },
+            ...(publicGithubRead === undefined
+              ? []
+              : [{ key: PUBLIC_GITHUB_READ_SKILL, path: PUBLIC_GITHUB_READ_SKILL }]),
             ...(pluginRuntime.runtime.kind === "codex" && role === "agent"
               ? [{ key: PLUGIN_RUNTIME_CODEX_CONFIG, path: PLUGIN_RUNTIME_CODEX_CONFIG }]
               : []),
@@ -13924,6 +14431,16 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         mountPath: PLUGIN_RUNTIME_DIRECTORY,
         readOnly: true,
       });
+      if (publicGithubRead !== undefined) {
+        // The Gateway discovers its managed skill; the Harness needs the same
+        // read-only file for native Codex. Neither uses the durable workspace.
+        volumeMounts.push({
+          name: PLUGIN_RUNTIME_VOLUME,
+          mountPath: publicGithubRead.skillPath,
+          subPath: PUBLIC_GITHUB_READ_SKILL,
+          readOnly: true,
+        });
+      }
       variables.push({
         name: PLUGIN_RUNTIME_MANIFEST_ENVIRONMENT,
         value: `${PLUGIN_RUNTIME_DIRECTORY}/${PLUGIN_RUNTIME_MANIFEST}`,
