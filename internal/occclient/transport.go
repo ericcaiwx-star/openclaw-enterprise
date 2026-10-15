@@ -270,7 +270,7 @@ func (client *Client) apiError(status int, header http.Header, body []byte) erro
 		result.RetryAfter = time.Duration(seconds) * time.Second
 	} else if until, err := http.ParseTime(header.Get("retry-after")); err == nil {
 		if remaining := time.Until(until); remaining > 0 && remaining <= time.Hour {
-			result.RetryAfter = remaining
+			result.RetryAfter = (remaining + time.Second - 1).Truncate(time.Second)
 		}
 	}
 	if status >= http.StatusMultipleChoices && status < http.StatusBadRequest {

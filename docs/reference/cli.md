@@ -190,7 +190,8 @@ Failures go to stderr and the CLI exits nonzero. For HTTP errors, the CLI prints
 the status and, when present, the API error code and message, and the
 `Retry-After` delay, rounded up to seconds. The client accepts delay-seconds
 and HTTP-date ([HTTP semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3))
-within its existing positive, one-hour bound; expired or invalid dates retain
+within its existing positive, one-hour bound. Accepted date delays round up to
+whole seconds for retry notices and waits; expired or invalid dates retain
 the normal follow interval. It does not print
 the server's request ID. To capture that ID for a failed request, use the
 [HTTP API directly](../guides/http-api.md#troubleshoot).

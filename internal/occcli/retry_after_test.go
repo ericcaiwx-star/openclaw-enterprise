@@ -3,7 +3,6 @@ package occcli
 import (
 	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -84,6 +83,7 @@ func TestAgentLogFollowHonorsRetryAfterDateForms(t *testing.T) {
 			}
 			stub := &runtimeLogStub{t: t, pages: []func(http.ResponseWriter, url.Values){retry, logPage("", logLine(1, "info", "ready after retry"))}}
 			var output strings.Builder
+			var notices strings.Builder
 			sink := logOutputFunc(func(b []byte) (int, error) {
 				n, err := output.Write(b)
 				if strings.Contains(output.String(), "ready after retry") {
@@ -91,7 +91,7 @@ func TestAgentLogFollowHonorsRetryAfterDateForms(t *testing.T) {
 				}
 				return n, err
 			})
-			if err := runLogsCommandTo(t, ctx, stub, sink, io.Discard, "agent", "logs", "agt_1", "--revision", "rev_1", "--source", "gateway", "--follow"); err != nil {
+			if err := runLogsCommandTo(t, ctx, stub, sink, &notices, "agent", "logs", "agt_1", "--revision", "rev_1", "--source", "gateway", "--follow"); err != nil {
 				t.Fatal(err)
 			}
 			if len(*sleeps) != 1 {
@@ -110,6 +110,12 @@ func TestAgentLogFollowHonorsRetryAfterDateForms(t *testing.T) {
 			default:
 				if delay < 20*time.Second || delay > 30*time.Second {
 					t.Fatalf("date wait=%v; should wait until server date", delay)
+				}
+				if delay%time.Second != 0 {
+					t.Fatalf("date wait=%v; want whole seconds", delay)
+				}
+				if got := notices.String(); strings.Contains(got, ".") || !strings.Contains(got, "retrying in "+delay.String()) {
+					t.Fatalf("notice=%q; want whole-second retry delay", got)
 				}
 			}
 		})

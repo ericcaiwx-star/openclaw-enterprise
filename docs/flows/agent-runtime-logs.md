@@ -204,9 +204,9 @@ The CLI rejects zero/sub-second `--since` before client/revision setup; omission
 keeps unfiltered reads. `runAgentLogs --follow` polls cursors every two seconds
 and exits cleanly on cancellation; cancellation without follow is an error.
 `internal/occclient/transport.go:apiError` accepts `Retry-After` seconds or HTTP
-dates. Positive delays up to one hour postpone a `429` follow retry; invalid,
-expired or unsupported delays retain the normal interval. Error messages round
-remaining fractional seconds up. This response-consumption step neither retries
+dates. Positive delays up to one hour postpone a `429` follow retry, with date
+delays rounded up to seconds. Invalid, expired or unsupported delays retain the
+normal interval. Error messages round fractional seconds up. This response-consumption step neither retries
 other failure classes nor changes server admission. Driver failures use fixed
 `RUNTIME_LOGS_*` codes; requests have a ten-second deadline.
 
