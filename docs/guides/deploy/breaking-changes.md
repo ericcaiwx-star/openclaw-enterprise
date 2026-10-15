@@ -163,22 +163,19 @@ decimal octets`.
 
 ## 2026-10-14: gateway hostnames must not be rewritten IPv4
 
-**What breaks.** Helm and Compute refuse a `gatewayRouting.hostname`, a harness
-`routing.hostname`, and `gatewayRouting.sandbox.domain` that is shorthand, a
-single integer, hexadecimal, or leading-zero IPv4, and a name the URL
-parser rejects, including a decimal or `0x` last label. Four decimal octets stay.
-A hex label that is not last stays.
+**What breaks.** Helm and Compute refuse rewritten IPv4 or URL-parser-invalid
+hostnames in `gatewayRouting.hostname`, harness `routing.hostname`, and
+`gatewayRouting.sandbox.domain`. This includes shorthand, integer, hexadecimal,
+and leading-zero IPv4, and decimal or `0x` last labels. Canonical dotted-decimal
+IPv4 and nonfinal hex labels remain accepted.
 
-**Who is affected.** Helm values or Installation YAML that use one of those
-spellings.
+**Who is affected.** Helm values or Installation YAML using those spellings.
 
-**How to tell.** Helm and Compute report that the hostname must be a DNS
-hostname without a port or path. For a numeric or `0x` last label, the message
-explains that URL parsing treats it as IPv4. Use a DNS name, or four decimal
-octets from 0 to 255 without leading zeros.
+**How to tell.** Helm and Compute report the invalid hostname field. Numeric or
+`0x` last labels get an IPv4 parsing hint with DNS-name and canonical IPv4 alternatives.
 
 **Steps.** Correct Helm values and Installation YAML to use a DNS name, or four
-decimal octets, then upgrade.
+decimal octets from 0 to 255 without leading zeros, then upgrade.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
