@@ -1,7 +1,7 @@
 ---
 created: 2026-09-07
-updated: 2026-10-14
-last_updated_session: authoring-run/a404e7a3-9acf-4b50-9307-31e50b1b3582
+updated: 2026-10-15
+last_updated_session: authoring-run/3514d5b8-3645-4154-815a-9abe487cd1de
 ---
 
 <a id="pr-24-ssh-compute-flow"></a>
@@ -128,7 +128,8 @@ record leaves the group unrecorded. Preparation then refuses it. Deletion
 removes the claim only, and the operator runs `groupdel` on the runtime account
 name before retrying. The helper does not adopt that group. A killed `useradd` can leave that
 user in place. The next preparation accepts it only when the local user's gid
-is the recorded gid, then stores the uid. If `useradd` creates the account and
+is the recorded gid and the group came from an earlier attempt, then stores
+the uid. An already-existing user is refused when this attempt created the group. If `useradd` creates the account and
 then fails before it returns, the claim stays so that resume can finish. Namespace
 deletion still clears the claim when the recorded group is already gone. A different ServicePrincipal does not
 match the claim and is refused before account commands. An account with no
@@ -233,6 +234,8 @@ retire, which frees its gateway port.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 10:22: Distinguish groups created by the current attempt before accepting an existing user. (authoring-run/3514d5b8-3645-4154-815a-9abe487cd1de - 264692a5f462c76798d6629400eea139410bed4a)
 
 - 2026-10-15: Document the kill window after `groupadd` and before the gid is recorded. The operator runs `groupdel` on the runtime account name and retries; the leftover group is not adopted.
 

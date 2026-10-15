@@ -446,7 +446,7 @@ async function ensureRuntimeIdentity(input) {
     if (owner.gid !== marker.gid) {
       throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
     }
-    if (createdUser === "exists" && marker.groupCreated !== true) {
+    if (createdUser === "exists" && groupCreatedThisRun) {
       throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
     }
     atomicWrite(markerPath, JSON.stringify({ ...expected, uid: owner.uid, gid: owner.gid }));

@@ -1326,61 +1326,83 @@ test("SSH resume keeps a pending claim when account lookups fail", async (t) => 
   assert.equal(resumed.uid, process.getuid());
 });
 
-test("SSH does not claim a foreign account when the first lookup fails", async (t) => {
+test("SSH refuses an existing user even when its primary gid matches a newly created group", async (t) => {
   const f = await fixture(t);
-  const rev = revision(f.driver, 1, "agent-ssh-lookup-foreign");
+  const rev = revision(f.driver, 1, "agent-ssh-user-before-group");
   const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
   assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
   bind(f.driver, rev);
-  await Promise.all([
-    mkdir(join(f.state, "accounts", "users"), { recursive: true }),
-    mkdir(join(f.state, "accounts", "groups"), { recursive: true }),
-  ]);
-  await Promise.all([
-    writeFile(
-      join(f.state, "accounts", "users", account),
-      `${process.getuid()}\n${process.getgid()}\n`,
-    ),
-    writeFile(join(f.state, "accounts", "groups", account), `${process.getgid()}\n`),
-    writeFile(join(f.state, "id.fail"), "once"),
-    writeFile(join(f.state, "getent.fail"), "once"),
-  ]);
+  const users = join(f.state, "accounts", "users");
+  await mkdir(users, { recursive: true });
+  const foreign = `${process.getuid()}\n${process.getgid()}\n`;
+  await writeFile(join(users, account), foreign);
+  // A group name can be absent while an existing user's numeric primary gid
+  // matches the gid subsequently assigned to the new group.
   await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
-  await missing(join(f.root, "accounts", `${account}.json`));
-  assert.equal((await stat(join(f.state, "accounts", "users", account))).isFile(), true);
-  await rm(join(f.state, "id.fail"), { force: true });
-  await rm(join(f.state, "getent.fail"), { force: true });
-  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
-  await missing(join(f.root, "accounts", `${account}.json`));
+  assert.equal(await readFile(join(users, account), "utf8"), foreign);
+  assert.equal((await json(join(f.root, "accounts", `${account}.json`))).pending, true);
+  assert.equal(
+    await readFile(join(f.state, "accounts", "groups", account), "utf8"),
+    `${process.getgid()}\n`,
+  );
 });
 
-test("SSH does not adopt an account when native absence codes recover", async (t) => {
+test("SSH resume refuses a pending account with a different primary gid", async (t) => {
   const f = await fixture(t);
-  const rev = revision(f.driver, 1, "agent-ssh-absence-recover");
+  const rev = revision(f.driver, 1, "agent-ssh-resume-gid");
   const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
   assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
   bind(f.driver, rev);
-  await Promise.all([
-    mkdir(join(f.state, "accounts", "users"), { recursive: true }),
-    mkdir(join(f.state, "accounts", "groups"), { recursive: true }),
-  ]);
-  await Promise.all([
-    writeFile(
-      join(f.state, "accounts", "users", account),
-      `${process.getuid()}\n${process.getgid()}\n`,
-    ),
-    writeFile(join(f.state, "accounts", "groups", account), `${process.getgid()}\n`),
-    writeFile(join(f.state, "id.absent"), "once"),
-    writeFile(join(f.state, "getent.absent"), "once"),
-  ]);
+  await writeFile(join(f.state, "useradd.fail-after"), "once");
+  await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+  const markerPath = join(f.root, "accounts", `${account}.json`);
+  const marker = await readFile(markerPath, "utf8");
+  const userPath = join(f.state, "accounts", "users", account);
+  const changedUser = `${process.getuid()}\n${process.getgid() + 1}\n`;
+  await writeFile(userPath, changedUser);
   await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
-  await missing(join(f.root, "accounts", `${account}.json`));
-  assert.equal((await stat(join(f.state, "accounts", "users", account))).isFile(), true);
-  await rm(join(f.state, "id.absent"), { force: true });
-  await rm(join(f.state, "getent.absent"), { force: true });
-  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
-  await missing(join(f.root, "accounts", `${account}.json`));
+  assert.equal(await readFile(markerPath, "utf8"), marker);
+  assert.equal(await readFile(userPath, "utf8"), changedUser);
 });
+
+for (const fault of ["user gid", "group gid", "lookup failure"]) {
+  test(`SSH pending deletion preserves its claim on ${fault}`, async (t) => {
+    const f = await fixture(t);
+    const rev = revision(f.driver, 1, `agent-ssh-delete-${fault.replaceAll(" ", "-")}`);
+    const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+    assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+    bind(f.driver, rev);
+    await writeFile(join(f.state, "useradd.fail-after"), "once");
+    await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+    const markerPath = join(f.root, "accounts", `${account}.json`);
+    const userPath = join(f.state, "accounts", "users", account);
+    const groupPath = join(f.state, "accounts", "groups", account);
+    if (fault === "user gid") {
+      await writeFile(userPath, `${process.getuid()}\n${process.getgid() + 1}\n`);
+    } else if (fault === "group gid") {
+      // Isolate the group guard after the user has already been removed.
+      await rm(userPath);
+      await writeFile(groupPath, `${process.getgid() + 1}\n`);
+    } else {
+      // A lookup error must not be accepted as an absent user on a cleanup retry.
+      await rm(userPath);
+      await writeFile(join(f.state, "getent.fail"), "once");
+    }
+    const marker = await readFile(markerPath, "utf8");
+    const group = await readFile(groupPath, "utf8");
+    const user = fault === "user gid" ? await readFile(userPath, "utf8") : undefined;
+    assert.deepEqual(await f.driver.deleteNamespace(tenant), {
+      namespaceId: tenant.id,
+      namespaceDeleted: false,
+      failure: fault === "lookup failure" ? "retryable" : "permanent",
+    });
+    assert.equal(await readFile(markerPath, "utf8"), marker);
+    assert.equal(await readFile(groupPath, "utf8"), group);
+    if (user !== undefined) {
+      assert.equal(await readFile(userPath, "utf8"), user);
+    }
+  });
+}
 
 test("SSH keeps a pending claim when useradd leaves the account and then fails", async (t) => {
   const f = await fixture(t);
