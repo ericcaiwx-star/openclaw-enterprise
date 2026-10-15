@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
-updated: 2026-10-13
-last_updated_session: authoring-run/adccd418-cf61-4fbb-b3ba-0fcad194d907
+updated: 2026-10-15
+last_updated_session: authoring-run/7163351c-af75-410f-bd45-a2809e178c9e
 ---
 
 # Agent runtime logs flow
@@ -34,7 +34,12 @@ bounded records. Downloads stay local.
 
 ```mermaid
 graph TD
-  A["GET runtime or runtime/logs"] --> B["Feature switch"]
+  V["CLI default revision probe"] --> W{"Pods or concrete Harness status?"}
+  W -->|yes| X["Select latest readable revision"]
+  W -->|no or refused| Y["Retain active revision"]
+  X --> A["GET runtime or runtime/logs"]
+  Y --> A
+  A --> B["Feature switch"]
   B -->|off| C["Return 501"]
   B -->|on| E["OCC authorizes revision and Agent tier"]
   E -->|denied| F["Audit denial, return 403"]
@@ -60,15 +65,20 @@ graph TD
 
 ### 1. Admit and authorize
 
+`internal/occcli/agent_runtime.go:agentRevision` honors `--revision`; otherwise
+`newerRevisionWithRuntime` selects a newer Pod or `running`/`starting`/`lost`
+Harness. Unknown/missing status without Pods retains active, as does a refused
+probe (stderr names the workaround). Status responses are reused; logs remain
+independently authorized.
+
 `packages/contracts/src/api/routes.ts:occApiRoutes` declares both GET routes with
 a closed query schema. `apps/controller/src/index.ts:perform` answers `501` when
 `agentRuntimeLogs` is disabled. `OpenClawController.runtimeLogTarget` authorizes
 the tier action and Agent `read` (plus revision `read` for status only), resolves
 the revision within the exact Agent, then rejects a Driver without
 `describeAgentRuntime` or with `runtimeLogging: "driver"`. Only then does
-`admitRead` apply the replica-local
-`apps/controller/src/http/runtime-logs.ts:RuntimeLogLimiter` to Driver reads, so
-a denial is always audited and spends no token.
+`apps/controller/src/http/runtime-logs.ts:RuntimeLogLimiter` admit reads;
+audited denials spend no token.
 
 ### 2. Describe the runtime
 
@@ -189,27 +199,21 @@ names its audit event, and any denial, `openclaw.agents.runtime_logs.download`.
 
 ### 4. Return
 
-`apps/controller/src/http/runtime-logs.ts:runtimeLogPageBody` accepts only
-sanitized records and fails on the reserved `content` class.
-`runtimeLogDownloadBody` serializes the same branded records as text lines with
-the same check, and `runtimeLogDownloadFileName` names the attachment
-`<agent>-<revision>-<source>-<pod>.log`. A `minLevel` query
-(`runtime-logs/read.ts:runtimeLogPageAtLevel`) removes sanitized lines below that
-level after the cursor is signed, so polls resume after hidden lines; unknown-level
-lines, gaps and withheld counts stay. The console asks for `minLevel=info` unless
-**Include debug** is selected; its level chips and text filter
-(`apps/controller/src/console/agents/logs.mjs`) run only over loaded rows. The
-console caches a `403` per operator page session, so reopening adds no audited
-denial. Its status
-names log-text grants. Pod cards show every actual container's state and exit;
-the Pod/container picker selects its exact stream. Gateway views point to the Harness source while no Harness
-Pod is ready, or Deployment activity while none exists. The CLI rejects explicit
-zero or positive sub-second `--since` before revision selection or API client
-setup; omission keeps the unfiltered default. Its `--follow` loop re-sends the
-cursor every 2 seconds.
-`runAgentLogs` ends a follow cleanly on cancellation; without `--follow`, it is an
-error. Driver errors map to
-fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
+`apps/controller/src/http/runtime-logs.ts:runtimeLogPageBody` rejects reserved
+`content` records. `runtimeLogDownloadBody` checks the same branded records;
+`runtimeLogDownloadFileName` names `<agent>-<revision>-<source>-<pod>.log`.
+`runtime-logs/read.ts:runtimeLogPageAtLevel` filters sanitized lines after cursor
+signing: polls pass hidden lines; unknown-level lines, gaps and withheld counts stay.
+The console defaults to `minLevel=info` unless **Include debug** is selected.
+Its level/text filters (`apps/controller/src/console/agents/logs.mjs`) use loaded
+rows. Cached `403` responses avoid repeated audited denials; status names log-text
+grants. Pod cards report each container's state/exit; the picker selects its
+stream. Gateway views link Harness output before readiness, or Deployment activity
+when no Harness Pod exists.
+The CLI rejects zero/sub-second `--since` before client/revision setup; omission
+keeps unfiltered reads. `runAgentLogs --follow` polls cursors every two seconds
+and exits cleanly on cancellation; cancellation without follow is an error.
+Driver failures use fixed `RUNTIME_LOGS_*` codes; requests have a ten-second deadline.
 
 ## Debugging and Verification
 
@@ -235,6 +239,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 09:08: Select newer provider Harness status before revision Pods exist. (authoring-run/7163351c-af75-410f-bd45-a2809e178c9e - 422cb3fe407204d4add49ea8494f0fd0ce49be52)
 
 - 2026-10-13: Key cursor hashes; `v1` cursors expire. (#2274)
 

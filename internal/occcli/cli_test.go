@@ -165,6 +165,8 @@ type runtimeLogStub struct {
 	paths     []string
 	// podless lists revisions whose runtime description has no Pods.
 	podless []string
+	// harness is the provider status returned for a podless newer revision.
+	harness map[string]any
 	// forbidden lists revisions whose runtime description is refused with 403.
 	forbidden []string
 }
@@ -200,7 +202,16 @@ func (stub *runtimeLogStub) serve(response http.ResponseWriter, request *http.Re
 	case strings.HasSuffix(request.URL.Path, "/runtime") && slices.ContainsFunc(stub.podless, func(id string) bool {
 		return strings.HasSuffix(request.URL.Path, "/deployments/"+id+"/runtime")
 	}):
-		fmt.Fprint(response, `{"data":{"revisionId":"rev_x","observedAt":"2026-09-30T12:00:00.000Z","pods":[],"sources":[]},"meta":{}}`)
+		segments := strings.Split(request.URL.Path, "/")
+		data := map[string]any{"revisionId": segments[len(segments)-2], "observedAt": "2026-09-30T12:00:00.000Z", "pods": []any{}, "sources": []any{}}
+		if stub.harness != nil {
+			data["harness"] = stub.harness
+		}
+		payload, err := json.Marshal(map[string]any{"data": data, "meta": map[string]any{}})
+		if err != nil {
+			stub.t.Fatal(err)
+		}
+		_, _ = response.Write(payload)
 	case strings.HasSuffix(request.URL.Path, "/runtime"):
 		fmt.Fprint(response, `{"data":{"revisionId":"rev_1","observedAt":"2026-09-30T12:00:00.000Z","pods":[{"role":"gateway","cluster":"control","name":"gw-0","uid":"u","phase":"Running","ready":true,"createdAt":null,"containers":[{"name":"gateway","state":"running","reason":null,"ready":true,"restartCount":2,"startedAt":null,"lastTermination":{"reason":"OOMKilled","exitCode":137,"finishedAt":null}}],"events":[{"type":"Warning","container":"gateway","reason":"Unhealthy","message":"Readiness probe failed","count":146,"lastObservedAt":"2026-09-30T11:59:00.000Z"},{"type":"Normal","container":"prepare-private-state","reason":"Started","message":"Container started","count":1,"lastObservedAt":"2026-09-30T11:00:00.000Z"},{"type":"Normal","container":null,"reason":"Scheduled","message":"Successfully assigned","count":1,"lastObservedAt":null}]}],"sources":[{"id":"gateway","kind":"container","pods":[],"available":true,"retention":"current and previous instance"}]},"meta":{}}`)
 	default:
@@ -498,6 +509,42 @@ func TestAgentLogsDefaultToANewerRevisionWithPodsAndNameTheRevision(t *testing.T
 	}
 	if want := []string{"/namespaces/ns_1/agents/agt_1/deployments/rev_1/runtime/logs"}; !slices.Equal(stub.paths, want) {
 		t.Fatalf("requests = %v, want %v", stub.paths, want)
+	}
+}
+
+func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
+	for _, state := range []string{"running", "starting", "lost", "unknown"} {
+		for _, action := range []string{"runtime", "logs"} {
+			t.Run(state+"/"+action, func(t *testing.T) {
+				stub := &runtimeLogStub{t: t, activeID: "rev_1", revisions: `[{"id":"rev_2","revision":2},{"id":"rev_1","revision":1}]`, podless: []string{"rev_2"}, harness: map[string]any{"state": state, "code": "HARNESS_EXITED"}, pages: []func(http.ResponseWriter, url.Values){logPage("", logLine(1, "error", "new Harness failed"))}}
+				args := []string{"agent", action, "agt_1"}
+				if action == "logs" {
+					args = append(args, "--source", "sandbox")
+				}
+				out, notices, err := runLogsCommand(t, context.Background(), stub, args...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected := "rev_2"
+				if state == "unknown" {
+					expected = "rev_1"
+				}
+				suffix := "/runtime"
+				if action == "logs" {
+					suffix += "/logs"
+				}
+				path := "/namespaces/ns_1/agents/agt_1/deployments/" + expected + suffix
+				if stub.paths[len(stub.paths)-1] != path {
+					t.Fatalf("requests=%v; want final %s", stub.paths, path)
+				}
+				if !strings.Contains(notices, "revision "+expected) {
+					t.Fatalf("notice=%q", notices)
+				}
+				if action == "runtime" && state != "unknown" && !strings.Contains(out, "Harness Sandbox: "+state) {
+					t.Fatalf("output=%q", out)
+				}
+			})
+		}
 	}
 }
 
