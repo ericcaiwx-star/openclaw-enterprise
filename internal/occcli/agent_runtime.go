@@ -106,7 +106,7 @@ type newerRevision struct {
 // and checks for Pods or running, starting or lost provider Harness status. A failure to
 // list revisions keeps the active revision silently.
 func newerRevisionWithRuntime(client *occclient.Client, namespace, agentID, active string) newerRevision {
-	latest, err := latestRevisionID(client, namespace, agentID)
+	latest, number, err := latestReadableRevision(client, namespace, agentID)
 	if err != nil || latest == active {
 		return newerRevision{}
 	}
@@ -118,8 +118,21 @@ func newerRevisionWithRuntime(client *occclient.Client, namespace, agentID, acti
 	pods, _ := resource["pods"].([]any)
 	harness, _ := resource["harness"].(map[string]any)
 	state, _ := harness["state"].(string)
+	hasRuntime := len(pods) > 0
+	if !hasRuntime && slices.Contains([]string{"running", "starting", "lost"}, state) {
+		// Revision lists are permission-filtered: a different ID can be older.
+		// Preserve Pod selection, but only redirect for Podless Harness status
+		// when the active revision's exact metadata proves the candidate newer.
+		activeRevision, err := client.GetAgentRevision(namespace, agentID, active)
+		resource, _ := activeRevision.(map[string]any)
+		activeID, _ := resource["id"].(string)
+		activeNumber, ok := resource["revision"].(float64)
+		hasRuntime = err == nil && activeID == active && ok && activeNumber > 0 &&
+			math.Trunc(activeNumber) == activeNumber && math.Trunc(number) == number &&
+			number <= 1<<53-1 && number > activeNumber
+	}
 	return newerRevision{
-		latest: latest, hasRuntime: len(pods) > 0 || slices.Contains([]string{"running", "starting", "lost"}, state),
+		latest: latest, hasRuntime: hasRuntime,
 		description: description,
 	}
 }

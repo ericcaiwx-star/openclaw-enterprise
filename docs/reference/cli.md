@@ -137,7 +137,9 @@ claimed.
 both read the latest revision when it differs from the active one and has Pods
 or concrete provider Harness status (`running`, `starting`, or `lost`), including
 a failed replacement with no revision Pods yet. An `unknown` Harness status
-alone is not runtime evidence. Otherwise they read the active revision, else
+alone is not runtime evidence. Podless Harness selection also requires a higher
+revision number than the exact active revision; unreadable or invalid active
+metadata retains the active revision. Otherwise they read the active revision, else
 the latest revision. They print the revision they
 read to stderr; a reader without Agent `operate` cannot probe runtime status, so the
 notice names the newer revision to pass. `runtime` accepts `-o table|json|yaml`
