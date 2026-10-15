@@ -657,7 +657,12 @@ test("worker stop-yield counts survive local JSON logging on pending and complet
     ],
   );
 
-  for (const stopYields of [NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+  for (const stopYields of [0, 1, 3, Number.MAX_SAFE_INTEGER]) {
+    emit({ event: "worker.completed", stopYields });
+    assert.equal(output.lines.at(-1).stopYields, stopYields);
+    assert.equal(typeof output.lines.at(-1).stopYields, "number");
+  }
+  for (const stopYields of [-1, "3", true, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     emit({ event: "worker.completed", stopYields });
     assert.equal(Object.hasOwn(output.lines.at(-1), "stopYields"), false);
   }
