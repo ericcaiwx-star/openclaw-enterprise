@@ -123,7 +123,10 @@ not proof the name is free, because a name service can return those statuses
 while the account exists. `groupadd` must create the group. If the name is
 already in use, the fresh claim is removed and that account is not adopted.
 After `groupadd` succeeds, the claim records that this helper created the group
-and the gid from the local files database. A killed `useradd` can leave that
+and the gid from the local files database. A kill in the gap before that
+record leaves the group unrecorded. Preparation then refuses it. Deletion
+removes the claim only, and the operator runs `groupdel` on the runtime account
+name before retrying. The helper does not adopt that group. A killed `useradd` can leave that
 user in place. The next preparation accepts it only when the local user's gid
 is the recorded gid, then stores the uid. If `useradd` creates the account and
 then fails before it returns, the claim stays so that resume can finish. Namespace
@@ -230,6 +233,8 @@ retire, which frees its gateway port.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15: Document the kill window after `groupadd` and before the gid is recorded. The operator runs `groupdel` on the runtime account name and retries; the leftover group is not adopted.
 
 - 2026-10-15: A pending claim records a group this helper created. `id` and merged `getent` not-found statuses do not prove a name is free, and an existing group is not adopted.
 

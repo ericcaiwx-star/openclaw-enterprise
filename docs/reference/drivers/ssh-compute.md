@@ -130,7 +130,13 @@ with a non-login shell and records their exact ownership and UID/GID under
 merged `getent` not-found statuses are not proof the name is free. The claim
 then records the local gid of the group this helper created. An interrupted
 `useradd` is resumed only when the local user's gid is that gid. The marker
-then stores the uid and gid. Namespace deletion removes a pending claim and the
+then stores the uid and gid. If the helper is killed after `groupadd` returns
+and before that gid is recorded, the group exists and the claim does not record
+`groupCreated`. The next preparation refuses the group and does not adopt it.
+Deleting the Namespace or Agent removes the claim and leaves the group. The
+operator then runs `groupdel` on that runtime account name and retries
+preparation. The helper creates a new group; it does not reuse the leftover
+one. Namespace deletion removes a pending claim and the
 account that claim records creating. An account that exists without this marker
 is refused and is not adopted. Accounts persist across revision retirement and
 are removed with the Namespace.
