@@ -84,6 +84,7 @@ const ALLOWED_FIELDS = new Set([
   "skippedUserIdsTruncated",
   "status",
   "step",
+  "stopYields",
   "workId",
 ]);
 
