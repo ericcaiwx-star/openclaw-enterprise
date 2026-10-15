@@ -1340,7 +1340,16 @@ test("SSH refuses an existing user even when its primary gid matches a newly cre
   // matches the gid subsequently assigned to the new group.
   await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
   assert.equal(await readFile(join(users, account), "utf8"), foreign);
-  assert.equal((await json(join(f.root, "accounts", `${account}.json`))).pending, true);
+  await missing(join(f.root, "accounts", `${account}.json`));
+  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
+  await missing(join(f.root, "accounts", `${account}.json`));
+  await f.driver.deleteAgentRuntimeCredentials({
+    namespace: tenant,
+    agent: { id: rev.agentId, namespaceId: tenant.id, servicePrincipalId: rev.servicePrincipalId },
+  });
+  assert.equal(await readFile(join(users, account), "utf8"), foreign);
+  assert.equal((await f.driver.deleteNamespace(tenant)).namespaceDeleted, true);
+  assert.equal(await readFile(join(users, account), "utf8"), foreign);
   assert.equal(
     await readFile(join(f.state, "accounts", "groups", account), "utf8"),
     `${process.getgid()}\n`,

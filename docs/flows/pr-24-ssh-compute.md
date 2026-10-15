@@ -129,7 +129,8 @@ removes the claim only, and the operator runs `groupdel` on the runtime account
 name before retrying. The helper does not adopt that group. A killed `useradd` can leave that
 user in place. The next preparation accepts it only when the local user's gid
 is the recorded gid and the group came from an earlier attempt, then stores
-the uid. An already-existing user is refused when this attempt created the group. If `useradd` creates the account and
+the uid. An already-existing user is refused when this attempt created the group,
+and its claim is removed so retry and deletion cannot treat that user as owned. If `useradd` creates the account and
 then fails before it returns, the claim stays so that resume can finish. Namespace
 deletion still clears the claim when the recorded group is already gone. A different ServicePrincipal does not
 match the claim and is refused before account commands. An account with no

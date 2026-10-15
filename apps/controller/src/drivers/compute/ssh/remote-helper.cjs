@@ -447,6 +447,9 @@ async function ensureRuntimeIdentity(input) {
       throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
     }
     if (createdUser === "exists" && groupCreatedThisRun) {
+      // This user predates our creation attempt. A retained claim must not
+      // authorize its adoption or deletion after group rollback fails.
+      fs.rmSync(markerPath, { force: true });
       throw new OwnershipFailure("Refusing to adopt an unowned runtime account.");
     }
     atomicWrite(markerPath, JSON.stringify({ ...expected, uid: owner.uid, gid: owner.gid }));
