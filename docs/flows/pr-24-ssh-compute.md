@@ -126,8 +126,9 @@ Before creating a group, the helper refuses any user already in the local files 
 After `groupadd` succeeds, the claim records that this helper created the group
 and the gid from the local files database. A kill in the gap before that
 record leaves the group unrecorded. Preparation then refuses it. Deletion
-removes the claim only, and the operator runs `groupdel` on the runtime account
-name before retrying. The helper does not adopt that group. A killed `useradd` can leave that
+removes only the claim. The name is not proof of ownership: verify the group's
+origin and that removal is safe with the host owner before releasing the name
+and retrying. The helper never adopts that unrecorded group. A killed `useradd` can leave the
 user in place. The next preparation accepts it only when the local user's gid
 is the recorded gid and the group came from an earlier attempt, then stores
 the uid. An already-existing user is refused when this attempt created the group,

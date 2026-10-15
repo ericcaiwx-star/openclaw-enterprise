@@ -134,9 +134,11 @@ then stores the uid and gid. If the helper is killed after `groupadd` returns
 and before that gid is recorded, the group exists and the claim does not record
 `groupCreated`. The next preparation refuses the group and does not adopt it.
 Deleting the Namespace or Agent removes the claim and leaves the group. The
-operator then runs `groupdel` on that runtime account name and retries
-preparation. The helper creates a new group; it does not reuse the leftover
-one. Namespace deletion removes a pending claim and the
+operator must use independent host evidence to establish that this preparation
+created the group and that removing it is safe. If either is uncertain, leave
+the group in place and reconcile with the host owner. Once the name is safely
+released, retry preparation; the helper creates a new group rather than adopting
+the leftover one. Namespace deletion removes a pending claim and the
 account that claim records creating. An account that exists without this marker
 is refused and is not adopted. Accounts persist across revision retirement and
 are removed with the Namespace.
