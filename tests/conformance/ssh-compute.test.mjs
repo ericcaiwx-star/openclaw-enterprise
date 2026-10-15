@@ -1353,6 +1353,22 @@ test("SSH refuses an existing user even when its primary gid matches a newly cre
   await missing(join(f.state, "accounts", "groups", account));
 });
 
+test("SSH refuses a user the local files database did not show", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-user-hidden-from-files");
+  const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+  assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+  bind(f.driver, rev);
+  const users = join(f.state, "accounts", "users");
+  await mkdir(users, { recursive: true });
+  const foreign = `${process.getuid()}\n${process.getgid()}\n`;
+  await writeFile(join(users, account), foreign);
+  await writeFile(join(f.state, "getent.absent"), "once");
+  await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
+  assert.equal(await readFile(join(users, account), "utf8"), foreign);
+  await missing(join(f.root, "accounts", `${account}.json`));
+});
+
 test("SSH resume refuses a pending account with a different primary gid", async (t) => {
   const f = await fixture(t);
   const rev = revision(f.driver, 1, "agent-ssh-resume-gid");
