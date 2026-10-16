@@ -22,6 +22,7 @@ export const PluginsSelectedSecretDenied = story("createPluginsSelectedSecretDen
 export const PluginsTools = story("createPluginsTools");
 export const PluginsPolicies = story("createPluginsPolicies");
 export const PluginApproversMissingSecret = story("createPluginApproversMissingSecret");
+export const PluginApproversLookup = story("createPluginApproversLookup");
 export const PluginsSetupReminder = story("createPluginsSetupReminder");
 export const PluginsSecondPage = story("createPluginsSecondPage");
 export const PluginsEmpty = story("createPluginsEmpty");
@@ -55,6 +56,8 @@ export const CreateProvisioningSecrets = {
 };
 export const CreateDeploymentPending = story("createDeploymentPending");
 export const CreateDeploymentFailed = story("createDeploymentFailed");
+export const CreateDeploymentStopped = story("createDeploymentStopped");
+export const CreateProvisioningStopped = story("createProvisioningStopped");
 export const CreateUnsupportedProvisioning = {
   ...story("createUnsupportedProvisioning"),
   name: "Unsupported provisioning",
@@ -64,6 +67,8 @@ export const CreatePresetWorkspaceFiles = {
   name: "Preset workspace files",
 };
 export const CreateWorkspaceFiles = { ...story("createWorkspaceFiles"), name: "Workspace files" };
+export const CreatePresetMultiline = story("createPresetMultiline");
+export const CreatePresetMultilineApplied = story("createPresetMultilineApplied");
 export const CreateDedicatedOpenclaw = story("createDedicatedOpenclaw");
 export const CreateEmbedded = { ...story("createEmbedded"), name: "Embedded OpenClaw" };
 export const CreateDedicatedOpenclawExperimental = {
@@ -76,6 +81,7 @@ export const RepositorySelection = {
 };
 export const RepositoryDetails = story("createRepositoriesDetails");
 export const RepositoryDescriptionsPending = story("createRepositoriesDescriptionsPending");
+export const RepositoryLocaleSearch = story("createRepositoriesLocaleSearch");
 export const RepositoryContributor = {
   ...story("createRepositoriesContributor"),
   name: "Contributor without issue management",
@@ -112,6 +118,18 @@ export const CreatePreset = { ...story("createPreset"), name: "Preset variables"
 export const CreateBoundCredentialPreset = {
   ...story("createBoundCredentialPreset"),
   name: "Preset with saved model credential",
+};
+export const CreatePresetInvalidField = {
+  ...story("createPresetInvalidField"),
+  name: "Preset with an invalid field",
+};
+export const CreateCapabilitiesDenied = {
+  ...story("createCapabilitiesDenied"),
+  name: "Agent creation needs an administrator",
+};
+export const CreateCapabilitiesError = {
+  ...story("createCapabilitiesError"),
+  name: "Capability check failure",
 };
 export const CreateNoPresets = { ...story("createNoPresets"), name: "No Presets" };
 export const CreateWithoutPreset = {
@@ -207,3 +225,8 @@ export const RepositoryNavigationOutage = story("createRepositoryNavigationOutag
 
 export const DefaultPresetLoading = story("createDefaultPresetLoading");
 export const DefaultPresetDenied = story("createDefaultPresetDenied");
+
+export const ExistingFallbackPrimary = {
+  ...story("createModelFallbackSelection"),
+  name: "Choose an existing fallback as primary",
+};

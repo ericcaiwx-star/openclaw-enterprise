@@ -256,8 +256,13 @@ launch; see the
 [compatibility check](../flows/agent-plugin-approvals.md#3-check-the-selected-gateway-before-launch).
 
 The Console resolves display names with the selected same-Namespace bot Secret,
-which stays on the server, and stores IDs. Lookup requires Agent edit and Secret
-`operate` permission; operators can paste user IDs instead. The
+which stays on the server. Selecting a person shows their name and handle immediately;
+the policy stores their workspace-qualified Slack user ID. If the Console cannot resolve
+a saved name, it shows **Name unavailable** and keeps the selection until you remove it.
+During Agent creation, choose a Secret
+beside the approver field; this search-only selection does not bind it to the Agent.
+An existing Slack channel binding supplies the initial selection. Lookup requires
+Agent create or edit and Secret `operate` permission; operators can paste user IDs instead. The
 [Slack Channel Driver](drivers/slack-channel.md) describes workspace display,
 scopes, and pagination.
 
@@ -291,7 +296,10 @@ Codex maps `toolDefaults.reviewer` to the native app-wide reviewer. Native Codex
 has no per-tool reviewer setting, so explicit `tools.<toolId>.reviewer` values
 are rejected rather than applied to the whole app. Unsupported choices fail even if the tool is disabled
 or the value matches an inherited reviewer. Reviewer does not belong in
-`driverPolicy`.
+`driverPolicy`. Agent create, update, provisioning, and deploy answer `400` for an enabled
+`auto` reviewer unless the Agent's Configuration sets
+`plugins.entries.codex.config.appServer.approvalPolicy` to `on-request` or
+`on-failure`.
 
 The dedicated Codex app-server starts with the admitted Harness model. For explicit
 Codex reviewers, startup checks that model against managed requirements along with

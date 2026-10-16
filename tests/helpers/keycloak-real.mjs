@@ -5,12 +5,16 @@ import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { readKeycloakImage } from "../../scripts/ci/keycloak.mjs";
 
 const executeFile = promisify(execFile);
 
-/** Keycloak's own release, pinned by its multi-platform index digest. */
-export const defaultKeycloakImage =
-  "quay.io/keycloak/keycloak:26.4.7@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007";
+/**
+ * Keycloak's own release, pinned by digest in tests/fixtures/keycloak/image.json and shared
+ * with the Keycloak sign-in lane. CI imports it into k3d before the test runs (prepare.mjs
+ * sets OCC_TEST_KEYCLOAK_IMAGE), so the cluster never pulls it.
+ */
+export const defaultKeycloakImage = await readKeycloakImage();
 
 export const keycloakRealm = "oce";
 export const keycloakServiceClient = "occ-tools";
@@ -22,7 +26,11 @@ const keycloakUser = "tools-user";
  * is the only trust anchor for the issuer, so a client that reaches it has been configured to
  * trust a private CA rather than falling back to public roots.
  */
-export async function issueServingCertificate(directory, host) {
+export async function issueServingCertificate(
+  directory,
+  host,
+  { alternateHosts = [], caName = "OCE disposable issuer CA" } = {},
+) {
   const path = (name) => join(directory, name);
   await writeFile(
     path("server.ext"),
@@ -30,7 +38,7 @@ export async function issueServingCertificate(directory, host) {
       "basicConstraints=critical,CA:FALSE",
       "keyUsage=critical,digitalSignature,keyEncipherment",
       "extendedKeyUsage=serverAuth",
-      `subjectAltName=DNS:${host}`,
+      `subjectAltName=${[host, ...alternateHosts].map((name) => `DNS:${name}`).join(",")}`,
       "",
     ].join("\n"),
   );
@@ -47,7 +55,7 @@ export async function issueServingCertificate(directory, host) {
     "-days",
     "2",
     "-subj",
-    "/CN=OCE disposable issuer CA",
+    `/CN=${caName}`,
     "-addext",
     "basicConstraints=critical,CA:TRUE",
     "-addext",

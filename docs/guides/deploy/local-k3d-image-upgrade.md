@@ -168,8 +168,8 @@ images (`publish: true`), not a no-push preparation or a partially failed run.
 Download its `container-publication-<run-id>-<attempt>` receipt and compare
 both entries' `sourceSha`, `destination`, and `digest` with the run input,
 job summary, and successful exact-source CI. If the receipt has expired, stop until you can recover verifiable publication
-evidence. See [container publication](../../../.github/containers.md#prepare-and-publish)
-for the evidence and [partial publication recovery](../../../.github/containers.md#recover-a-partial-publication).
+evidence. See [container publication](../../release/containers.md#prepare-and-publish)
+for the evidence and [partial publication recovery](../../release/containers.md#recover-a-partial-publication).
 Use one verified source SHA and each full `destination@digest`; do not use
 `latest`, a source tag, or a digest copied from an older example.
 
@@ -298,7 +298,8 @@ Installation records, and, for runtime upgrades, `deployments.jsonl` and
 Deployment templates and their successful rollouts. For a runtime change,
 confirm both image slots in the live Installation Secret, each running Agent's
 new active revision, and its ready gateway/Agent Pods on the selected digest.
-For controller-only, confirm existing revisions and gateways remain ready.
+For controller-only, confirm existing revisions and gateways are ready again;
+the new worker can restart their Pods once.
 Inspect the live images, rollouts, initialization Job, and OCC access:
 
 ```bash

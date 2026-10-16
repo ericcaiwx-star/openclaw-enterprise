@@ -3,6 +3,7 @@ import { KubernetesObjectApi, type KubernetesObject, PatchStrategy } from "@kube
 import {
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
+  SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
 } from "@openclaw-enterprise/occ";
 import { setTimeout as delay } from "node:timers/promises";
@@ -18,6 +19,7 @@ import type {
   SandboxDriver,
   SandboxHarnessEndpoint,
   SandboxHarnessContext,
+  SandboxHarnessObservation,
   SandboxHarnessStatus,
   SandboxHarnessStatusContext,
   SandboxLogChunk,
@@ -25,6 +27,7 @@ import type {
   SandboxLogRequest,
   SandboxNamespaceContext,
   SandboxResourceRef,
+  SandboxHarnessLostCode,
 } from "@openclaw-enterprise/contracts";
 import {
   isOpenShellProviderName,
@@ -33,6 +36,7 @@ import {
 } from "../../backends/openshell.ts";
 import {
   openShellSandboxLogReader,
+  openShellSandboxObserver,
   type OpenShellGatewayClient,
   type OpenShellProviderProfile,
   type OpenShellProviderResponse,
@@ -83,7 +87,7 @@ export interface OpenShellSandboxDriverOptions {
     readonly readiness?: {
       readonly serviceName: string;
       readonly podSelector: Readonly<Record<string, string>>;
-      readonly timeoutMs?: number;
+      readonly timeoutMs: number;
       readonly pollIntervalMs?: number;
     };
     readonly operatorWorkspaceResources?: readonly KubernetesNamespacedResource[];
@@ -132,6 +136,31 @@ const GRPC_NOT_FOUND = 5;
 const GRPC_PERMISSION_DENIED = 7;
 const GRPC_UNAUTHENTICATED = 16;
 
+/**
+ * OpenShell's refusal of OCC's own gateway identity during a Namespace step, which the
+ * gateway client passes through as the raw gRPC error: retrying cannot help until an
+ * operator fixes the identity's token or permissions, so Compute fails the step at once
+ * instead of spending attempts on it, and its reason names the gRPC code (finding 1390).
+ * UNAVAILABLE and DEADLINE_EXCEEDED keep their retryable gateway failure.
+ */
+function namespaceRefusal(error: unknown): unknown {
+  const record = asRecord(error);
+  // grpc-js ServiceError: a numeric status code and a string details field.
+  const code = typeof record?.details === "string" ? record.code : undefined;
+  const name =
+    code === GRPC_PERMISSION_DENIED
+      ? "PERMISSION_DENIED"
+      : code === GRPC_UNAUTHENTICATED
+        ? "UNAUTHENTICATED"
+        : undefined;
+  return name === undefined
+    ? error
+    : new SandboxNamespaceRefusedError(
+        `OpenShell refused the controller gateway identity with gRPC ${name}.`,
+        { cause: error },
+      );
+}
+
 const NETWORK_TLS_MODES = Object.freeze({
   skip: "NETWORK_TLS_MODE_SKIP",
   terminate: "NETWORK_TLS_MODE_TERMINATE",
@@ -169,12 +198,26 @@ const OPENSHELL_MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
 const OPENSHELL_NAMESPACE_LABEL = "openclaw.dev/namespace";
 const OPENSHELL_NAMESPACE_ID_LABEL = "openclaw.dev/namespace-id";
 const OPENSHELL_MANAGED_BY = "openclaw-enterprise";
+/** OpenShell's supervisor Pod labels (pinned `sandbox_runtime.rs` `control_labels`). */
+const OPENSHELL_SANDBOX_ID_LABEL = "openshell.ai/sandbox-id";
+const OPENSHELL_BOUNDARY_ROLE_LABEL = "openshell.ai/boundary-role";
+const KUBERNETES_LABEL_VALUE = /^[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$/;
 const OPENSHELL_RUNTIME_ROOT = "/sandbox/.openclaw-runtime";
 const OPENSHELL_HOME = `${OPENSHELL_RUNTIME_ROOT}/home`;
 const OPENSHELL_WORKSPACE_MOUNTS = "/sandbox/.openclaw-mounts";
 const OPENSHELL_WORKSPACE_STATE_DIRECTORY = "state";
 // OpenShell probes TMPDIR before the Harness entrypoint can create a nested directory.
 const OPENSHELL_TEMPORARY = "/tmp";
+/**
+ * OpenShell owns the filesystem, network and credential boundary. The Codex bridge selects
+ * the explicit full-access profile, subject to native account policy, to avoid nesting a
+ * bubblewrap sandbox. Keep human approval through the explicit user reviewer.
+ * Recheck against the pinned OpenClaw config-options.ts on upgrades.
+ */
+export const OPENSHELL_CODEX_APP_SERVER_POLICY = Object.freeze({
+  sandbox: "danger-full-access",
+  approvalsReviewer: "user",
+} as const);
 const OPENSHELL_DEFAULT_READ_ONLY_PATHS = Object.freeze([
   "/bin",
   "/usr",
@@ -379,7 +422,8 @@ function environment(
       );
     }
     result[nonempty(entry.name, "Environment variable name")] =
-      workspaceMountPaths.get(entry.value) ?? entry.value.replaceAll("/home/node", OPENSHELL_HOME);
+      workspaceMountPaths.get(entry.value) ??
+      entry.value.replaceAll(/\/home\/node(\/|$)/g, `${OPENSHELL_HOME}$1`);
   }
   result.HOME = OPENSHELL_HOME;
   result.TMPDIR = OPENSHELL_TEMPORARY;
@@ -402,6 +446,24 @@ function harnessPort(requirements: HarnessWorkloadRequirements): number {
   return port(Number(entry.value), "OpenShell APP_SERVER_PORT");
 }
 
+// OpenShell replaces the Sandbox runtime whenever the Harness main process exits while the
+// Sandbox is active. A signalled Harness exits 0 through tini, so ON_FAILURE would leave it
+// down. Stop and delete discard the exit, so the policy never fights a revision shutdown.
+// A deleted or evicted Pod is an infrastructure error that OpenShell never restarts.
+const SANDBOX_RESTART_POLICY = "SANDBOX_RESTART_POLICY_ALWAYS";
+// Adoption compares specs exactly. Sandboxes created before OCC set the policy were stored as
+// NEVER (OpenShell normalizes an unset policy), and they stay adoptable for their revision.
+// GetSandbox never returns UNSPECIFIED; it and an absent field are accepted defensively.
+const ADOPTABLE_RESTART_POLICIES: ReadonlySet<string | number | undefined> = new Set([
+  undefined,
+  "SANDBOX_RESTART_POLICY_UNSPECIFIED",
+  0,
+  "SANDBOX_RESTART_POLICY_NEVER",
+  1,
+  SANDBOX_RESTART_POLICY,
+  3,
+]);
+
 // A Sandbox in one of these phases never serves the revision again.
 const STOPPED_SANDBOX_PHASES: ReadonlySet<string | number> = new Set([
   "SANDBOX_PHASE_STOPPING",
@@ -411,6 +473,81 @@ const STOPPED_SANDBOX_PHASES: ReadonlySet<string | number> = new Set([
   7,
   9,
 ]);
+
+// GetSandbox phases, by enum name and number, of a Sandbox that no longer serves its
+// revision. ERROR covers a deleted or evicted Pod and a failed Harness main process;
+// COMPLETED is a Harness main process that exited 0 while the supervisor stays up. Both
+// Harness exits now restart (STARTING), except on Sandboxes an older controller stored as NEVER.
+const LOST_SANDBOX_PHASES: ReadonlyMap<string | number, SandboxHarnessLostCode> = new Map<
+  string | number,
+  SandboxHarnessLostCode
+>([
+  ["SANDBOX_PHASE_ERROR", "SANDBOX_FAILED"],
+  [3, "SANDBOX_FAILED"],
+  ["SANDBOX_PHASE_DELETING", "SANDBOX_DELETING"],
+  [4, "SANDBOX_DELETING"],
+  ["SANDBOX_PHASE_STOPPING", "SANDBOX_STOPPED"],
+  [6, "SANDBOX_STOPPED"],
+  ["SANDBOX_PHASE_STOPPED", "SANDBOX_STOPPED"],
+  [7, "SANDBOX_STOPPED"],
+  ["SANDBOX_PHASE_COMPLETED", "HARNESS_EXITED"],
+  [9, "HARNESS_EXITED"],
+]);
+const STARTING_SANDBOX_PHASES: ReadonlySet<string | number> = new Set([
+  "SANDBOX_PHASE_PROVISIONING",
+  1,
+  "SANDBOX_PHASE_STARTING",
+  8,
+]);
+
+/**
+ * Maps the revision's own GetSandbox record (or its absence) to a Harness observation.
+ * OpenShell also answers NOT_FOUND to conceal a Sandbox from an identity outside its
+ * Workspace, so `SANDBOX_MISSING` covers a Workspace OCC can no longer read.
+ */
+export function harnessObservation(
+  sandbox:
+    | {
+        readonly phase?: string | number;
+        readonly exitCode?: number;
+        readonly restartCount?: number;
+      }
+    | undefined,
+): SandboxHarnessObservation {
+  if (sandbox === undefined) {
+    return Object.freeze({ state: "lost", code: "SANDBOX_MISSING" });
+  }
+  const phase = sandbox.phase ?? "";
+  const lost = LOST_SANDBOX_PHASES.get(phase);
+  if (lost !== undefined) {
+    return Object.freeze({ state: "lost", code: lost });
+  }
+  if (phase === "SANDBOX_PHASE_READY" || phase === 2) {
+    return Object.freeze({ state: "running" });
+  }
+  // The gateway's own test for a policy restart (`is_automatic_restart_transition`): STARTING
+  // with the exited process's code kept and a restart number. A first start, and a Sandbox an
+  // operator restarted, clear both, so they stay plain `starting`.
+  const { exitCode, restartCount } = sandbox;
+  if (
+    (phase === "SANDBOX_PHASE_STARTING" || phase === 8) &&
+    exitCode !== undefined &&
+    Number.isSafeInteger(exitCode) &&
+    restartCount !== undefined &&
+    Number.isSafeInteger(restartCount) &&
+    restartCount > 0
+  ) {
+    return Object.freeze({
+      state: "starting",
+      code: "HARNESS_RESTARTING",
+      exitCode,
+      restarts: restartCount,
+    });
+  }
+  return STARTING_SANDBOX_PHASES.has(phase)
+    ? Object.freeze({ state: "starting" })
+    : Object.freeze({ state: "unknown" });
+}
 
 // OpenShell keeps a request_id whose create errored server-side unresolved forever, so a
 // revision's create moves to its next request_id once the gateway refuses the current one
@@ -966,7 +1103,7 @@ async function waitForGatewayReadiness(
   readiness: NonNullable<OpenShellSandboxDriverOptions["gateway"]["readiness"]>,
 ): Promise<void> {
   const namespace = namespaceName(context.namespace);
-  const deadline = Date.now() + (readiness.timeoutMs ?? 0);
+  const deadline = Date.now() + readiness.timeoutMs;
   const pollIntervalMs = readiness.pollIntervalMs ?? 1_000;
   let unavailable = "OpenShell gateway Service is unavailable.";
   for (;;) {
@@ -1386,6 +1523,7 @@ function sandboxSpec(
     },
     providers: sandboxProviders(options, requirements, runtimeProvider),
     command: sandboxCommand(requirements.command, workspace.links),
+    restart_policy: SANDBOX_RESTART_POLICY,
   };
 }
 
@@ -1437,15 +1575,22 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
   if (options.gateway.readiness !== undefined) {
     nonempty(options.gateway.readiness.serviceName, "OpenShell gateway Service name");
     labels(options.gateway.readiness.podSelector, "OpenShell gateway Pod selector");
-    for (const [value, description] of [
-      [options.gateway.readiness.timeoutMs, "OpenShell gateway readiness timeout"],
-      [options.gateway.readiness.pollIntervalMs, "OpenShell gateway readiness poll interval"],
-    ] as const) {
-      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
-        throw new OpenShellSandboxConfigurationFailure(
-          `${description} must be a positive safe integer.`,
-        );
-      }
+    if (
+      !Number.isSafeInteger(options.gateway.readiness.timeoutMs) ||
+      options.gateway.readiness.timeoutMs < 1
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell gateway readiness timeout must be a positive safe integer.",
+      );
+    }
+    const pollIntervalMs = options.gateway.readiness.pollIntervalMs;
+    if (
+      pollIntervalMs !== undefined &&
+      (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1)
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell gateway readiness poll interval must be a positive safe integer.",
+      );
     }
   }
   options.gateway.networkPolicyResources?.forEach((resource, index) =>
@@ -1479,6 +1624,21 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
     throw new OpenShellSandboxConfigurationFailure(
       "OpenShell requires at least one sandbox network policy.",
     );
+  }
+  const networkPolicyNames = new Set<string>();
+  for (const policy of options.policy.networkPolicies) {
+    const name = nonempty(policy.name, "OpenShell network policy name");
+    if (name === "workspace-node-enrollment") {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell network policy name workspace-node-enrollment is reserved.",
+      );
+    }
+    if (networkPolicyNames.has(name)) {
+      throw new OpenShellSandboxConfigurationFailure(
+        `OpenShell network policy name ${name} must be unique.`,
+      );
+    }
+    networkPolicyNames.add(name);
   }
   networkPolicies(options);
   if (
@@ -1638,8 +1798,12 @@ function canonicalSandboxSpec(spec: Readonly<Record<string, unknown>> | undefine
   if (spec === undefined || template === undefined) {
     return spec;
   }
+  const { restart_policy: restartPolicy, ...rest } = spec;
   return {
-    ...withoutSyntheticOneofs(spec),
+    ...withoutSyntheticOneofs(rest),
+    ...(ADOPTABLE_RESTART_POLICIES.has(restartPolicy as string | number | undefined)
+      ? {}
+      : { restart_policy: restartPolicy }),
     template: {
       ...withoutSyntheticOneofs(template),
       driver_config: canonicalProtobufValues(template.driver_config),
@@ -1775,6 +1939,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   readonly capability = "sandbox" as const;
   readonly implementation: string;
   readonly facets = Object.freeze(["networking", "filesystem", "process"] as const);
+  // environment() sets HOME to this for every Sandbox it creates.
+  readonly harnessHome = OPENSHELL_HOME;
   private readonly options: OpenShellSandboxDriverOptions;
   private readonly backend: Backend<OpenShellGateway>;
 
@@ -1853,6 +2019,11 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       codexConfig.appServer,
       "OpenShell Sandbox Codex app-server config",
     );
+    // OpenShell's egress policy is the network boundary. An enabled Codex network proxy wins
+    // over the full-access profile in the bridge and selects a restricted native profile, which
+    // needs the nested namespaces OpenShell blocks, so shell turns fail. Drop it rather than
+    // refuse it, like the sandbox pin: status reads rerun this hook on stored work.
+    const { networkProxy: _networkProxy, ...openShellAppServer } = appServer;
 
     return {
       ...configuration,
@@ -1866,8 +2037,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
             config: {
               ...codexConfig,
               appServer: {
-                ...appServer,
-                sandbox: "danger-full-access",
+                ...openShellAppServer,
+                ...OPENSHELL_CODEX_APP_SERVER_POLICY,
               },
             },
           },
@@ -1877,6 +2048,14 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   async ensureNamespace(context: SandboxNamespaceContext): Promise<void> {
+    try {
+      await this.ensureNamespaceWorkspace(context);
+    } catch (error) {
+      throw namespaceRefusal(error);
+    }
+  }
+
+  private async ensureNamespaceWorkspace(context: SandboxNamespaceContext): Promise<void> {
     this.requireOperatorWorkspaceMode("ensure a Namespace");
     const namespace = namespaceName(context.namespace);
     await applyOperatorNamespaceLabels(context, this.options.gateway.operatorNamespaceLabels);
@@ -2092,6 +2271,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     return Object.freeze({
       url: harnessWebSocketUrl(service.advertisedUrl),
       workspaceRoot: "/sandbox/enterprise",
+      codexPermissionProfile: ":danger-full-access",
     });
   }
 
@@ -2164,6 +2344,17 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   async cleanup(
+    context: SandboxNamespaceContext & { readonly revision?: Readonly<AgentRevision> },
+  ): Promise<void> {
+    try {
+      await this.cleanupResources(context);
+    } catch (error) {
+      // Revision cleanup keeps its errors: only the Namespace steps classify a refusal.
+      throw context.revision === undefined ? namespaceRefusal(error) : error;
+    }
+  }
+
+  private async cleanupResources(
     context: SandboxNamespaceContext & { readonly revision?: Readonly<AgentRevision> },
   ): Promise<void> {
     if (context.revision !== undefined) {
@@ -2288,6 +2479,85 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       observedAt: new Date().toISOString(),
       lines: response.lines,
       bufferTotal: response.bufferTotal,
+    });
+  }
+
+  /**
+   * Reads the dedicated revision's own Sandbox record without touching it. Only the
+   * gateway's lifecycle phase and restart state are used; the Harness transport is not
+   * contacted.
+   */
+  async observeHarness(context: SandboxLogContext): Promise<SandboxHarnessObservation> {
+    this.requireOperatorWorkspaceMode("observe a Harness");
+    if (
+      context.revision.namespaceId !== context.namespace.id ||
+      context.revision.sandboxDriverId !== this.id ||
+      context.revision.harness.mode !== "dedicated"
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "Refusing to observe a Sandbox outside its selected dedicated AgentRevision and Namespace.",
+      );
+    }
+    const sandbox = this.sandboxRef(context);
+    // Only the phase, the restart state and the ownership annotation of the record are used.
+    const existing = await openShellSandboxObserver(
+      this.gatewayClientForNamespace(sandbox.namespaceName),
+    ).getSandbox(
+      { name: sandbox.resourceName, workspace: workspaceName(context.namespace) },
+      context.signal,
+    );
+    if (
+      existing !== undefined &&
+      existing.annotations["openclaw.dev/revision-id"] !== context.revision.id
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        `Refusing OpenShell Sandbox ${sandbox.resourceName} without exact AgentRevision ownership.`,
+      );
+    }
+    return harnessObservation(existing);
+  }
+
+  /**
+   * The revision's supervisor Pod opens its workspace-node connection. OpenShell labels that
+   * Pod with the Sandbox's gateway-minted ID (`sandbox_runtime.rs` `control_labels`), a UUID
+   * distinct from the Sandbox name, so the ID is read from the gateway's own record.
+   */
+  async workspaceNodePeerLabels(
+    context: SandboxNamespaceContext & { readonly revision: Readonly<AgentRevision> },
+  ): Promise<Readonly<Record<string, string>> | undefined> {
+    this.requireOperatorWorkspaceMode("resolve a workspace-node peer");
+    if (
+      context.revision.namespaceId !== context.namespace.id ||
+      context.revision.sandboxDriverId !== this.id ||
+      context.revision.harness.mode !== "dedicated"
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "Refusing to resolve a workspace-node peer outside its selected dedicated AgentRevision and Namespace.",
+      );
+    }
+    const sandbox = this.sandboxRef(context);
+    const existing = await openShellSandboxObserver(
+      this.gatewayClientForNamespace(sandbox.namespaceName),
+    ).getSandbox(
+      { name: sandbox.resourceName, workspace: workspaceName(context.namespace) },
+      context.signal,
+    );
+    if (existing === undefined) {
+      return undefined;
+    }
+    if (existing.annotations["openclaw.dev/revision-id"] !== context.revision.id) {
+      throw new OpenShellSandboxConfigurationFailure(
+        `Refusing OpenShell Sandbox ${sandbox.resourceName} without exact AgentRevision ownership.`,
+      );
+    }
+    if (existing.id === undefined || !KUBERNETES_LABEL_VALUE.test(existing.id)) {
+      throw new OpenShellSandboxConfigurationFailure(
+        `OpenShell Sandbox ${sandbox.resourceName} has no ID usable as a supervisor Pod label.`,
+      );
+    }
+    return Object.freeze({
+      [OPENSHELL_SANDBOX_ID_LABEL]: existing.id,
+      [OPENSHELL_BOUNDARY_ROLE_LABEL]: "supervisor",
     });
   }
 
