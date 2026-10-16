@@ -550,6 +550,32 @@ func TestAgentLogsNameTheOrderOfAnUnprobedOtherRevision(t *testing.T) {
 	}
 }
 
+// Keep a Pod-bearing candidate when its order is unknown, so a member can
+// inspect a failed replacement without read permission on active metadata.
+func TestAgentLogsNameTheOrderOfAnOtherRevisionWithPods(t *testing.T) {
+	for _, test := range []struct{ name, metadata, notice string }{
+		{"active metadata refused", "forbidden", "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+		{"active number missing", `{"id":"rev_2"}`, "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+		{"active identity mismatched", `{"id":"rev_other","revision":2}`, "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &runtimeLogStub{t: t, activeID: "rev_2", activeRevision: test.metadata, revisions: `[{"id":"rev_1","revision":1}]`, pages: []func(http.ResponseWriter, url.Values){
+				logPage("", logLine(1, "info", "ready")),
+			}}
+			_, errOut, err := runLogsCommand(t, context.Background(), stub, "agent", "logs", "agt_1", "--source", "gateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if errOut != test.notice+"\n" {
+				t.Fatalf("notice = %q, want %q", errOut, test.notice)
+			}
+			if got := stub.paths[len(stub.paths)-1]; got != "/namespaces/ns_1/agents/agt_1/deployments/rev_1/runtime/logs" {
+				t.Fatalf("final request = %s", got)
+			}
+		})
+	}
+}
+
 // Selection reads the active revision's metadata once, and the notice uses that
 // same observation: a second read that failed would misname a Podless Harness
 // revision as "another readable revision that still has Pods".
@@ -633,6 +659,10 @@ func TestAgentRuntimeRetainsActiveWhenCandidateIsNotProvablyNewer(t *testing.T) 
 		{"active identity mismatched", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`},
 	} {
 		for _, podless := range []bool{true, false} {
+			// Pod candidates retain the active revision only when proven older.
+			if !podless && test.name != "older-only readable list" {
+				continue
+			}
 			t.Run(fmt.Sprintf("%s/podless=%t", test.name, podless), func(t *testing.T) {
 				candidate := "rev_2"
 				if test.activeID == "rev_2" {

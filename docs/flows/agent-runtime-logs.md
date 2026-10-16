@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-16
-last_updated_session: authoring-run/75d1c4b0-a13f-4188-9aec-3adb7fa43164
+last_updated_session: codex/01a10a81-070c-7aa3-97d0-fbce8f285d4d
 ---
 
 # Agent runtime logs flow
@@ -32,11 +32,13 @@ Compute Driver records. Downloads stay local.
 
 ```mermaid
 graph TD
-  V["CLI default revision probe"] --> W{"Pods or concrete Harness status?"}
-  W -->|yes| Z{"Exact active revision number is lower?"}
-  Z -->|yes| X["Select latest readable revision"]
-  Z -->|no or unreadable| Y
-  W -->|no or refused| Y["Retain active revision"]
+  V["CLI revision probe"] --> W{"Pods?"}
+  W -->|yes| Z{"Proven older?"}
+  Z -->|no or unreadable| X["Select candidate"]
+  Z -->|yes| Y["Retain active"]
+  W -->|no| T{"Concrete Harness, proven newer?"}
+  T -->|yes| X
+  T -->|no or refused| Y
   X --> A["GET runtime or runtime/logs"]
   Y --> A
   A --> B["Feature switch"]
@@ -66,10 +68,9 @@ graph TD
 ### 1. Admit and authorize
 
 `internal/occcli/agent_runtime.go:agentRevision` honors `--revision`. Otherwise,
-`newerRevisionWithRuntime` selects Pods or `running`/`starting`/`lost` Harnesses.
-Selection requires a higher revision than exact active metadata
-(`Client.GetAgentRevision`). Unknown/refused/unproven candidates retain active.
-Status is reused; logs need separate authorization.
+`newerRevisionWithRuntime` reads Pod candidates unless exact active metadata
+(`Client.GetAgentRevision`) proves them older. Harness-only candidates must be
+proven newer. Status is reused.
 
 `packages/contracts/src/api/routes.ts:occApiRoutes` declares both GET routes with
 a closed query schema. `apps/controller/src/index.ts:perform` answers `501` when
@@ -239,6 +240,8 @@ Driver failures use fixed `RUNTIME_LOGS_*` codes; requests have ten-second deadl
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-16 19:09: Retain Pods unless proven older. (codex/01a10a81-070c-7aa3-97d0-fbce8f285d4d - 646709121b8ad092df151d16cd4ca6a6c523e34d)
 
 - 2026-10-16 13:46: Require Pod candidate recency. (authoring-run/75d1c4b0-a13f-4188-9aec-3adb7fa43164 - 591feb34bdbaaf7f316607347a02f7335ee816c0)
 
