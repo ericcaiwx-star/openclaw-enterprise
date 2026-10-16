@@ -1,20 +1,26 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createControlledClock } from "../fixtures/repository-credentials/clock.mjs";
 import test, { after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { SandboxRevisionUnsupportedError } from "../../packages/occ/src/index.ts";
 import { requiresPostgres } from "../helpers/postgres-backend-state.mjs";
 import { waitFor } from "../helpers/wait-for.mjs";
 import { createWorkerRevisionFixtures } from "../helpers/postgres-worker-revision-fixture.mjs";
 import { repositoryAttempts } from "../helpers/postgres-worker-revision-support.mjs";
 
-// Worker health, readiness, leases and outages, and exclusive replacement. Withdrawal,
-// deployment and dispatch cases are in postgres-worker-agent-revision.test.mjs; repository
-// sessions, Agent stop and deletion, and Namespace teardown are in
-// postgres-worker-agent-revision-teardown.test.mjs. The lane runs the three files at once.
+// Worker health, readiness, leases and outages. Deployment and dispatch cases are in
+// postgres-worker-agent-revision.test.mjs, credential-source withdrawals in its
+// -credential-sources sibling; repository sessions are in its -teardown sibling, and Agent stop
+// and deletion and Namespace teardown in its -stop sibling; exclusive replacement and refused
+// candidates are in the -replacement sibling, a refused candidate's stop and its wait in the
+// -refused-stop and -refused-wait siblings, and redeploys whose predecessor stop yields in the
+// -yielded-redeploy sibling. The lane runs the revision files at once.
 
-const { setup, cleanup, revisionTest } = createWorkerRevisionFixtures(import.meta.url);
+const { setup, cleanup } = createWorkerRevisionFixtures(import.meta.url);
 after(cleanup);
 
 test(
@@ -63,6 +69,170 @@ test(
     }
   },
 );
+
+// Finding 1209: a file hung 22 minutes in teardown, past its job's timeout, naming nothing.
+// Node's test timeout does not cover after hooks, and pg's pool.end() waits for every
+// checked-out client, so one client a failed test never released hung the file. Each teardown
+// step now has a limit: the stuck step is named, and the database drop still runs, ending the
+// leaked session.
+test(
+  "worker fixture teardown names a pool that never ends and still drops the database",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (context) => {
+    // This test runs the teardown itself and expects it to fail, so the fixture registers its
+    // after hooks with this stand-in; the fallback runs them only if the test fails first.
+    const hooks = [];
+    let leaked;
+    let disposed = false;
+    context.after(async () => {
+      leaked?.release(true);
+      if (!disposed) {
+        for (const hook of hooks) {
+          await Promise.resolve()
+            .then(hook)
+            .catch(() => {});
+        }
+      }
+    });
+    const fixture = await setup(
+      { after: (hook) => hooks.push(hook) },
+      { disposeLimitsMs: { "pool end": 1_000 } },
+    );
+    leaked = await fixture.observerPool.connect();
+    // A terminated session errors twice (the server's notice, then the closed socket).
+    const terminated = new Promise((resolve) => leaked.on("error", resolve));
+
+    disposed = true;
+    await assert.rejects(fixture.database.dispose(), {
+      message: "revision fixture teardown: pool end did not finish within 1000 ms",
+    });
+    // The drop (WITH (FORCE)) ended the leaked client's session, which nothing else would.
+    const ended = await Promise.race([terminated, delay(10_000, undefined, { ref: false })]);
+    assert.ok(ended instanceof Error, "the database drop ended the leaked connection");
+    leaked.release(true);
+    leaked = undefined;
+  },
+);
+
+// Runs `body` as a test file of its own under the revision fixture (created with `fixtureOptions`),
+// needing no PostgreSQL, and returns its output once its process exits with `status`, or fails
+// after 30 s naming the file as still running.
+async function runFixtureFile(t, body, { fixtureOptions, status: expectedStatus = 0 } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "revision-fixture-exit-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "abandoned.test.mjs");
+  const helper = new URL("../helpers/postgres-worker-revision-fixture.mjs", import.meta.url);
+  await writeFile(
+    file,
+    `import assert from "node:assert/strict";
+import test, { after } from "node:test";
+import { createWorkerRevisionFixtures, disposeStep } from ${JSON.stringify(helper.href)};
+const { cleanup } = createWorkerRevisionFixtures(import.meta.url${
+      fixtureOptions === undefined ? "" : `, ${JSON.stringify(fixtureOptions)}`
+    });
+// A pool.end() that never settles while its socket keeps the event loop alive.
+const abandonStep = () =>
+  assert.rejects(
+    disposeStep("pool end", 100, () => {
+      setInterval(() => {}, 1_000);
+      return new Promise(() => {});
+    }),
+    { message: "revision fixture teardown: pool end did not finish within 100 ms" },
+  );
+after(cleanup);
+${body}`,
+  );
+  // A test runner of its own (this file's context would make it skip the file), in its own
+  // process group, so a file that never exits can be killed with its test process.
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawn(process.execPath, ["--test", file], {
+    detached: true,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const killGroup = () => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // The group has exited.
+    }
+  };
+  t.after(killGroup);
+  let output = "";
+  child.stdout.on("data", (chunk) => (output += chunk));
+  child.stderr.on("data", (chunk) => (output += chunk));
+  const limit = setTimeout(killGroup, 30_000);
+  const [status, signal] = await once(child, "close");
+  clearTimeout(limit);
+  assert.equal(signal, null, `the file was still running after 30 s:\n${output}`);
+  assert.equal(status, expectedStatus, output);
+  assert.match(output, /revision fixture teardown: pool end did not finish within 100 ms/);
+  return output;
+}
+
+// Finding 1223: a teardown step left running past its limit can hold its process open (a pool's
+// socket, a child), so the file sat idle after its last test until the runner's file timeout
+// killed it. A file that abandoned a step now exits once its own teardown is done. Runs the
+// fixture's real teardown step in its own test process.
+test("an abandoned teardown step that holds its process open does not keep the file alive", async (t) => {
+  const output = await runFixtureFile(
+    t,
+    `// A root after hook registered after cleanup, slower than the exit grace, still finishes.
+after(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  console.log("later after hook finished");
+});
+test("a stuck step is abandoned at its limit", async () => {
+  assert.equal(await disposeStep("worker stop", 5_000, () => "stopped"), "stopped");
+  await abandonStep();
+});
+`,
+  );
+  // Finding 1246: the exit grace starts once every root after hook has run, not at cleanup.
+  assert.match(output, /later after hook finished/);
+});
+
+// Finding 1246: a step a root after hook after cleanup abandons also ends the file.
+test("a teardown step abandoned by a later root after hook does not keep the file alive", async (t) => {
+  await runFixtureFile(
+    t,
+    `after(abandonStep);
+test("nothing is abandoned during the tests", () => {});
+`,
+  );
+});
+
+// Finding 1258: node:test skips the remaining after hooks after a failing one, so a root after
+// hook after cleanup that throws also skips the hook that starts the exit grace. The backstop
+// cleanup arms once a step was abandoned still ends the file, and its failure is still reported.
+test("a later root after hook that fails after an abandoned step does not keep the file alive", async (t) => {
+  const output = await runFixtureFile(
+    t,
+    `after(() => {
+  throw new Error("later after hook failed");
+});
+test("a stuck step is abandoned at its limit", abandonStep);
+`,
+    { fixtureOptions: { exitBackstopMs: 4_000 }, status: 1 },
+  );
+  assert.match(output, /later after hook failed/);
+});
+
+// Finding 1258: the same when the failing later hook is the one that abandoned the step.
+test("a later root after hook that abandons a step and fails does not keep the file alive", async (t) => {
+  const output = await runFixtureFile(
+    t,
+    `after(async () => {
+  await abandonStep();
+  throw new Error("later after hook failed");
+});
+test("nothing is abandoned during the tests", () => {});
+`,
+    { fixtureOptions: { exitBackstopMs: 4_000 }, status: 1 },
+  );
+  assert.match(output, /later after hook failed/);
+});
 
 // The worker is serial. A Compute wait that only saves a later pass asks whether
 // other Work is waiting and ends early when it is, so another Agent's deploy
@@ -116,334 +286,6 @@ test(
     assert.ok(wait.ms < 5_000, `the wait ended early (${wait.ms} ms)`);
     // The pending first pass ended and the second Agent's pass ran next.
     assert.deepEqual(prepared.slice(0, 2), [first.id, second.id]);
-  },
-);
-
-revisionTest(
-  "exclusive replacement blocks overlap, supersedes old maintenance and recovers through a new revision",
-  async (fixture) => {
-    const owner = await fixture.agent("exclusive-workspace", { executionMode: "dedicated" });
-    const running = new Set();
-    const prepared = [];
-    let rejectStop = true;
-    let stopFailures = 0;
-    const compute = {
-      ...fixture.compute,
-      requiresStoppedPredecessors: () => true,
-      async prepareRevision(revision) {
-        // This Driver boundary represents a resource which cannot be held by
-        // two revisions. PostgreSQL and the real worker own ordering and retries.
-        assert.deepEqual(
-          [...running].filter((id) => id !== revision.id),
-          [],
-        );
-        running.add(revision.id);
-        prepared.push(revision.id);
-        return {
-          ...(await fixture.compute.prepareRevision(revision)),
-          ready: revision.revision !== 2,
-        };
-      },
-      async stopRevision(revision) {
-        if (rejectStop && running.has(revision.id)) {
-          rejectStop = false;
-          stopFailures += 1;
-          throw new Error("resource release temporarily unavailable");
-        }
-        running.delete(revision.id);
-      },
-      async retireRevision(revision) {
-        running.delete(revision.id);
-      },
-    };
-    await fixture.start(compute, { convergenceTimeoutMs: 3_000 });
-    const first = await fixture.revision(owner, 1);
-    await fixture.work(first, "succeeded");
-    const replacement = await fixture.revision(owner, 2);
-    await waitFor("replacement preparation after predecessor release", async () =>
-      running.has(replacement.id) ? true : undefined,
-    );
-    assert.equal(stopFailures, 1);
-    const firstPreparations = prepared.filter((id) => id === first.id).length;
-    const maintenance = {
-      id: first.id,
-      idempotencyKey: `agent_revision:${first.id}:maintenance:${randomUUID()}`,
-    };
-    await fixture.state.transactWithQueue((_unit, queue) =>
-      queue.enqueue({
-        idempotencyKey: maintenance.idempotencyKey,
-        namespaceId: fixture.namespace.id,
-        agentId: owner.id,
-        revisionId: first.id,
-        actorId: fixture.actor.id,
-        availableAt: new Date(0),
-      }),
-    );
-    await fixture.work(maintenance, "succeeded");
-    assert.equal(prepared.filter((id) => id === first.id).length, firstPreparations);
-    await fixture.work(replacement, "failed_permanent");
-    assert.deepEqual([...running], [replacement.id]);
-    const recovery = await fixture.revision(owner, 3);
-    await fixture.work(recovery, "succeeded");
-    assert.deepEqual([...running], [recovery.id]);
-    const current = await fixture.currentAgent(owner);
-    assert.equal(current.activeRevisionId, recovery.id);
-  },
-  { timeout: 30_000 },
-);
-
-function countingExclusiveCompute(fixture, { ready, onPrepare, runtimeFailure } = {}) {
-  const running = new Set();
-  const prepared = [];
-  const stops = new Map();
-  const compute = {
-    ...fixture.compute,
-    requiresStoppedPredecessors: () => true,
-    async prepareRevision(revision) {
-      const overlap = [...running].filter((id) => id !== revision.id);
-      running.add(revision.id);
-      prepared.push(revision.id);
-      await onPrepare?.(revision, overlap);
-      // The candidate cannot become ready while any predecessor still runs.
-      const exclusive = [...running].every((id) => id === revision.id);
-      const failure = runtimeFailure?.(revision);
-      return {
-        ...(await fixture.compute.prepareRevision(revision)),
-        ready: exclusive && failure === undefined && (ready?.(revision) ?? true),
-        ...(failure === undefined ? {} : { runtimeFailure: failure }),
-      };
-    },
-    async stopRevision(revision) {
-      stops.set(revision.id, (stops.get(revision.id) ?? 0) + 1);
-      running.delete(revision.id);
-    },
-    async retireRevision(revision) {
-      running.delete(revision.id);
-    },
-  };
-  const count = (revision) => stops.get(revision.id) ?? 0;
-  const preparations = (revision) => prepared.filter((id) => id === revision.id).length;
-  return { compute, running, count, preparations };
-}
-
-async function enqueueMaintenance(fixture, owner, revision) {
-  const maintenance = {
-    id: revision.id,
-    idempotencyKey: `agent_revision:${revision.id}:maintenance:${randomUUID()}`,
-  };
-  await fixture.state.transactWithQueue((_unit, queue) =>
-    queue.enqueue({
-      idempotencyKey: maintenance.idempotencyKey,
-      namespaceId: fixture.namespace.id,
-      agentId: owner.id,
-      revisionId: revision.id,
-      actorId: fixture.actor.id,
-      availableAt: new Date(0),
-    }),
-  );
-  return maintenance;
-}
-
-revisionTest(
-  "exclusive replacement stops each predecessor once across pending passes and maintenance",
-  async (fixture) => {
-    const owner = await fixture.agent("exclusive-sweep-once", { executionMode: "dedicated" });
-    let pendingPasses = 4;
-    const driver = countingExclusiveCompute(fixture, {
-      ready: (revision) => revision.revision !== 2 || pendingPasses-- <= 0,
-    });
-    await fixture.start(driver.compute);
-    const first = await fixture.revision(owner, 1);
-    await fixture.work(first, "succeeded");
-    const replacement = await fixture.revision(owner, 2);
-    await fixture.work(replacement, "succeeded", 30_000);
-    assert.ok(driver.preparations(replacement) >= 5, "the replacement must repeat pending passes");
-    // Exactly one stop holds because the fixture lease (30 s) outlasts this pending
-    // window; with a shorter lease the scheduled re-stop would add more.
-    assert.equal(driver.count(first), 1, "pending passes must not repeat the predecessor stop");
-
-    for (let index = 0; index < 2; index += 1) {
-      await fixture.work(await enqueueMaintenance(fixture, owner, replacement), "succeeded");
-    }
-    assert.equal(driver.count(first), 1, "maintenance must not repeat the predecessor stop");
-
-    const recovery = await fixture.revision(owner, 3);
-    await fixture.work(recovery, "succeeded");
-    assert.equal(driver.count(replacement), 1);
-    assert.equal(driver.count(first), 1, "a recorded predecessor is skipped by later sweeps");
-    assert.deepEqual([...driver.running], [recovery.id]);
-  },
-  { timeout: 60_000 },
-);
-
-// Finding 990: exclusive replacement stops the active revision before its candidate's first
-// pass. On Kubernetes the candidate then took over the Agent's Gateway, so when a later pass
-// refused it because its actor lost `deploy`, its Pods kept answering chat with a deployment
-// OCC had rejected while the recorded active revision had no workload. A refused candidate is
-// stopped before its failure is published. A runtime that failed by itself (here a held model
-// probe) keeps its Pods for diagnosis on its version's Logs tab. Either way the pointer still
-// names the stopped predecessor: OCC never rolls back, and recovery is a new revision.
-// "unsupported" is a refusal thrown by the pass itself rather than decided by its observation.
-const refusals = { revoked: "AUTHORIZATION_DENIED", unsupported: "SANDBOX_HARNESS_UNSUPPORTED" };
-for (const { failure, stopFailures = 0, convergenceTimeoutMs } of [
-  { failure: "revoked" },
-  // A failed stop must not publish the refusal with the candidate still running: the work
-  // waits, repeats the refusal and the stop, and the refusal keeps its code.
-  { failure: "revoked", stopFailures: 1 },
-  { failure: "unsupported", stopFailures: 1 },
-  // A stop outage outlasts the attempt budget (5) and the convergence deadline: ending the
-  // work then would leave the refused candidate serving with nothing left to stop it.
-  { failure: "revoked", stopFailures: 7, convergenceTimeoutMs: 2_000 },
-  { failure: "held" },
-]) {
-  const refused = failure !== "held";
-  revisionTest(
-    `a ${failure} exclusive candidate ${refused ? "is stopped" : "stays for diagnosis"} when its deployment fails${stopFailures === 0 ? "" : ` after ${stopFailures} failed stops`}`,
-    async (fixture) => {
-      const owner = await fixture.agent(`exclusive-failed-${failure}`, {
-        executionMode: "dedicated",
-      });
-      let candidateId;
-      let candidatePasses = 0;
-      const driver = countingExclusiveCompute(fixture, {
-        // The candidate's first pass starts its runtime but is not ready yet.
-        ready: (revision) => revision.id !== candidateId,
-        runtimeFailure: (revision) =>
-          failure === "held" && revision.id === candidateId && candidatePasses > 1
-            ? {
-                component: "agent",
-                check: "model-probe",
-                checkedAt: "2026-10-10T02:24:00.000Z",
-                code: "MODEL_PROBE_FAILED",
-                cause: { kind: "PROBE_STATUS", detail: "format" },
-              }
-            : undefined,
-        async onPrepare(revision) {
-          if (revision.id !== candidateId) {
-            return;
-          }
-          candidatePasses += 1;
-          if (failure === "revoked" && candidatePasses === 1) {
-            // Revoke deploy authority after the runtime started, as removing the actor's grants
-            // did on oce-dogfood-b; the worker's recheck on the next pass denies it.
-            await fixture.observerPool.query(
-              `INSERT INTO occ.iam_restrictions
-                 (id, namespace_id, action, resource_kind, resource_id, effect)
-               VALUES ($1, $2, 'deploy', 'agent', $3, 'deny')`,
-              [`restriction-${randomUUID()}`, fixture.namespace.id, owner.id],
-            );
-          }
-          if (failure === "unsupported" && candidatePasses > 1) {
-            throw new SandboxRevisionUnsupportedError("SANDBOX_HARNESS_UNSUPPORTED", "test");
-          }
-        },
-      });
-      const events = [];
-      let failedStops = 0;
-      await fixture.start(
-        {
-          ...driver.compute,
-          async stopRevision(revision) {
-            if (revision.id === candidateId && failedStops < stopFailures) {
-              failedStops += 1;
-              throw new Error("Kubernetes API temporarily unavailable");
-            }
-            return driver.compute.stopRevision(revision);
-          },
-        },
-        {
-          emit: (event) => events.push(event),
-          ...(convergenceTimeoutMs === undefined ? {} : { convergenceTimeoutMs }),
-        },
-      );
-      const first = await fixture.revision(owner, 1);
-      await fixture.work(first, "succeeded");
-      const deployed = Date.now();
-      const replacement = await fixture.revision(owner, 2);
-      candidateId = replacement.id;
-      await fixture.work(replacement, "failed_permanent", 30_000);
-      assert.equal(failedStops, stopFailures);
-      if (convergenceTimeoutMs !== undefined) {
-        assert.ok(Date.now() - deployed > convergenceTimeoutMs, "the stop outlasted the deadline");
-      }
-      const result = await fixture.workResult(replacement);
-      assert.equal(result.rows[0].reason_code, refusals[failure] ?? "RUNTIME_MODEL_PROBE_FAILED");
-      // A thrown pass forgets the sweep record, so the retry repeats the idempotent stop.
-      const predecessorStops = failure === "unsupported" ? 2 : 1;
-      assert.equal(driver.count(first), predecessorStops, "replacement stopped the predecessor");
-      if (refused) {
-        assert.equal(driver.count(replacement), 1, "the refused candidate is stopped once");
-        assert.deepEqual([...driver.running], [], "nothing serves the Agent");
-        const waited = events.filter(
-          ({ event, workId, refusal }) =>
-            event === "worker.completed" &&
-            workId === replacement.idempotencyKey &&
-            refusal === refusals[failure],
-        );
-        assert.deepEqual(
-          waited.map(({ outcome, code }) => [outcome, code]),
-          Array.from({ length: stopFailures }, () => ["pending", "DEPENDENCY_UNAVAILABLE"]),
-        );
-      } else {
-        assert.equal(driver.count(replacement), 0, "the failed runtime stays for diagnosis");
-        assert.deepEqual([...driver.running], [replacement.id]);
-      }
-      const active = await fixture.activePointer(owner);
-      assert.equal(active.rows[0].active_revision_id, first.id);
-    },
-    { timeout: 60_000 },
-  );
-}
-
-test(
-  "a predecessor that comes back after the sweep is stopped again",
-  { ...requiresPostgres, timeout: 60_000 },
-  async (context) => {
-    for (const { leaseDurationMs, label, returns } of [
-      // A late Compute effect makes the next pass fail, which forgets the record.
-      { leaseDurationMs: 30_000, label: "failed-pass", returns: 1 },
-      // A late effect keeps the candidate pending until one lease has elapsed.
-      { leaseDurationMs: 1_000, label: "lease-restop", returns: 1 },
-      // It comes back again after that re-stop; the next one follows two leases later.
-      { leaseDurationMs: 1_000, label: "repeated-restop", returns: 2 },
-    ]) {
-      const fixture = await setup(context, { leaseDurationMs });
-      const owner = await fixture.agent(`exclusive-resurrection-${label}`, {
-        executionMode: "dedicated",
-      });
-      let first;
-      let resurrections = 0;
-      const driver = countingExclusiveCompute(fixture, {
-        async onPrepare(revision, overlap) {
-          if (revision.revision !== 2) {
-            return;
-          }
-          if (resurrections < returns && driver.count(first) > resurrections) {
-            // Model a lost claim's late Compute write landing after each stop.
-            resurrections += 1;
-            driver.running.add(first.id);
-          } else if (overlap.length > 0 && label === "failed-pass") {
-            driver.running.delete(revision.id);
-            throw new Error("predecessor still holds the exclusive resource");
-          }
-        },
-      });
-      await fixture.start(driver.compute);
-      first = await fixture.revision(owner, 1);
-      await fixture.work(first, "succeeded");
-      const replacement = await fixture.revision(owner, 2);
-      await fixture.work(replacement, "succeeded", 30_000);
-      assert.equal(resurrections, returns);
-      assert.equal(
-        driver.count(first),
-        returns + 1,
-        `${label}: the returned predecessor is stopped again`,
-      );
-      assert.deepEqual([...driver.running], [replacement.id]);
-      const current = await fixture.currentAgent(owner);
-      assert.equal(current.activeRevisionId, replacement.id);
-      await fixture.stop();
-    }
   },
 );
 

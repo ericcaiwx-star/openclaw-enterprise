@@ -1,7 +1,7 @@
 ---
 created: 2026-09-01
-updated: 2026-10-08
-last_updated_session: 01a11d68-d6e8-7033-ab93-03767bced2da
+updated: 2026-10-15
+last_updated_session: authoring-run/05ac6c84-8444-4dc1-8311-13c4e84369a3
 ---
 
 # Platform console request flow
@@ -38,6 +38,9 @@ graph TD
     B --> B1["Recheck session and Namespace access"]
     B1 -->|no session| C["Login"]
     C -->|GitHub| C1["Start GitHub sign-in"]
+    B1 -->|authenticated recovery key| NR["Resolve authorized Agent key"]
+    NR -->|allowed| D
+    NR -->|unavailable| D
     C1 -->|callback redirect| B1
     B1 -->|authenticated| D["Read readable Namespaces and validate selection"]
     D -->|debug=true| DBG["Read accessible Agents and runtime image metadata"]
@@ -101,6 +104,8 @@ Driver activation. Requests do not reread configuration or credentials.
 `apps/controller/src/console-assets.ts:readConsoleAsset` serves allowlisted assets
 and the shared HTML shell with MIME types and same-origin CSP. Unknown console
 paths return the shell with `404`; API routes retain JSON errors.
+`encodedAsset` compresses static scripts and styles once (brotli or gzip, per
+`Accept-Encoding`, with `Vary`). The shell, which also answers sign-in, stays identity.
 
 `scripts/build-console-metadata.mjs` bakes the publisher's checked
 `OCC_BUILD_REVISION` into HTML. With `debug=true`, `shell.mjs:renderShell` displays
@@ -118,37 +123,32 @@ stops reads. Missing provenance stays explicit.
 
 `apps/controller/src/console/console.mjs:loadPage`
 
-`loadPage` advances the request generation and requests `GET /api/auth/session`.
-First loads show loading. Return navigation and Refresh can restore one of at most
-16 document-local views keyed by route, Namespace, and session owner while reads
-run. Password fields and their derived discovery state clear before retention.
-Controls stay inert until admission succeeds; navigation remains available.
+`loadPage` starts a request generation with `GET /api/auth/session`. Opening an Agent
+from the list shows its destination immediately, without Agent data or detail actions.
+**Back to Agents** cancels the read and returns to the list; a second press does
+nothing. A refocus during that read keeps this page. Other first visits and
+Refresh show loading after 250 ms. A return to a retained view or a refocus keeps the
+shown page inert and says **Still checking…** after one second. The Console retains up
+to 16 views by route, Namespace, and session owner, excluding passwords and discovery
+state. An interrupted return keeps its view; an interrupted Refresh discards it.
 
-Completed views retain their DOM, handlers, and draft capture callbacks. On return,
-`loadPage` rereads their GET dependencies and compares data and user identity.
-Unchanged views reactivate without rebuilding panels; changed data rebuilds them,
-as does a first readable Namespace for a view retained without a selection.
-Pending reads, read failures, password input, or mutations prevent reuse. Read-only
-catalog and diagnostic POSTs do not invalidate views. Refresh always rebuilds.
-Debug runtime disclosures follow the same validation and retain expanded state.
+`apps/controller/src/console/api-client.mjs:createApiClient` keeps its composed
+abort signal through JSON and text body consumption. After headers arrive,
+cancellation retains the signal's reason and socket failures reach the caller's
+interrupted-read recovery. Only JSON syntax failures become invalid-response
+errors; a failed body never causes an automatic replay.
+
+Completed views retain DOM, handlers, and draft callbacks. On return, `loadPage`
+checks GET dependencies and user identity. A match remounts the view with expanded
+debug details. Changed data or the first readable Namespace for a view without a
+selection rebuilds it; Refresh always rebuilds.
+Pending or failed reads, password input, and mutations prevent reuse; read-only
+catalog and diagnostic POSTs do not.
 
 A changed user or session key clears retained views and drafts before further
 private reads. Missing sessions open login; failed reads offer Retry.
-`showLogin` reads `GET /api/auth/providers`; true `github`/`google` flags add their **Continue
-with** buttons, and discovery failure keeps password login. A true `oidc` flag adds a button
-labelled from `oidcSignIn.label` only when `oidcSignIn.authorizationUrl` is `https:`; its start
-URL must use that endpoint's origin and path, as GitHub's and Google's must use their fixed ones. `password: false`
-(recovery-only) hides the form behind **Recovery sign-in** and changes the
-provider-error advice from "use your password" to asking an administrator. Pending login disables
-all; generations reject late redirects. With `sessionBinding`, `loadPage`
-exchanges the button's stored `attemptId` once for its key. Tabs then send
-their pinned `x-occ-session-key`, so a replaced cookie yields login.
-`authError=<provider>` shows a generic, one-time error; with `authError=github`, an
-`authReason` of `membership` or `membership-unavailable` explains a GitHub
-[allowlist](../reference/authentication/external-sign-in.md#organization-and-team-allowlist)
-refusal instead. The
-[authentication flow](local-password-authentication.md#3-construct-session-authentication)
-owns the server side.
+The [console sign-in flow](platform-console/sign-in-return.md) covers provider
+discovery, one-use session binding, and requested destination recovery.
 
 `apps/controller/src/auth/index.ts:requireTrustedBrowserOrigin` checks Origin
 before sign-in/out, even for SDK calls bypassing Better Auth middleware; headerless
@@ -159,8 +159,7 @@ selection or choosing the first ready/readable Namespace. Unreadable IDs stay
 unavailable; selection never becomes an API query selector.
 
 `shell.mjs:namespaceSelector` disables and hides choices through session and
-Namespace checks for loads, Refresh, and admission-starting navigation;
-retained-view reads do not extend this.
+Namespace checks, naming a known selection; retained-view reads do not extend this.
 `shell.mjs:createShell` listens for the 760px mobile breakpoint; widening closes
 the drawer without focusing its hidden toggle and releases `main.inert`.
 Empty lists show access guidance. `navigation.mjs:navigate` returns Agent detail/creation
@@ -192,6 +191,9 @@ restores inheritance. Submission, uncertain outcomes, or invalid JSON lock editi
 The picker keeps a compact credential/access reminder beside an expandable
 **Access and credential setup** disclosure. Its bounded instructions, list, and
 details scroll within the dialog while search and pagination remain reachable.
+While mounted, Available and Configured retain separate selected plugins, queries,
+tool filters, and expanded rows without fetching pages or changing drafts.
+Removed selections clear their details; discovery resets clear both tabs.
 
 `create.mjs:loadPluginCatalog` and `loadPluginTools` implement
 [PAT discovery](agent-plugins.md#credential-scoped-discovery): the selected or
@@ -199,20 +201,15 @@ Preset Secret takes precedence over an entered token. OCC reads the
 Secret server-side. Pagination is upstream; filtering is local. Selecting a plugin loads tools.
 Credential, provider, and Harness changes clear results and invalidate pending reads.
 
-`create.mjs:MODEL_CHOICES` supplies unauthenticated static model lists and manual
-entry. In `renderAgentForm`, the model-entry button switches `manualModel` and
-calls `updateModelConfiguration` and `updateControls`. Entering manual mode
-keeps `model.value` and clears the hidden dropdown selection.
-Returning to the list uses `resetModelChoices` to rebuild the current provider's
-options, including after Configuration JSON changes the provider. It retains
-the model only if that provider's list contains it; otherwise it clears both
-inputs. Provider and authentication changes call the same reset without a model
-to retain. `model.value` supplies one Configuration model, and submission checks
-that its primary model matches that value.
-`updateControls` updates the button label, visibility, and required input; focus moves
-to that input. Switching back to the list preserves credentials and unrelated
-Configuration values. Saved Configuration and pending-request locks apply to
-both directions.
+`create.mjs:MODEL_CHOICES` supplies unauthenticated static lists and manual entry.
+`renderAgentForm` toggles `manualModel`, invoking `updateModelConfiguration` and
+`updateControls`. Manual mode preserves `model.value` and clears the dropdown.
+`resetModelChoices` restores the current provider's list, including Configuration
+JSON changes, retaining only listed models; otherwise both inputs clear.
+Provider/authentication changes retain no model. Submission matches the primary
+Configuration model to `model.value`. `updateControls` sets the button label,
+visibility, and required input; the toggle moves focus. Returning preserves credentials and unrelated
+Configuration; saved-Configuration and pending-request locks govern both directions.
 
 `configurationTemplate` enables Control UI with loopback origins on port 18789.
 Compute supplies gateway authentication; Presets replace the starter unchanged.
@@ -286,9 +283,10 @@ preflight.
 
 `agents/detail.mjs:renderAgentDetail` passes an `agents/list.mjs:link` to
 `deploymentFailure` for **Open vN Logs**. Client navigation selects the failed
-revision's `tab=logs`, even from the draft or a different version. After mounting
-the Logs panel and finishing the snapshot read, it focuses the Logs tab and
-scrolls the panel into view if the view is still current. The panel's
+revision's `tab=logs`, even from the draft or a different version. Once the
+snapshot read and the panel's first reads settle, it focuses the Logs tab and
+scrolls the panel into view if the view is still current. Until then the tab keeps
+its height and hides Stop and Delete, which appear in place. The panel's
 `agents/logs.mjs:renderAgentLogs` reads that revision's runtime status and output,
 or displays its access or availability error;
 [Agent runtime logs](agent-runtime-logs.md) owns those reads.
@@ -297,14 +295,14 @@ or displays its access or availability error;
 
 `apps/controller/src/console/console.mjs:loadPage`, `logout`
 
-After a full-page client navigation settles, `loadPage` focuses the destination
-heading if focus fell to the document body. It uses `preventScroll` to preserve
-return position; tab navigation and controls that already have focus keep it.
-Navigation, Namespace changes, and logout invalidate reads; generations reject
-late responses. Refocus coalesces events. Agent detail rechecks access in place,
-preserving controls, input, and saves; failures clear the view. Other pages
-revalidate before reuse; forms defer refocus. Drafts keep save baselines and Namespace
-scopes separate.
+After full-page navigation settles, `loadPage` focuses the destination heading if
+focus fell to the body, using `preventScroll` to preserve return position. An Agent
+opened from the list focuses its heading when the title renders. Tabs and
+focused controls keep focus. Navigation, Namespace changes, and logout invalidate
+reads; generations reject late responses. Refocus coalesces events. Agent detail
+rechecks access in place, preserving controls, input, and saves; failures clear it.
+Other pages revalidate before reuse; forms defer refocus. Draft save baselines and
+Namespace scopes stay separate.
 
 Authorization and dependency failures clear affected content and expose recovery;
 a current protected `401` clears all private state. `pagehide` clears
@@ -369,16 +367,19 @@ refresh and inspection.
 
 ## Changelog
 
+- 2026-10-15 23:00: Keep views across abandoned returns; show slow rechecks. (console-nav-1015)
+- 2026-10-15 20:00: Hold pages until returns revalidate. (public-pr/2523)
+- 2026-10-15 19:40: Compress static console scripts and styles per `Accept-Encoding`. (console-gzip)
+- 2026-10-15 19:03: Preserve scoped destinations across sign-in and resolve Agent recovery after session admission. (authoring-run/05ac6c84-8444-4dc1-8311-13c4e84369a3 - 91ac04d6919860b7d7386444468a3dc0ddc90481)
+- 2026-10-13 12:00: Explain outage sign-in reasons. (kc-guide-fix)
+- 2026-10-09 21:10: Preserve cancellation, deadline and transport failures during response body reads (authoring-run/2e195d67-c77d-43d0-8c32-2179523eb3a2 - 013bcf5f76819ca280a164745d470855fc5b74cd)
+
 - 2026-10-08 15:59: Trace responsive drawer and tab visibility, destination focus, scoped authentication feedback, and compact plugin setup. (01a11d68-d6e8-7033-ab93-03767bced2da - 58daaa5a3ac4c64bc5fb3af00759b59b365b20ca)
 - 2026-10-08 14:30: Trace client navigation from a failed deployment to its exact version and focus its Logs tab and scroll the panel into view. (01a11d68-d6e8-7033-ab93-03767bced2da - 0ff96342dc416325770eebed5963e9886fd3dff3)
+- 2026-10-07 12:30: Explain a disabled account's provider sign-in (`authReason=account-disabled`). (fix-member-1007/d534)
+
 - 2026-10-03 22:38: Trace switching between listed and manual model entry, preserving listed models and one submitted model. (01a10328-9de5-7081-ada2-d88ff80161e4 - 340feea42)
 - 2026-10-03 20:00: Rebuild a view retained without a Namespace selection once one is readable, so the header selector shows the default.
 - 2026-10-03 18:00: Re-enable the header selector during retained-view reads once Namespace access is checked.
-- 2026-09-30 19:00: Remember denied Agent detail snapshot reads per tab so reloads do not add an audited denial per view.
-- 2026-09-29 20:00: Trace repository descriptions and inherited access. (public-pr/374)
-
-- 2026-09-29 07:19: Guard recovery until session and Namespace reads finish. (authoring-run/1ca6a40a-a247-465f-9a83-182dbcb6ff4e - 90326e6fab11f84fc11b8990b6c8e197a2752c60)
-
-- 2026-09-28 01:39: Move the sharing trace to its child flow. (authoring-run/462d5207-c3a1-4203-af4a-8db2551ccb9a - 4f32ebbca5d699296a142dfbd34c8ec46844fce7)
 
 [Platform console request documentation history](platform-console/history.md) preserves the older dated entries.
