@@ -137,8 +137,8 @@ with `dev down` [deletes the installation and its Agents](quickstart.md#clean-up
 
 ## Clean up
 
-To remove only this Agent and keep the installation, delete the Agent and then
-the Configuration, Secret, and Role the command created for it. Set
+To remove only this Agent and keep the installation, delete the Agent and its
+helper-created resources, including the credential source on OpenShell. Set
 `OCC_NAMESPACE` to the `ID` shown for `default` in step 1, and `AGENT_ID` to the
 Agent ID the command printed. If the command stopped before printing it, run the
 `export` line first, then find the ID with `./bin/occ agent list`:
@@ -147,15 +147,65 @@ Agent ID the command printed. If the command stopped before printing it, run the
 export OCC_NAMESPACE=<default-namespace-id>
 AGENT_ID=<agent-id>
 AGENT_JSON="$(./bin/occ agent get "$AGENT_ID" -o json)"
-CONFIGURATION_ID="$(jq -r .configurationId <<<"$AGENT_JSON")"
-SECRET_ID="$(jq -r .harnessAuth.source.id <<<"$AGENT_JSON")"
-ROLE_ID="role_local_first_agent_secret_$(printf '%s\0%s' "$AGENT_ID" "$SECRET_ID" |
-  sha256sum | cut -d' ' -f1)"
+CONFIGURATION_ID="$(jq -er .configurationId <<<"$AGENT_JSON")"
+```
+
+Before deleting the Agent, record the credentials and Role for the path you used.
+For the default embedded Agent:
+
+```bash
+SECRET_ID="$(jq -er .harnessAuth.source.id <<<"$AGENT_JSON")"
+ROLE_ID="$(node --input-type=module - "$AGENT_ID" "$SECRET_ID" <<'JS'
+import { createHash } from 'node:crypto';
+const suffix = createHash('sha256').update(process.argv[2]).update('\0')
+  .update(process.argv[3]).digest('hex');
+console.log(`role_local_first_agent_secret_${suffix}`);
+JS
+)"
+```
+
+For dedicated Codex with OpenShell, the Agent references a credential source
+instead of a Secret directly. Read the source's current Secret reference and
+find its helper-created Role:
+
+```bash
+SOURCE_ID="$(jq -er .harnessAuth.sourceId <<<"$AGENT_JSON")"
+SECRET_ID="$(./bin/occ credential-source get "$SOURCE_ID" -o json |
+  jq -er '.secrets.api_key.id // .secrets.access_token.id')"
+ROLE_NAME="$(node --input-type=module - "$AGENT_ID" "$SOURCE_ID" <<'JS'
+import { createHash } from 'node:crypto';
+const suffix = createHash('sha256').update(process.argv[2]).update('\0')
+  .update(process.argv[3]).digest('hex').slice(0, 16);
+console.log(`Local first Agent source ${suffix}`);
+JS
+)"
+ROLE_ID="$(./bin/occ iam role list -o json |
+  jq -er --arg name "$ROLE_NAME" '.[] | select(.name == $name) | .id')"
+```
+
+The source uses `api_key` for an OpenAI API key or `access_token` for a personal
+access token. These reads return references, never the credential value. Stop
+if any lookup fails; do not delete resources using missing IDs.
+
+For either path, delete the Agent and repeat `agent get` until it returns `404`:
+
+```bash
 ./bin/occ agent delete "$AGENT_ID"
 ./bin/occ agent get "$AGENT_ID"
 ```
 
-Repeat `agent get` until it returns `404`, then delete the rest:
+For OpenShell, delete the source next, before its Secret:
+
+```bash
+./bin/occ credential-source delete "$SOURCE_ID"
+```
+
+Continue only after the source deletion succeeds. A source still referenced by
+an Agent returns `409`; a gateway failure or the registration safety window can
+return `503` and leave it `deleting`. Follow [source deletion recovery](../reference/credential-sources.md#delete-a-source)
+and retry. Deleting the source removes the gateway's credential copy as well.
+
+Then, for either path, delete the Configuration, Secret, and Role:
 
 ```bash
 ./bin/occ configuration delete "$CONFIGURATION_ID"
@@ -163,9 +213,9 @@ Repeat `agent get` until it returns `404`, then delete the rest:
 ./bin/occ iam role delete "$ROLE_ID"
 ```
 
-Each run creates a separate Role named `Local first Agent Secret access`, so
-`occ iam role list` shows one per first Agent until you delete it. The command
-remembers the Agent name; use a new name for the next run.
+The helper creates a separate Role for each Agent's Secret or credential source;
+these commands remove only that Role. The command remembers the Agent name; use
+a new name for the next run.
 
 <span id="troubleshooting"></span>
 
