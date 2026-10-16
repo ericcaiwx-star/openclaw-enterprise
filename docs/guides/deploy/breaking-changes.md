@@ -240,7 +240,9 @@ cannot precede an address. Nonfinal hex labels remain accepted.
 **How to tell.** Diagnostics name the invalid field and suggest its correction.
 
 **Steps.** Use a DNS name resolving to the Gateway that its certificate covers;
-standard charts request DNS SANs, not IP SANs. Use a DNS suffix such as
+the `openclaw-enterprise` chart requests a DNS SAN, not an IP SAN. For harness
+`routing.hostname`, use a name covered by the operator's `routing.tlsSecretName`
+certificate. Use a DNS suffix such as
 `previews.example.test` for sandbox. Correct Helm/Installation values, then upgrade.
 _untested_ against a live Installation.
 
