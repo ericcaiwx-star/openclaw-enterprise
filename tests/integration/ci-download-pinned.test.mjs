@@ -135,6 +135,7 @@ test("downloads publish only verified bytes and preserve existing tools on failu
       const replacement = await download(url, destination, sha256);
       assert.equal(replacement.code, 0, replacement.stderr);
       assert.deepEqual(await readFile(destination), body);
+      assert.equal((await stat(destination)).mode & 0o777, 0o755);
       assert.deepEqual(await readdir(dir), ["tool"]);
 
       await rm(destination);

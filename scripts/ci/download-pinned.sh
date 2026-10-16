@@ -65,6 +65,11 @@ if [[ -d "${destination}" ]]; then
 fi
 temporary="$(mktemp "${destination}.download.XXXXXX")"
 trap 'rm -f "${temporary}"' EXIT
+# curl preserves the mode when replacing an existing file. Seed the temporary
+# file the same way so successful publication retains that behavior.
+if [[ -f "${destination}" ]]; then
+  cp -p "${destination}" "${temporary}"
+fi
 
 attempt=1
 delay=2
