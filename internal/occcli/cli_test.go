@@ -573,32 +573,56 @@ func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
 	}
 }
 
-func TestAgentRuntimeRetainsActiveWhenPodlessCandidateIsNotProvablyNewer(t *testing.T) {
+func TestAgentRuntimeRetainsActiveWhenCandidateIsNotProvablyNewer(t *testing.T) {
 	for _, test := range []struct{ name, activeID, revisions, metadata string }{
 		{"older-only readable list", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`},
 		{"active metadata denied", "rev_1", `[{"id":"rev_2","revision":2}]`, "forbidden"},
 		{"active number missing", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_1"}`},
 		{"active identity mismatched", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			candidate := "rev_2"
-			if test.activeID == "rev_2" {
-				candidate = "rev_1"
-			}
-			stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: []string{candidate}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
-			out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
-			if err != nil {
-				t.Fatal(err)
-			}
-			// The runtime description returned to the operator must be the active revision.
-			var description map[string]any
-			if err := json.Unmarshal([]byte(out), &description); err != nil || description["revisionId"] != test.activeID {
-				t.Fatalf("runtime output=%q error=%v", out, err)
-			}
-			if !strings.Contains(notices, "reading the active revision "+test.activeID) || strings.Contains(notices, "newer than") {
-				t.Fatalf("notice=%q", notices)
-			}
-		})
+		for _, podless := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/podless=%t", test.name, podless), func(t *testing.T) {
+				candidate := "rev_2"
+				if test.activeID == "rev_2" {
+					candidate = "rev_1"
+				}
+				stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: []string{candidate}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
+				if !podless {
+					stub.podless = nil
+				}
+				out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The runtime description returned to the operator must be the active revision.
+				var description map[string]any
+				if err := json.Unmarshal([]byte(out), &description); err != nil || description["revisionId"] != test.activeID {
+					t.Fatalf("runtime output=%q error=%v", out, err)
+				}
+				if !strings.Contains(notices, "reading the active revision "+test.activeID) || strings.Contains(notices, "newer than") {
+					t.Fatalf("notice=%q", notices)
+				}
+			})
+		}
+	}
+}
+
+// A readable older revision can retain Pods while the active revision is hidden
+// from revision lists. Log selection must retain the active revision as well.
+func TestAgentLogsRetainActiveWhenOnlyOlderRevisionHasPods(t *testing.T) {
+	page := func(response http.ResponseWriter, _ url.Values) {
+		fmt.Fprint(response, `{"data":{"revisionId":"rev_2","source":"gateway","stream":{"source":"gateway","pod":"gw-0","container":"gateway","restartCount":0},"observedAt":"2026-09-30T12:00:00.000Z","records":[{"type":"line","time":"2026-09-30T12:00:00Z","stream":{"source":"gateway","pod":"gw-0","container":"gateway","restartCount":0},"contentClass":"operational","kind":"openclaw","level":"info","message":"active revision output"}],"withheld":0,"truncated":false,"cursor":null},"meta":{}}`)
+	}
+	stub := &runtimeLogStub{t: t, activeID: "rev_2", activeRevision: `{"id":"rev_2","revision":2}`, revisions: `[{"id":"rev_1","revision":1}]`, pages: []func(http.ResponseWriter, url.Values){page}}
+	out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "logs", "agt_1", "--source", "gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "active revision output") || !strings.Contains(notices, "reading the active revision rev_2") {
+		t.Fatalf("output=%q notices=%q", out, notices)
+	}
+	if got := stub.paths[len(stub.paths)-1]; got != "/namespaces/ns_1/agents/agt_1/deployments/rev_2/runtime/logs" {
+		t.Fatalf("final request=%s", got)
 	}
 }
 

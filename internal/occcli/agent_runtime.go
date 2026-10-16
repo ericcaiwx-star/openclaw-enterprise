@@ -118,11 +118,11 @@ func newerRevisionWithRuntime(client *occclient.Client, namespace, agentID, acti
 	pods, _ := resource["pods"].([]any)
 	harness, _ := resource["harness"].(map[string]any)
 	state, _ := harness["state"].(string)
-	hasRuntime := len(pods) > 0
-	if !hasRuntime && slices.Contains([]string{"running", "starting", "lost"}, state) {
+	hasRuntime := len(pods) > 0 || slices.Contains([]string{"running", "starting", "lost"}, state)
+	if hasRuntime {
 		// Revision lists are permission-filtered: a different ID can be older.
-		// Preserve Pod selection, but only redirect for Podless Harness status
-		// when the active revision's exact metadata proves the candidate newer.
+		// Only redirect when the active revision's exact metadata proves the
+		// candidate newer, even when the older readable revision still has Pods.
 		activeRevision, err := client.GetAgentRevision(namespace, agentID, active)
 		resource, _ := activeRevision.(map[string]any)
 		activeID, _ := resource["id"].(string)
