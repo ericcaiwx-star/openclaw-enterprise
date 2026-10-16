@@ -523,7 +523,7 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- /* Shorthand, integer, hex, and leading-zero IPv4 are legal DNS labels, but a URL parser dials another address. Four decimal octets stay. */ -}}
 {{- /* A numeric or 0x last label is an address unless the host is four decimal octets from 0 to 255 with no leading zeros. A hex label that is not last, such as 0xdead.gateway.example.test, stays. */ -}}
 {{- if and $routing.hostname (and (regexMatch "(^|\\.)(?:0x[0-9a-f]*|[0-9]+)$" $routing.hostname) (not (regexMatch "^(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?:\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])){3}$" $routing.hostname))) -}}
-{{- fail "gatewayRouting.hostname must be a DNS hostname without a port or path. A numeric or 0x last label parses as IPv4; use a DNS name, or four decimal octets from 0 to 255 without leading zeros." -}}
+{{- fail "gatewayRouting.hostname must be a DNS hostname without a port or path. A numeric or 0x last label parses as IPv4; use a DNS name resolving to the gateway that its TLS certificate covers." -}}
 {{- end -}}
 
 {{- if not $routing.gatewayClassName -}}{{- fail "gatewayRouting.gatewayClassName must reference an operator-created GatewayClass" -}}{{- end -}}

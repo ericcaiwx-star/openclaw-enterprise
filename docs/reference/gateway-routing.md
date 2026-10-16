@@ -50,10 +50,10 @@ serviceName = occ-gateway-<first 12 hex characters of SHA-256(gatewayNamespace/g
 hostname    = <serviceName>.<envoyNamespace>.svc
 ```
 
-The chart sets Envoy's Service name to this value. Standard Linux Pod DNS search
-resolves it without a separate DNS record or a fixed `cluster.local` suffix.
-An explicit hostname must match in Helm and Compute and resolve to the Envoy
-Service. The listener certificate uses that same hostname.
+Helm sets that Envoy Service name. Linux Pod DNS search resolves it without
+separate records or a fixed `cluster.local` suffix. Custom hostnames must match
+Helm/Compute and resolve to Envoy. The chart requests DNS SANs, not IP SANs;
+use a certificate-covered DNS name.
 
 `getGatewayEndpoint(revision)` computes the URL without a Kubernetes lookup;
 it does not check whether the gateway is ready. When preparing and activating a

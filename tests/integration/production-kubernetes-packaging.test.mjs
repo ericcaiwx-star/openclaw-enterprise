@@ -3,6 +3,8 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { isIP } from "node:net";
+import { checkServerIdentity } from "node:tls";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
@@ -970,7 +972,7 @@ test(
         await assert.rejects(
           load(),
           hostname === "api.123"
-            ? /Gateway routing hostname must be .*numeric or 0x last label parses as IPv4; use a DNS name, or four decimal octets from 0 to 255 without leading zeros/
+            ? /Gateway routing hostname must be .*numeric or 0x last label parses as IPv4; use a DNS name resolving to the gateway that its TLS certificate covers/
             : /Gateway routing hostname must be a DNS hostname without a port or path/,
         );
         await assert.rejects(
@@ -978,7 +980,7 @@ test(
           ({ stderr }) =>
             stderr.includes(
               hostname === "api.123"
-                ? "gatewayRouting.hostname must be a DNS hostname without a port or path. A numeric or 0x last label parses as IPv4; use a DNS name, or four decimal octets from 0 to 255 without leading zeros"
+                ? "gatewayRouting.hostname must be a DNS hostname without a port or path. A numeric or 0x last label parses as IPv4; use a DNS name resolving to the gateway that its TLS certificate covers"
                 : "gatewayRouting.hostname must be a DNS hostname without a port or path",
             ),
           hostname,
@@ -1001,9 +1003,19 @@ test(
         expected,
       );
       assert.deepEqual(certificate.spec.dnsNames, [expected]);
+      // Admission preserves canonical IPv4 syntax, but the standard chart requests
+      // DNS SANs, not IP SANs. A rendered address is not a usable TLS endpoint.
+      const identityError = checkServerIdentity(expected, {
+        subjectaltname: certificate.spec.dnsNames.map((name) => `DNS:${name}`).join(", "),
+      });
+      if (isIP(expected) === 4) {
+        assert.equal(identityError?.code, "ERR_TLS_CERT_ALTNAME_INVALID");
+      } else {
+        assert.equal(identityError, undefined);
+      }
       assert.equal(routing.hostname, hostname);
     }
-    // A direct IPv4 host works; the same text after agent-<id>. cannot be a URL host.
+    // Direct IPv4 passes address admission only; an Agent-prefixed suffix cannot be a URL host.
     for (const domain of ["192.0.2.1", "previews.example.test", "0xdead.previews.example.test"]) {
       const configuration = structuredClone(example);
       configuration.drivers.compute.configuration.gatewayRouting.sandbox = { domain };
@@ -5428,7 +5440,7 @@ test("execution chart refuses a harness hostname Compute refuses", tooling, asyn
   ]) {
     await assert.rejects(
       template("--set-string", `routing.hostname=${hostname}`),
-      /routing\.hostname must be .*numeric or 0x last label parses as IPv4; use a DNS name, or four decimal octets from 0 to 255 without leading zeros/,
+      /routing\.hostname must be .*numeric or 0x last label parses as IPv4; use a DNS name resolving to the gateway that its TLS certificate covers/,
       hostname,
     );
   }

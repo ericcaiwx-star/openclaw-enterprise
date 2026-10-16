@@ -116,7 +116,7 @@ Empty hosts retain Service DNS for listeners and Certificate SANs.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:validateDnsHostname`
 refuses rewritten/parser-invalid IPv4 with `ConfigurationFailure` before persistence
-opens. Helm refuses rendering too. Direct host `198.51.100.1` stays accepted;
+opens. Helm also refuses rendering. IPv4 admission does not establish TLS;
 `validateSandboxDomain` refuses numeric/hex suffixes, including canonical IPv4.
 Correct Helm values and Installation YAML per the
 [hostname correction procedure](../guides/deploy/breaking-changes.md#2026-10-14-gateway-hostnames-must-not-be-rewritten-ipv4),

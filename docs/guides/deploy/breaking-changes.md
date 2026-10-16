@@ -239,9 +239,9 @@ cannot precede an address. Nonfinal hex labels remain accepted.
 
 **How to tell.** Diagnostics name the invalid field and suggest its correction.
 
-**Steps.** Use a DNS suffix such as `previews.example.test` for sandbox; direct
-Gateway/Harness hosts also accept four decimal octets from 0 to 255 without
-leading zeros. Correct Helm values and Installation YAML, then upgrade.
+**Steps.** Use a DNS name resolving to the Gateway that its certificate covers;
+standard charts request DNS SANs, not IP SANs. Use a DNS suffix such as
+`previews.example.test` for sandbox. Correct Helm/Installation values, then upgrade.
 _untested_ against a live Installation.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts

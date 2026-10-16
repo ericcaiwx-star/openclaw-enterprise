@@ -1870,7 +1870,7 @@ function validateDnsHostname(value: string, description: string): void {
     rewrittenIpv4Hostname(value)
   ) {
     const addressHint = /(^|\.)(?:0x[0-9a-f]*|[0-9]+)$/.test(value)
-      ? " A numeric or 0x last label parses as IPv4; use a DNS name, or four decimal octets from 0 to 255 without leading zeros."
+      ? " A numeric or 0x last label parses as IPv4; use a DNS name resolving to the gateway that its TLS certificate covers."
       : "";
     throw new ConfigurationFailure(
       `${description} must be a DNS hostname without a port or path.${addressHint}`,
