@@ -160,6 +160,7 @@ import {
   ChannelCredentialError,
   ComputeGatewaySettingError,
   ComputeProvisioningRefusedError,
+  ConfigurationGenerationConflictError,
   ConfigurationHarnessError,
   CredentialGatewayNotConfiguredError,
   CredentialSourceDriverError,
@@ -293,6 +294,7 @@ export {
   ChannelCredentialError,
   ComputeGatewaySettingError,
   ComputeProvisioningRefusedError,
+  ConfigurationGenerationConflictError,
   ConfigurationHarnessError,
   ConfigurationSizeError,
   configurationSettingMessage,
@@ -769,6 +771,8 @@ export interface UpdateConfigurationInput {
   readonly configurationId: string;
   readonly values: Readonly<OpenClawConfigurationDocument>;
   readonly secretBindings?: SecretBindings;
+  /** Refuses the update unless the Configuration is still at this generation. */
+  readonly expectedGeneration?: number;
 }
 
 export interface DeployAgentInput {
@@ -5485,6 +5489,14 @@ export class OpenClawController {
         throw new ScopeViolationError("The Configuration does not belong to the exact Namespace.");
       }
       await this.guardProvisioningConfiguration(state, namespace.id, input.configurationId);
+      // Compared under the row lock, so a save that read an older generation cannot replace a
+      // newer one (finding 1505).
+      if (
+        input.expectedGeneration !== undefined &&
+        input.expectedGeneration !== metadata.generation
+      ) {
+        throw new ConfigurationGenerationConflictError();
+      }
       const previous = await this.lockedConfiguration(driver, metadata);
       let secretBindings: SecretBindings;
       if (input.secretBindings === undefined) {
@@ -10255,6 +10267,11 @@ export class OpenClawController {
     namespaceId: string,
     target?: ResourceRef,
   ): Promise<void> {
+    if (this.selectedDriver("iam").namespacePolicyTransaction !== "platform-unit-of-work") {
+      throw new DependencyUnavailableError(
+        "Namespace policy mutations require transactional IAM Driver support.",
+      );
+    }
     await this.lockNamespace(state, namespaceId);
     if (!(await state.installations.holdPrincipalAccount(principalId))) {
       throw new AuthorizationDeniedError("The acting account is disabled.");
