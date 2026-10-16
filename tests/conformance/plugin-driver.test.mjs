@@ -716,7 +716,7 @@ process.stdin.once("data", () => process.stdout.write("null\\n"));
   });
   await assert.rejects(driver.listCatalog(context("dedicated")), (error) => {
     assert.ok(error instanceof NotImplementedError);
-    assert.match(error.message, /returned invalid JSON/);
+    assert.match(error.message, /returned an invalid JSON-RPC response/);
     return true;
   });
 });

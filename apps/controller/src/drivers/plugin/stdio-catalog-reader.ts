@@ -193,7 +193,7 @@ export class NativeCodexPluginCatalogReader implements CodexPluginCatalogReader 
           finish(
             new NotImplementedError(
               "codex-plugin-catalog-discovery",
-              "Codex plugin catalog discovery returned invalid JSON response.",
+              "Codex plugin catalog discovery returned an invalid JSON-RPC response.",
             ),
           );
           return;
