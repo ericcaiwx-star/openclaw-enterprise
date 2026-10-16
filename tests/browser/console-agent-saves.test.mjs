@@ -12,7 +12,10 @@ import {
   nativeValues,
   newPage,
   pathRequests,
+  recordLayoutShifts,
   selectSecret,
+  setSlackSelection,
+  takeLayoutShifts,
   waitForInputValue,
   secretOptionLabel,
 } from "./console-agents-browser-helpers.mjs";
@@ -580,3 +583,480 @@ test("repository Cancel keeps the replaced editor locked while choices finish lo
     { repositoryRef: "application" },
   ]);
 });
+
+// Another browser re-saves the Configuration unchanged, so its generation moves under the page.
+async function changeElsewhere(c) {
+  const current = await c.fixture.request("GET", configurationPath(c));
+  const changed = await c.fixture.request("PATCH", configurationPath(c), {
+    body: { values: current.data.values },
+  });
+  assert.equal(changed.status, 200);
+}
+
+// Picks the two other Slack token Secrets in the channel Secrets form.
+async function selectNewSlackSecrets(page, c) {
+  await selectSecret(page, "Slack app token", c.secondApp);
+  await selectSecret(page, "Slack bot token", c.secondBot);
+}
+
+// A save that disables its own button, or a conflict that leaves Reload draft as the next step,
+// dropped focus to body (finding 1481). Focus now lands on the saved status, or on Reload draft
+// described by the conflict.
+const outcomeFocusCases = [
+  {
+    name: "saving channel Secrets leaves focus on the saved status",
+    tab: "credentials",
+    async act(page, c) {
+      await selectNewSlackSecrets(page, c);
+      await page.getByRole("button", { name: "Save channel Secrets" }).click();
+    },
+    message: "Channel Secret bindings saved. Deploy the new version to deliver them.",
+    focus: "Channel Secret bindings saved. Deploy the new version to deliver them.",
+  },
+  {
+    name: "a channel Secrets conflict focuses Reload draft",
+    tab: "credentials",
+    async act(page, c) {
+      await selectNewSlackSecrets(page, c);
+      await changeElsewhere(c);
+      await page.getByRole("button", { name: "Save channel Secrets" }).click();
+    },
+    message: "Configuration changed. Reload this draft before saving channel Secrets.",
+    focus: "Reload draft",
+    described: true,
+  },
+  {
+    name: "a Configuration conflict focuses Reload draft",
+    tab: "configuration",
+    async act(page, c) {
+      await page.getByRole("button", { name: "Edit Configuration" }).click();
+      await openAdvancedSettings(page);
+      const values = nativeValues("mine", { harnessId: "codex" });
+      await page.getByLabel("Configuration JSON").fill(JSON.stringify(values, null, 2));
+      await changeElsewhere(c);
+      await page.getByRole("button", { name: "Save Configuration" }).click();
+    },
+    message:
+      "The saved Configuration changed while you were editing. Reload this draft before saving.",
+    focus: "Reload draft",
+    described: true,
+  },
+];
+
+for (const c of outcomeFocusCases) {
+  test(c.name, async (t) => {
+    const context = await slackAgent(t, "Save Outcome Focus");
+    const { fixture, namespace, agent } = context;
+    context.secondApp = await fixture.createSecret(namespace.id, "Second app token", "xapp-2");
+    context.secondBot = await fixture.createSecret(namespace.id, "Second bot token", "xoxb-2");
+    const page = await openTab(t, fixture, namespace, agent, c.tab);
+    await page.getByRole("heading", { name: "Save Outcome Focus" }).waitFor();
+    await c.act(page, context);
+    await page.getByText(c.message).waitFor();
+    assert.equal(await focusedText(page), c.focus);
+    if (c.described) {
+      assert.equal(await focusedDescription(page), c.message);
+    }
+  });
+}
+
+// A Channels save that conflicted with another browser's save failed the same way on every
+// retry: Cancel, reopening the editor and tab switches kept the page's old generation, and only
+// a browser reload recovered (finding 1480). The section now offers Reload draft.
+test("a Channels conflict offers Reload draft, which recovers in place", async (t) => {
+  const context = await slackAgent(t, "Channels Conflict");
+  const { fixture, namespace, agent } = context;
+  const page = await openTab(t, fixture, namespace, agent, "channels");
+  await page.getByRole("heading", { name: "Channels Conflict" }).waitFor();
+  const edit = page.getByRole("button", { name: "Edit Slack", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+  await changeElsewhere(context);
+  await edit.click();
+  await dialog.getByRole("button", { name: "Save configuration" }).click();
+  const message =
+    "The saved Configuration changed while you were editing. Reload this draft before saving.";
+  await page.getByRole("alert").filter({ hasText: message }).waitFor();
+  await dialog.waitFor({ state: "detached" });
+  assert.equal(await focusedText(page), "Reload draft");
+  assert.equal(await focusedDescription(page), message);
+  // The editor cannot reopen against the old generation, and nothing deploys from it.
+  assert.equal(await edit.isDisabled(), true);
+  assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
+
+  await page.getByRole("button", { name: "Reload draft" }).click();
+  await page.getByRole("status").filter({ hasText: "Draft reloaded." }).waitFor();
+  await edit.click();
+  await dialog.getByRole("button", { name: "Save configuration" }).click();
+  await page.getByRole("status").filter({ hasText: "Channels saved." }).waitFor();
+  assert.equal((await fixture.request("GET", configurationPath(context))).data.generation, 3);
+});
+
+// A Channels conflict closed the editor and dropped its edits with no warning: DM policy,
+// allowlists and a Secret chosen there (finding 1504). The conflict now names the chosen
+// Secret, and Reload draft reopens only the reader's edits over the reread settings, so the
+// other browser's changes are kept too.
+test("a Channels conflict keeps the editor's edits for Reload draft", async (t) => {
+  const context = await slackAgent(t, "Channels Carry");
+  const { fixture, namespace, agent } = context;
+  const carriedBot = await fixture.createSecret(namespace.id, "Carried bot token", "xoxb-carry");
+  const otherApp = await fixture.createSecret(namespace.id, "Other app token", "xapp-other");
+  const page = await openTab(t, fixture, namespace, agent, "channels");
+  const requests = apiRequests(page, fixture.origin);
+  await page.getByRole("heading", { name: "Channels Carry" }).waitFor();
+  const edit = page.getByRole("button", { name: "Edit Slack", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+  await edit.click();
+  await dialog.getByLabel("Direct-message policy").selectOption("allowlist");
+  await setSlackSelection(
+    dialog.getByRole("combobox", { name: "Allowed people in direct messages", exact: true }),
+    "UCARRY123",
+  );
+  await selectSecret(dialog, "Slack bot token", carriedBot);
+  // Another browser turns off mentions and swaps the app token Secret.
+  const current = await fixture.request("GET", configurationPath(context));
+  const changed = await fixture.request("PATCH", configurationPath(context), {
+    body: {
+      values: {
+        ...current.data.values,
+        channels: {
+          slack: { ...current.data.values.channels.slack, requireMention: false },
+        },
+      },
+      secretBindings: {
+        ...current.data.secretBindings,
+        SLACK_APP_TOKEN: { source: otherApp.ref, delivery: { type: "env" } },
+      },
+    },
+  });
+  assert.equal(changed.status, 200);
+  await dialog.getByRole("button", { name: "Save configuration" }).click();
+  const message =
+    "The saved Configuration changed while you were editing. Reload this draft before saving. Reload draft reopens your Slack edits over the saved settings, including the Secret “Carried bot token”.";
+  await page.getByRole("alert").filter({ hasText: message }).waitFor();
+  await dialog.waitFor({ state: "detached" });
+  assert.equal(await focusedText(page), "Reload draft");
+  assert.equal(await focusedDescription(page), message);
+
+  await page.getByRole("button", { name: "Reload draft" }).click();
+  await dialog.waitFor();
+  const note =
+    "Your edits are applied over the reloaded settings: Direct-message policy, Allowed people in direct messages, Slack bot token. Review them, then save.";
+  await dialog.getByRole("status").filter({ hasText: note }).waitFor();
+  assert.equal(await dialog.getByLabel("Direct-message policy").inputValue(), "allowlist");
+  assert.equal(await dialog.getByLabel("Require a mention").isChecked(), false);
+  await dialog.getByRole("button", { name: "Save configuration" }).click();
+  await page.getByRole("status").filter({ hasText: "Channels saved." }).waitFor();
+  const saved = (await fixture.request("GET", configurationPath(context))).data;
+  assert.equal(saved.generation, 3);
+  assert.equal(saved.values.channels.slack.dmPolicy, "allowlist");
+  assert.deepEqual(saved.values.channels.slack.allowFrom, ["UCARRY123"]);
+  assert.equal(saved.values.channels.slack.requireMention, false);
+  assert.deepEqual(saved.secretBindings.SLACK_APP_TOKEN, {
+    source: otherApp.ref,
+    delivery: { type: "env" },
+  });
+  assert.deepEqual(saved.secretBindings.SLACK_BOT_TOKEN, {
+    source: carriedBot.ref,
+    delivery: { type: "env" },
+  });
+  // The carried Secret still gets its access grant on the final save.
+  assert.deepEqual(
+    requests
+      .filter(
+        (request) => request.method === "POST" && request.path.endsWith("/iam/access-bindings"),
+      )
+      .map((request) => request.body.resourceId),
+    [carriedBot.id],
+  );
+});
+
+// A Secret picked and then picked back is no edit: carrying it would put the old binding back
+// over another browser's change.
+test("a Channels conflict does not carry a Secret picked back to the saved one", async (t) => {
+  const context = await slackAgent(t, "Channels Pick Back");
+  const { fixture, namespace, agent } = context;
+  const original = (await fixture.request("GET", configurationPath(context))).data.secretBindings
+    .SLACK_BOT_TOKEN;
+  const originalBot = { id: original.source.id, name: "Channels Pick Back bot token" };
+  const tempBot = await fixture.createSecret(namespace.id, "Temporary bot token", "xoxb-temp");
+  const otherBot = await fixture.createSecret(namespace.id, "Other bot token", "xoxb-other");
+  const page = await openTab(t, fixture, namespace, agent, "channels");
+  await page.getByRole("heading", { name: "Channels Pick Back" }).waitFor();
+  const edit = page.getByRole("button", { name: "Edit Slack", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+  await edit.click();
+  await dialog.getByLabel("Direct-message policy").selectOption("disabled");
+  await selectSecret(dialog, "Slack bot token", tempBot);
+  await selectSecret(dialog, "Slack bot token", originalBot);
+  const current = await fixture.request("GET", configurationPath(context));
+  const changed = await fixture.request("PATCH", configurationPath(context), {
+    body: {
+      values: current.data.values,
+      secretBindings: {
+        ...current.data.secretBindings,
+        SLACK_BOT_TOKEN: { source: otherBot.ref, delivery: { type: "env" } },
+      },
+    },
+  });
+  assert.equal(changed.status, 200);
+  await dialog.getByRole("button", { name: "Save configuration" }).click();
+  const message =
+    "The saved Configuration changed while you were editing. Reload this draft before saving. Reload draft reopens your Slack edits over the saved settings.";
+  await page.getByRole("alert").filter({ hasText: message }).waitFor();
+  assert.equal(await focusedDescription(page), message);
+
+  await page.getByRole("button", { name: "Reload draft" }).click();
+  await dialog
+    .getByRole("status")
+    .filter({
+      hasText:
+        "Your edits are applied over the reloaded settings: Direct-message policy. Review them, then save.",
+    })
+    .waitFor();
+  await waitForInputValue(dialog.getByLabel("Slack bot token"), "Other bot token");
+  await dialog.getByRole("button", { name: "Save configuration" }).click();
+  await page.getByRole("status").filter({ hasText: "Channels saved." }).waitFor();
+  const saved = (await fixture.request("GET", configurationPath(context))).data;
+  assert.deepEqual(saved.secretBindings.SLACK_BOT_TOKEN, {
+    source: otherBot.ref,
+    delivery: { type: "env" },
+  });
+});
+
+// The editor Reload draft reopens has no opener left on the rebuilt page; closing it returned
+// focus to the document body.
+test("closing an editor reopened by Reload draft focuses Edit Slack", async (t) => {
+  const context = await slackAgent(t, "Channels Reopened Close");
+  const { fixture, namespace, agent } = context;
+  const page = await openTab(t, fixture, namespace, agent, "channels");
+  await page.getByRole("heading", { name: "Channels Reopened Close" }).waitFor();
+  const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+  await page.getByRole("button", { name: "Edit Slack", exact: true }).click();
+  await dialog.getByLabel("Direct-message policy").selectOption("disabled");
+  await changeElsewhere(context);
+  await dialog.getByRole("button", { name: "Save configuration" }).click();
+  await page.getByRole("button", { name: "Reload draft" }).click();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await dialog.waitFor({ state: "detached" });
+  assert.equal(await focusedText(page), "Edit Slack");
+});
+
+// After Save Configuration the rebuilt summary showed "Bound Secret · sec_… · Loading
+// metadata…" on two lines until the Secret was reread, then collapsed to its name and moved the
+// cards below (CLS 0.073, finding 1482). It now keeps the name it already showed.
+test("a saved Configuration's summary keeps the Secret name while it rereads it", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Summary Name", { ready: true });
+  const model = await fixture.createSecret(namespace.id, "Summary model key", "hidden-model");
+  const agent = await fixture.createAgent(namespace.id, "Summary Name", nativeValues("before"), {
+    harnessAuth: { method: "api_key", source: model.ref },
+  });
+  let reads = 0;
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  t.after(() => release());
+  const page = await openTab(t, fixture, namespace, agent, "configuration", {
+    // The rebuilt summary's metadata read waits, as on a slow link (a hand-written count, not
+    // Playwright's { times }).
+    beforeLogin: (routed) =>
+      routed.route(`**/namespaces/${namespace.id}/secrets/${model.id}`, async (route) => {
+        reads += 1;
+        if (reads === 2) {
+          await held;
+        }
+        await route.continue().catch(() => {});
+      }),
+  });
+  await page.getByRole("heading", { name: "Summary Name" }).waitFor();
+  const name = page.getByRole("link", { name: "Summary model key", exact: true });
+  await name.waitFor();
+  await page.evaluate(() => {
+    globalThis.__metadataLoading = [];
+    new globalThis.MutationObserver(() => {
+      for (const node of globalThis.document.querySelectorAll(".secret-reference")) {
+        if (node.textContent.includes("Loading metadata")) {
+          globalThis.__metadataLoading.push(node.textContent);
+        }
+      }
+    }).observe(globalThis.document.body, { childList: true, subtree: true, characterData: true });
+  });
+  await page.getByRole("button", { name: "Edit Configuration" }).click();
+  await openAdvancedSettings(page);
+  await page.getByLabel("Configuration JSON").fill(JSON.stringify(nativeValues("after"), null, 2));
+  await page.getByRole("button", { name: "Save Configuration" }).click();
+  await page.getByRole("status").filter({ hasText: "Configuration saved." }).waitFor();
+  assert.ok(reads >= 2, "the rebuilt summary rereads the Secret");
+  assert.equal(await name.isVisible(), true);
+  assert.deepEqual(await page.evaluate(() => globalThis.__metadataLoading), []);
+});
+
+// A channel save's own state clears before the saved draft refreshes, so only the refresh keeps
+// the other tabs locked until the rebuilt tab is in place; no test checked it (finding 1487).
+test("the other tabs stay locked while a saved channel draft refreshes", async (t) => {
+  const context = await slackAgent(t, "Refresh Lock");
+  const { fixture, namespace, agent } = context;
+  // The page's third Configuration read (load, save preflight, refresh) waits; a hand-written
+  // count, not Playwright's { times }.
+  let reads = 0;
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  let markRefreshing;
+  const refreshing = new Promise((resolve) => {
+    markRefreshing = resolve;
+  });
+  t.after(() => release());
+  const page = await openTab(t, fixture, namespace, agent, "channels", {
+    beforeLogin: (routed) =>
+      routed.route(`**${configurationPath(context)}`, async (route) => {
+        if (route.request().method() === "GET" && ++reads === 3) {
+          markRefreshing();
+          await held;
+        }
+        await route.continue().catch(() => {});
+      }),
+  });
+  await page.getByRole("heading", { name: "Refresh Lock" }).waitFor();
+  await page.getByRole("button", { name: "Deploy new version", disabled: false }).waitFor();
+  const plugins = page.getByRole("button", { name: "Plugins", exact: true });
+  assert.equal(await plugins.isEnabled(), true);
+  await page.getByRole("button", { name: "Disable Slack" }).click();
+  await refreshing;
+  assert.equal(await plugins.isDisabled(), true);
+  assert.equal(
+    await page.getByRole("button", { name: "Credentials", exact: true }).isDisabled(),
+    true,
+  );
+  release();
+  await page.getByRole("status").filter({ hasText: "Channels saved." }).waitFor();
+  assert.equal(await plugins.isEnabled(), true);
+});
+
+// Save Configuration collapses the ~400 px editor to its summary when the save lands, about
+// 0.7 s after the click on a live cluster, past the input's 500 ms grace. Stop Agent then
+// moved up into view: CLS 0.074 (finding 1482).
+test("a Configuration save that lands late does not move the cards below the editor", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Late save", { ready: true });
+  const agent = await fixture.createAgent(namespace.id, "Late Save", nativeValues("before"));
+  await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+  const page = await openTab(t, fixture, namespace, agent, "configuration", {
+    viewport: { width: 1280, height: 800 },
+    // The save lands 900 ms after the click.
+    beforeLogin: (routed) =>
+      routed.route(`**/namespaces/${namespace.id}/configurations/*`, async (route) => {
+        if (route.request().method() === "PATCH") {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+        }
+        await route.fallback().catch(() => {});
+      }),
+  });
+  await page.getByRole("heading", { name: "Late Save" }).waitFor();
+  await page.getByRole("button", { name: "Edit Configuration" }).click();
+  await openAdvancedSettings(page);
+  await page.getByLabel("Configuration JSON").fill(JSON.stringify(nativeValues("after"), null, 2));
+  const save = page.getByRole("button", { name: "Save Configuration" });
+  // A reader scrolls the editor's actions into view, then saves once the page is still.
+  await save.evaluate((control) => control.scrollIntoView({ block: "center" }));
+  await page.evaluate(() => globalThis.document.fonts.ready);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await page.evaluate(recordLayoutShifts);
+  await save.click();
+  await page.getByRole("status").filter({ hasText: "Configuration saved." }).waitFor();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  // The tab and the cards below it. Headless Chromium also reports the body itself when the
+  // page gets shorter, on main as well, which a reader does not see.
+  const { shifts } = await takeLayoutShifts(page);
+  const shift = shifts
+    .filter((entry) => entry.sources.some((source) => !source.node.startsWith("BODY.")))
+    .reduce((sum, entry) => sum + entry.value, 0);
+  t.diagnostic(`shift ${shift}: ${JSON.stringify(shifts)}`);
+  assert.ok(shift < 0.01, `shift ${shift}`);
+  // The saved summary's next step is in view, where Save Configuration was.
+  assert.equal(
+    await page.evaluate(() => globalThis.document.activeElement?.textContent),
+    "Edit Configuration",
+  );
+  assert.equal(await page.getByRole("button", { name: "Edit Configuration" }).isVisible(), true);
+});
+
+// A save from another browser that landed between a save's reread and its PATCH was silently
+// overwritten (finding 1505). The PATCH now names the generation the page read, and the API's
+// 409 leaves Reload draft as the next step, as a conflict found by the reread does.
+const racedSaveCases = [
+  {
+    name: "Channels",
+    tab: "channels",
+    async act(page) {
+      await page.getByRole("button", { name: "Edit Slack", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+      await dialog.getByLabel("Direct-message policy").selectOption("disabled");
+      await dialog.getByRole("button", { name: "Save configuration" }).click();
+    },
+  },
+  {
+    name: "Configuration editor",
+    tab: "configuration",
+    async act(page) {
+      await page.getByRole("button", { name: "Edit Configuration" }).click();
+      await openAdvancedSettings(page);
+      const values = nativeValues("raced", { harnessId: "codex" });
+      await page.getByLabel("Configuration JSON").fill(JSON.stringify(values, null, 2));
+      await page.getByRole("button", { name: "Save Configuration" }).click();
+    },
+  },
+  {
+    name: "channel Secrets",
+    tab: "credentials",
+    message: "Configuration changed. Reload this draft before saving channel Secrets.",
+    async act(page, c) {
+      await selectNewSlackSecrets(page, c);
+      await page.getByRole("button", { name: "Save channel Secrets" }).click();
+    },
+  },
+];
+
+for (const c of racedSaveCases) {
+  test(`a ${c.name} save raced after its reread is refused and offers Reload draft`, async (t) => {
+    const context = await slackAgent(t, `Raced ${c.name}`);
+    const { fixture, namespace, agent } = context;
+    context.secondApp = await fixture.createSecret(namespace.id, "Second app token", "xapp-2");
+    context.secondBot = await fixture.createSecret(namespace.id, "Second bot token", "xoxb-2");
+    const patches = [];
+    const before = (await fixture.request("GET", configurationPath(context))).data.values;
+    const page = await openTab(t, fixture, namespace, agent, c.tab, {
+      // Another browser saves after the page's preflight reread, just before its PATCH.
+      beforeLogin: (routed) =>
+        routed.route(`**${configurationPath(context)}`, async (route) => {
+          if (route.request().method() === "PATCH") {
+            patches.push(route.request().postDataJSON());
+            await changeElsewhere(context);
+          }
+          await route.continue().catch(() => {});
+        }),
+    });
+    await page.getByRole("heading", { name: `Raced ${c.name}` }).waitFor();
+    await page.getByRole("button", { name: "Deploy new version", disabled: false }).waitFor();
+    await c.act(page, context);
+    const message =
+      c.message ??
+      "The saved Configuration changed while you were editing. Reload this draft before saving.";
+    await page.getByText(message).first().waitFor();
+    assert.equal(await focusedText(page), "Reload draft");
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0].expectedGeneration, 1);
+    assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
+    // The other browser's save stands; the page's edit did not replace it.
+    const saved = (await fixture.request("GET", configurationPath(context))).data;
+    assert.equal(saved.generation, 2);
+    assert.deepEqual(saved.values, before);
+
+    await page.getByRole("button", { name: "Reload draft" }).click();
+    await page.getByRole("status").filter({ hasText: "Draft reloaded." }).waitFor();
+  });
+}

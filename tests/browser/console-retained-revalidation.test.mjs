@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
+import { FIRST_ACTIVITY_WAIT_MS } from "../../apps/controller/src/console/agents/detail.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import {
   detailUrl,
@@ -321,6 +322,35 @@ test("Opening Agent details acknowledges navigation immediately; other first vis
     "Agent (held)",
     "Namespaces",
   ]);
+});
+
+// On a slow link the opening panel's heading had focus, the Agent page rendered with focus on
+// body, and its heading took focus only once the tab's reads settled, 0.5-0.9 s later at 400 ms
+// (finding 1483). It now takes focus as the title renders.
+test("Opening an Agent focuses its heading before the tab's reads settle", async (t) => {
+  const { namespace, agent, page } = await openList(t, "Opening focus", ["Opening Focus"], {
+    running: true,
+  });
+  const link = page.locator(settledView).getByRole("link", { name: "Opening Focus" });
+  // The Configuration tab's read is slow.
+  const configuration = await holdRequests(
+    t,
+    page,
+    `**/namespaces/${namespace.id}/configurations/${agent.configurationId}`,
+    { once: true },
+  );
+  await link.focus();
+  await link.press("Enter");
+  await configuration.requested;
+  const heading = page.getByRole("heading", { level: 1, name: "Opening Focus" });
+  await heading.waitFor();
+  await page.waitForFunction(() => globalThis.document.activeElement?.tagName === "H1", null, {
+    timeout: 1000,
+  });
+  assert.equal(await isFocused(heading), true);
+  configuration.release();
+  await page.locator(settledView).getByRole("region", SUMMARY).waitFor();
+  assert.equal(await isFocused(heading), true);
 });
 
 for (const back of ["Browser Back", "Back to Agents"]) {
@@ -904,24 +934,25 @@ test("Leaving a new Agent page before its reveal does not leave it hidden on ret
   const pendingDetail = page.locator(".agent-detail-pending");
   const shownDetail = page.locator(`${activeView}.agent-detail-pending`);
   // Deployment record reads are held (Deployment activity's and the version panel's, in either
-  // order), so the page shows only its toolbar until the 1 s reveal.
+  // order), so the page shows only its toolbar until the bounded reveal.
   const firstRecord = await holdRequests(t, page, record);
   await page.getByRole("link", { name: "Revealed Agent" }).click();
   await shownDetail.waitFor({ state: "attached" });
   await firstRecord.requested;
-  // Leave before the 1 s reveal and let its timer pass while the page is away.
+  // Leave before the reveal and let its timer pass while the page is away.
   await page.clock.runFor(300);
   await page.goBack();
   await page.locator(settledView).getByRole("link", { name: "Revealed Agent" }).waitFor();
-  await page.clock.runFor(800);
+  await page.clock.runFor(FIRST_ACTIVITY_WAIT_MS);
   firstRecord.release();
 
-  // Forward rebuilds the page, held again on its record read; it reveals at 1 s as on a first visit.
+  // Forward rebuilds the page, held again on its record read; it reveals at the bound as on a
+  // first visit.
   const returnRecord = await holdRequests(t, page, record);
   await page.goForward();
   await returnRecord.requested;
   await shownDetail.waitFor({ state: "attached" });
-  await page.clock.runFor(999);
+  await page.clock.runFor(FIRST_ACTIVITY_WAIT_MS - 1);
   assert.equal(await pendingDetail.count(), 1);
   await page.clock.runFor(1);
   assert.equal(await pendingDetail.count(), 0);

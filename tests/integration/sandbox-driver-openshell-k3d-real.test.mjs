@@ -4104,49 +4104,124 @@ async function assertCredentialSourceUpdateAndLiveWithdrawal(topology) {
   assert.equal(deletion.status, 409, JSON.stringify(deletion.error));
 }
 
-async function gatewayTurnFailureDiagnostic(topology, gatewayPassword) {
-  const redactions = [modelCredential, gatewayPassword, topology.appServerToken].filter(
-    (secret) => typeof secret === "string" && secret.length > 0,
+// Each section keeps its newest matching lines within its own budget, so the Harness and
+// OpenShell supervisor lines still fit the 16 KiB failure message after the Gateway's.
+// Workspace-node disconnects (finding 1496) need the node host's close line and the
+// supervisor's connection events, so those sources keep timestamps. Every clip runs after
+// redaction: a value cut in half could no longer be matched by the reporter.
+const turnDiagnosticLineChars = 400;
+const turnDiagnosticErrorChars = 300;
+const turnDiagnosticNoise =
+  /identity scope grant elevated connection identity=occ-workspace-files|authenticated user (?:connected|disconnected) .*user=occ-workspace-files/u;
+
+function turnDiagnosticLines(logs, pattern, budget, secrets) {
+  const kept = [];
+  let length = 0;
+  for (const line of logs.split("\n").reverse()) {
+    if (!pattern.test(line) || turnDiagnosticNoise.test(line)) {
+      continue;
+    }
+    const shown = redactLogLine(line, secrets, turnDiagnosticLineChars);
+    if (length + shown.length + 1 > budget) {
+      break;
+    }
+    kept.push(shown);
+    length += shown.length + 1;
+  }
+  return kept.reverse().join("\n");
+}
+
+// The network supervisor serving this Harness shares its boundary pair, as in the L7 denial
+// proof below. Anything other than exactly one match reads no supervisor: another Agent's
+// supervisor in the same namespace is not evidence for this Harness.
+async function openShellSupervisorPod(topology) {
+  const boundaryPair = topology.harnessPod.metadata.labels?.["openshell.ai/boundary-pair"];
+  if (!boundaryPair) {
+    throw new Error("the Harness has no openshell.ai/boundary-pair label");
+  }
+  const supervisors = (await resources("pods", topology.placement)).filter(
+    (pod) =>
+      pod.metadata.labels?.["openshell.ai/boundary-role"] === "supervisor" &&
+      pod.metadata.labels?.["openshell.ai/boundary-pair"] === boundaryPair,
   );
-  const sections = [];
-  for (const source of [
+  if (supervisors.length !== 1) {
+    throw new Error(`${supervisors.length} supervisor Pods match the Harness boundary pair`);
+  }
+  return supervisors[0];
+}
+
+function turnFailureSecrets(topology, gatewayPassword) {
+  return failureSecrets([
+    process.env,
+    {
+      MODEL_CREDENTIAL: modelCredential,
+      GATEWAY_PASSWORD: gatewayPassword,
+      APP_SERVER_TOKEN: topology.appServerToken,
+    },
+  ]);
+}
+
+async function gatewayTurnFailureDiagnostic(topology, gatewayPassword) {
+  const secrets = turnFailureSecrets(topology, gatewayPassword);
+  const unavailable = (label, error) =>
+    `${label} diagnostics unavailable: ${redactLogLine(
+      error?.message ?? String(error),
+      secrets,
+      turnDiagnosticErrorChars,
+    )}`;
+  const sources = [
     {
       label: "Gateway",
       name: topology.gatewayPod.metadata.name,
       namespace: topology.gatewayPlacement,
-      containerArguments: [],
+      logArguments: ["--tail=2000"],
+      budget: 5_000,
+      pattern:
+        /error|warn|workspace|model|openai|worker|node|inference|turn|fetch|network|policy|disconnect|close|pair|reload|skill/iu,
     },
     {
       label: "Harness",
       name: topology.harnessPod.metadata.name,
       namespace: topology.placement,
-      containerArguments: ["--container", "agent"],
+      logArguments: ["--container", "agent", "--tail=2000", "--timestamps"],
+      budget: 4_000,
+      pattern:
+        /error|warn|workspace|model|openai|worker|node host|inference|turn|fetch|network|policy|disconnect|close|reconnect|frozen|mediation/iu,
     },
-  ]) {
+  ];
+  try {
+    const pod = await openShellSupervisorPod(topology);
+    sources.push({
+      label: `OpenShell supervisor ${pod.metadata.name}`,
+      name: pod.metadata.name,
+      namespace: topology.placement,
+      logArguments: ["--container", "supervisor", "--tail=2000", "--timestamps"],
+      budget: 4_000,
+      pattern:
+        /error|warn|lost|frozen|recover|reconnect|mediation|connection|disconnect|close|terminat|kill|expire/iu,
+    });
+  } catch (error) {
+    sources.push({ label: "OpenShell supervisor", lookupError: error });
+  }
+  const sections = [];
+  for (const source of sources) {
+    if (source.lookupError !== undefined) {
+      sections.push(unavailable(source.label, source.lookupError));
+      continue;
+    }
     try {
-      let logs = await kubectl(
+      const logs = await kubectl(
         "logs",
         source.name,
         "--namespace",
         source.namespace,
-        ...source.containerArguments,
-        "--tail=300",
+        ...source.logArguments,
       );
-      for (const secret of redactions) {
-        logs = logs.replaceAll(secret, "[REDACTED]");
-      }
-      const relevant = logs
-        .split("\n")
-        .filter((line) =>
-          /error|warn|workspace|model|openai|worker|node host|inference|turn|fetch|network|policy/iu.test(
-            line,
-          ),
-        )
-        .slice(-80)
-        .join("\n");
-      sections.push(`${source.label} diagnostics:\n${relevant}`);
+      sections.push(
+        `${source.label} diagnostics:\n${turnDiagnosticLines(logs, source.pattern, source.budget, secrets)}`,
+      );
     } catch (error) {
-      sections.push(`${source.label} diagnostics unavailable: ${error?.message ?? String(error)}`);
+      sections.push(unavailable(source.label, error));
     }
   }
   try {
@@ -4156,9 +4231,12 @@ async function gatewayTurnFailureDiagnostic(topology, gatewayPassword) {
       state: status.state,
       restartCount: status.restartCount,
     }));
-    sections.push(`Harness Pod: ${JSON.stringify({ phase: pod.status?.phase, containers })}`);
+    // A terminated container's message can hold 4 KB; keep the other sections in the message.
+    sections.push(
+      `Harness Pod: ${redactLogLine(JSON.stringify({ phase: pod.status?.phase, containers }), secrets, 1_000)}`,
+    );
   } catch (error) {
-    sections.push(`Harness Pod status unavailable: ${error?.message ?? String(error)}`);
+    sections.push(unavailable("Harness Pod status", error));
   }
   return `\n${sections.join("\n")}`;
 }
@@ -4881,7 +4959,7 @@ async function assertModelRouteRefusesUntrustedUpstream(topology) {
   const agentId = topology.agent.id;
   const current = await request("GET", `/namespaces/${namespaceId}/agents/${agentId}`);
   assert.equal(current.status, 200, JSON.stringify(current.error));
-  await waitForProviderHarnessPod(topology.placement, {
+  const harnessPod = await waitForProviderHarnessPod(topology.placement, {
     id: current.data.activeRevisionId,
     agentId,
   });
@@ -4893,15 +4971,18 @@ async function assertModelRouteRefusesUntrustedUpstream(topology) {
   const eventsBefore = (await untrustedTls.events()).length;
   let rejected = false;
   let observation;
+  let rejection;
+  let gatewayPod;
   let failure;
   try {
     await setModelProviderDns(topology, untrustedTls.address);
     const nonce = `OCC-OPENSHELL-UNTRUSTED-${randomUUID()}`;
     try {
+      gatewayPod = await currentGatewayPod(topology);
       observation = JSON.stringify(
         await requestCodexTurnFromGatewayPod({
           namespace: topology.gatewayPlacement,
-          gatewayPod: await currentGatewayPod(topology),
+          gatewayPod,
           providerModel,
           prompt: `Reply with exactly ${nonce}.`,
         }),
@@ -4909,6 +4990,10 @@ async function assertModelRouteRefusesUntrustedUpstream(topology) {
     } catch (error) {
       rejected = true;
       observation = error instanceof Error ? error.message : String(error);
+      // The kubectl error message starts with the whole probe script; its stderr says why.
+      if (typeof error?.stderr === "string") {
+        rejection = error.stderr.trim() || "kubectl returned no stderr; probe command omitted.";
+      }
     }
   } catch (error) {
     failure = error;
@@ -4941,9 +5026,57 @@ async function assertModelRouteRefusesUntrustedUpstream(topology) {
     "a refused model route must not expose the model key",
   );
   assert.equal(rejected, true, "a model turn must not complete through an untrusted upstream.");
-  assert.ok(observed.tlsFailures > 0, "OpenShell must attempt and refuse the upstream handshake.");
-  assert.equal(observed.handshakes, 0, "no upstream handshake may complete.");
-  assert.equal(observed.requests, 0, "no model request, or key, may reach the upstream.");
+  const refused = observed.tlsFailures > 0 && observed.handshakes === 0 && observed.requests === 0;
+  const detail = refused
+    ? ""
+    : await untrustedUpstreamFailureDetail(topology, {
+        harnessPod,
+        gatewayPod,
+        observed,
+        text: rejection ?? observation,
+      });
+  assert.ok(
+    observed.tlsFailures > 0,
+    `OpenShell must attempt and refuse the upstream handshake.${detail}`,
+  );
+  assert.equal(observed.handshakes, 0, `no upstream handshake may complete.${detail}`);
+  assert.equal(observed.requests, 0, `no model request, or key, may reach the upstream.${detail}`);
+}
+
+// Finding 1507: a turn refused with no upstream event failed before OpenShell tried the
+// untrusted upstream (the DNS override unseen, or the Gateway failing first as in 1496).
+// The turn's text is redacted before it is cut, and stays small enough that the Gateway,
+// Harness and supervisor sections still fit the 16 KiB failure message.
+const untrustedTurnObservationChars = 1_000;
+
+async function untrustedUpstreamFailureDetail(
+  topology,
+  { harnessPod, gatewayPod, observed, text },
+) {
+  const passwordSecret = await resource(
+    "secret",
+    `gateway-password-${hash(topology.agent.id)}`,
+    topology.gatewayPlacement,
+  ).catch(() => undefined);
+  const encodedPassword = passwordSecret?.data?.["gateway-password"];
+  const gatewayPassword =
+    encodedPassword === undefined ? undefined : Buffer.from(encodedPassword, "base64").toString();
+  const secrets = turnFailureSecrets(topology, gatewayPassword);
+  const shown = redactLogLine(String(text), secrets, untrustedTurnObservationChars);
+  const detail = `\nTurn observation: ${shown}`;
+  if (observed.tlsFailures !== 0 || observed.handshakes !== 0 || observed.requests !== 0) {
+    return detail;
+  }
+  if (gatewayPod === undefined) {
+    // The turn never ran: finding no running Gateway Pod counted as the refusal.
+    return `${detail}\nNo running Agent Gateway Pod was found for the turn.`;
+  }
+  // The diagnostic reads the replacement's Harness and the Gateway Pod that ran the turn.
+  const diagnostic = await gatewayTurnFailureDiagnostic(
+    { ...topology, harnessPod, gatewayPod: { metadata: { name: gatewayPod } } },
+    gatewayPassword,
+  );
+  return `${detail}${diagnostic}`;
 }
 
 async function assertDuplicateReconciliationDoesNotDuplicateOpenShell(topology) {

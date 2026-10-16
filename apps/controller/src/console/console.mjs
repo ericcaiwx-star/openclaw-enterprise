@@ -1,5 +1,10 @@
 import { element, button } from "./dom.mjs";
-import { renderAgentList, renderCreateAgent, renderAgentDetail } from "./agents.mjs";
+import {
+  clearResolvedSecretNames,
+  renderAgentList,
+  renderCreateAgent,
+  renderAgentDetail,
+} from "./agents.mjs";
 import { createApiClient } from "./api-client.mjs";
 import { createViewLifetime } from "./view-lifetime.mjs";
 import { createNavigation, pages } from "./navigation.mjs";
@@ -13,6 +18,9 @@ let session = null;
 let namespaces = [];
 let namespaceId = null;
 let observabilityUrl = null;
+// Set while the last Backends read was denied, so Retry and Refresh do not show the Namespace
+// selector again before the same answer hides it (finding 1491).
+let backendsDenied = false;
 // Session owner whose Installation-admin observability read has settled.
 let observabilityOwner = null;
 // The Installation-access probe still being answered, for the session owner that sent it.
@@ -665,13 +673,17 @@ function resetReads({ retainView = false, returnLink = null } = {}) {
 }
 
 function renderShell(feature, namespaceAdmissionPending = false) {
-  return shellUI.renderShell(feature, {
+  const shell = shellUI.renderShell(feature, {
     session,
     namespaces,
     namespaceId,
     observabilityUrl,
     namespaceAdmissionPending,
   });
+  if (feature === "backends" && backendsDenied && shell.scopeSelector) {
+    shell.scopeSelector.hidden = true;
+  }
+  return shell;
 }
 
 function renderPendingNamespaceShell(feature) {
@@ -682,6 +694,7 @@ function renderPendingNamespaceShell(feature) {
 
 function clearPrivate() {
   session = null;
+  backendsDenied = false;
   namespaces = [];
   namespaceId = null;
   observabilityUrl = null;
@@ -689,6 +702,7 @@ function clearPrivate() {
   installationAccessProbe = null;
   installationAdmin = null;
   clearRetainedViews();
+  clearResolvedSecretNames();
 }
 
 function clearDrafts() {
@@ -1466,7 +1480,19 @@ async function loadPage({
         }
       },
       setTitle: (title) => {
-        app.querySelector("h1").textContent = title;
+        const heading = app.querySelector("h1");
+        heading.textContent = title;
+        // The opening panel's heading had focus and the shell replaced it. Focus the Agent's
+        // heading as it appears, not once its tab's reads settle: on a slow link that left
+        // focus on body for 0.5-0.9 s (finding 1483).
+        if (
+          focusAgentResult &&
+          document.activeElement === document.body &&
+          lifetime.isCurrent(active)
+        ) {
+          heading.tabIndex = -1;
+          heading.focus({ preventScroll: true });
+        }
       },
       url: current.url,
       setTabNavigation(handler) {
@@ -1531,6 +1557,12 @@ async function loadPage({
       renderAgentList({ ...agentContext, items });
       showChatLinkFailure(shell.view, chatLinkFailure);
     } else {
+      if (current.feature === "backends" && backendsDenied) {
+        backendsDenied = false;
+        if (shell.scopeSelector) {
+          shell.scopeSelector.hidden = false;
+        }
+      }
       renderRows(shell.view, current.feature, items);
     }
     markMountedRoute(current);
@@ -1570,7 +1602,10 @@ async function loadPage({
         clearRetainedViewsForNamespace(selection);
       }
     }
-    focusAgentResult = document.activeElement === pendingAgentHeading;
+    // setTitle may already have moved that focus to the Agent's heading (finding 1483).
+    focusAgentResult =
+      document.activeElement === pendingAgentHeading ||
+      (focusAgentResult && document.activeElement === app.querySelector(".content h1"));
     shell = renderShell(current.feature);
     if (current.agentId && error.status === 404 && current.namespace === null) {
       // A typed or shared link has no Namespace, so the console read the Agent in
@@ -1633,14 +1668,24 @@ async function loadPage({
       return;
     }
     const agentDenied = current.agentId && error.status === 403;
+    // Backends are Installation-wide: another Namespace cannot change a denial (finding 1491).
+    const installationDenied = current.feature === "backends" && error.status === 403;
+    if (current.feature === "backends") {
+      backendsDenied = installationDenied;
+    }
+    if (installationDenied && shell.scopeSelector) {
+      shell.scopeSelector.hidden = true;
+    }
     panel(
       shell.view,
       title,
       agentDenied
         ? "You do not have access to this Agent or its settings, or it was deleted. Ask its owner to share it with you."
-        : error.status === 403
-          ? "Your account does not have access to this page in this Namespace. Ask an administrator for access, or choose another Namespace."
-          : "The read could not be completed. Retry to check current access and saved state.",
+        : installationDenied
+          ? "Your account does not have access to Backends. Backends apply to the whole Installation, so choosing another Namespace would not change this. Ask an Installation administrator for access."
+          : error.status === 403
+            ? "Your account does not have access to this page in this Namespace. Ask an administrator for access, or choose another Namespace."
+            : "The read could not be completed. Retry to check current access and saved state.",
       "Retry",
       () => void loadPage(),
       error.requestId,

@@ -878,6 +878,14 @@ export const scenarios = {
     rules: [{ path: "/backends", status: 503 }],
     description: "Backend discovery fails and can be retried.",
   },
+  backendsDenied: {
+    group: "Pages/Backends",
+    name: "Access denied",
+    path: "/console/backends",
+    rules: [{ path: "/backends", status: 403 }],
+    description:
+      "A caller without Installation access is told Backends apply to the whole Installation. The Namespace selector is hidden, since another Namespace would not change the answer.",
+  },
   namespaces: {
     group: "Pages/Namespaces",
     name: "Ready and provisioning",
@@ -2574,7 +2582,7 @@ export const scenarios = {
     ],
     actions: [...readyForm, click("Create Agent")],
     description:
-      "Provisioning admission conflicts before any separate Configuration save. Edit the request and retry from the same draft.",
+      "Provisioning admission conflicts before any separate Configuration save. The refusal replaces the submitting status and takes focus. Edit the request and retry from the same draft.",
   },
   createUnknown: {
     group: "Pages/Create Agent",
@@ -3034,8 +3042,9 @@ export const scenarios = {
     bootstrapFailure: true,
     path: "/console/agents?namespace=ns_00000000-0000-4000-8000-000000000001",
     description:
-      "The list shows the newest visible failure beside the current version, without asserting serving health.",
+      "The list shows the newest visible failure beside the current version, without asserting serving health. The failure keeps to one line, so the row keeps its height when the read lands; its title and the Agent page give the whole text.",
     steps: [
+      "Hover the one-line failure to read its whole text.",
       "Open the failed v7 deployment link and inspect retained credential preparation evidence.",
     ],
   },
@@ -3306,6 +3315,19 @@ export const scenarios = {
     rules: [{ suffix: "/runtime", delayMs: 700, once: true }],
     description:
       "Open the direct Logs link at 390 px. The first runtime status takes 700 ms; status and log output appear together instead of moving the output after it appears.",
+  },
+  runtimeLogsSlowTabClick: {
+    group: "Pages/Agent detail",
+    name: "Select Logs while runtime status is loading",
+    path: `${candidateVersion}&tab=configuration`,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    rules: [{ suffix: "/runtime", delayMs: 1200, once: true }],
+    description:
+      "The first runtime status takes 1.2 s after the Logs tab is selected. Stop Agent and Delete Agent stay hidden under the reserved area until the strip and output appear, so nothing below moves.",
+    steps: [
+      "Scroll to the version tabs and select Logs. The area keeps its height and Stop and Delete are hidden; after 1.2 s the strip, output and both cards appear in place and the panel scrolls into view.",
+    ],
   },
   runtimeLogsStartupWarnings: {
     group: "Pages/Agent detail",
@@ -4005,10 +4027,60 @@ export const scenarios = {
         path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
         method: "PATCH",
         status: 409,
+        code: "RESOURCE_CONFLICT",
       },
     ],
     actions: [click("Edit Slack"), click("Save configuration")],
-    description: "A rejected Configuration write keeps the drawer and feedback visible.",
+    description:
+      "The API refuses the Configuration write with 409: another save landed after the page's reread. The editor closes and the section offers Reload draft, with focus on it.",
+  },
+  channelSaveRejected: {
+    group: "Components/Channels",
+    name: "Save rejected",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
+        method: "PATCH",
+        status: 400,
+      },
+    ],
+    actions: [click("Edit Slack"), click("Save configuration")],
+    description:
+      "A rejected Configuration write keeps the drawer and feedback visible, with focus back on Save configuration.",
+  },
+  channelChangedElsewhere: {
+    group: "Components/Channels",
+    name: "Configuration changed elsewhere",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    configurationChangedElsewhere: true,
+    actions: [click("Edit Slack"), click("Save configuration")],
+    description:
+      "Another browser saved this Configuration after the page read it. The editor closes and the section offers Reload draft; editing, deployment and tab changes wait for it.",
+    steps: [
+      "Check that focus is on Reload draft and the alert says the saved Configuration changed while you were editing.",
+      "Select Reload draft: the tab rebuilds in place with Draft reloaded., and Edit Slack saves again.",
+    ],
+  },
+  channelChangedElsewhereWithEdits: {
+    group: "Components/Channels",
+    name: "Configuration changed elsewhere with unsaved edits",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    configurationChangedElsewhere: true,
+    actions: [
+      click("Edit Slack"),
+      { selector: "#slack-dm-policy", value: "disabled" },
+      click("Save configuration"),
+    ],
+    description:
+      "Another browser saved this Configuration while Edit Slack had unsaved changes. The alert says Reload draft reopens them over the saved settings.",
+    steps: [
+      "Check that focus is on Reload draft and the alert ends with Reload draft reopens your Slack edits over the saved settings.",
+      "Select Reload draft: Edit Slack reopens with Direct-message policy still Disabled and says the edits are applied over the reloaded settings; Save configuration saves them.",
+    ],
   },
   channelSavePending: {
     group: "Components/Channels",

@@ -1193,6 +1193,19 @@ select:not([multiple])[size="1"] {
 .agent-table td {
   vertical-align: top;
 }
+/* A set width and a one-line note, so a landing deployment read neither grows its row nor
+   re-flows the columns (finding 1488). The note adds nothing to the column's width. */
+.agent-table .agent-deployment::before {
+  content: "";
+  display: block;
+  width: 14rem;
+}
+.agent-table .agent-deployment-note {
+  contain: inline-size;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .agent-table .resource-id {
   display: block;
   margin-top: 7px;
@@ -2396,6 +2409,11 @@ summary:focus-visible {
 .agent-logs-pending > .runtime-strip,
 .agent-logs-pending > .log-viewer {
   display: none;
+}
+/* The cards below a pending Logs view appear where the shown view puts them (finding 1479). */
+.agent-logs-opening > .stop-note,
+.agent-logs-opening > .deletion-note {
+  visibility: hidden;
 }
 .runtime-strip {
   display: grid;
