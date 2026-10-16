@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, open, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -69,6 +69,17 @@ function download(url, destination, checksum, env = {}) {
   });
 }
 
+// Observe bytes and permissions through the same opened file, rather than
+// combining path-based metadata checks with later accesses to that path.
+async function readTool(path) {
+  const file = await open(path, "r");
+  try {
+    return { bytes: await file.readFile(), mode: (await file.stat()).mode & 0o777 };
+  } finally {
+    await file.close();
+  }
+}
+
 const fastAbort = { DOWNLOAD_PINNED_SPEED_LIMIT: "1000", DOWNLOAD_PINNED_SPEED_TIME: "2" };
 
 test("a stalled download is cut off and retried, then checksum-verified", async () => {
@@ -125,17 +136,16 @@ test("downloads publish only verified bytes and preserve existing tools on failu
       assert.notEqual(bad.code, 0);
       assert.equal(requests.length, 2);
       assert.doesNotMatch(bad.stderr, /Transient download failure/);
-      assert.ok(
-        (await readFile(destination)).equals(previous),
-        "failed download replaced the tool",
-      );
-      assert.equal((await stat(destination)).mode & 0o777, 0o755);
+      const rejected = await readTool(destination);
+      assert.ok(rejected.bytes.equals(previous), "failed download replaced the tool");
+      assert.equal(rejected.mode, 0o755);
       assert.deepEqual(await readdir(dir), ["tool"]);
 
       const replacement = await download(url, destination, sha256);
       assert.equal(replacement.code, 0, replacement.stderr);
-      assert.deepEqual(await readFile(destination), body);
-      assert.equal((await stat(destination)).mode & 0o777, 0o755);
+      const published = await readTool(destination);
+      assert.deepEqual(published.bytes, body);
+      assert.equal(published.mode, 0o755);
       assert.deepEqual(await readdir(dir), ["tool"]);
 
       await rm(destination);
@@ -149,8 +159,9 @@ test("downloads publish only verified bytes and preserve existing tools on failu
       const missing = await download(url, destination, sha256);
       assert.equal(missing.code, 22);
       assert.equal(requests.length, 5);
-      assert.ok((await readFile(destination)).equals(previous));
-      assert.equal((await stat(destination)).mode & 0o777, 0o755);
+      const retained = await readTool(destination);
+      assert.ok(retained.bytes.equals(previous));
+      assert.equal(retained.mode, 0o755);
       assert.deepEqual(await readdir(dir), ["tool"]);
     },
   );
