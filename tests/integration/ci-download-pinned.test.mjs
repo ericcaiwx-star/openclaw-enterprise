@@ -54,11 +54,20 @@ async function withServer(plan, run) {
   }
 }
 
-function download(url, destination, checksum, env = {}) {
+function download(url, destination, checksum, env = {}, creationMask = "022") {
   return new Promise((resolveRun) => {
     execFile(
       "bash",
-      [script, url, destination, checksum],
+      [
+        "-c",
+        'umask "$1"; shift; exec bash "$@"',
+        "download-pinned-test",
+        creationMask,
+        script,
+        url,
+        destination,
+        checksum,
+      ],
       {
         env: { ...process.env, NO_PROXY: "127.0.0.1", no_proxy: "127.0.0.1", ...env },
         timeout: 30_000,
@@ -128,6 +137,9 @@ test("downloads publish only verified bytes and preserve existing tools on failu
       const ok = await download(url, destination, sha256);
       assert.equal(ok.code, 0, ok.stderr);
       assert.equal(requests.length, 1);
+      const first = await readTool(destination);
+      assert.deepEqual(first.bytes, body);
+      assert.equal(first.mode, 0o644);
 
       const previous = Buffer.from("#!/bin/sh\nprintf old-tool\n");
       await writeFile(destination, previous);
@@ -162,6 +174,15 @@ test("downloads publish only verified bytes and preserve existing tools on failu
       const retained = await readTool(destination);
       assert.ok(retained.bytes.equals(previous));
       assert.equal(retained.mode, 0o755);
+      assert.deepEqual(await readdir(dir), ["tool"]);
+
+      mode = "fast";
+      await rm(destination);
+      const restrictive = await download(url, destination, sha256, {}, "077");
+      assert.equal(restrictive.code, 0, restrictive.stderr);
+      const privateTool = await readTool(destination);
+      assert.deepEqual(privateTool.bytes, body);
+      assert.equal(privateTool.mode, 0o600);
       assert.deepEqual(await readdir(dir), ["tool"]);
     },
   );

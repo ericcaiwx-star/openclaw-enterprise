@@ -69,6 +69,8 @@ trap 'rm -f "${temporary}"' EXIT
 # file the same way so successful publication retains that behavior.
 if [[ -f "${destination}" ]]; then
   cp -p "${destination}" "${temporary}"
+else
+  new_file_mode="$(printf '%o' "$((0666 & ~$(umask)))")"
 fi
 
 attempt=1
@@ -107,4 +109,9 @@ else
   echo "${expected_sha256}  ${temporary}" | shasum -a 256 -c -
 fi
 
+# Keep a first download private until verification has succeeded, then publish
+# it with the same umask-derived permissions curl would have created.
+if [[ -n "${new_file_mode:-}" ]]; then
+  chmod "${new_file_mode}" "${temporary}"
+fi
 mv -f "${temporary}" "${destination}"
