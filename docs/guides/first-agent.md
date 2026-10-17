@@ -214,7 +214,7 @@ JS
   for attempt in {1..60}; do
     if result="$(./bin/occ agent get "$AGENT_ID" -o json 2>&1)"; then
       sleep 2
-    elif [[ "$result" == *'OCC operation failed (HTTP 404)'* ]]; then
+    elif [[ "$result" == 'Error: OCC operation failed (HTTP 404): NOT_FOUND: '* ]]; then
       gone=true
       break
     else
