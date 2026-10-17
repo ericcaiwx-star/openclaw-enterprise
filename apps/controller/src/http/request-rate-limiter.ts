@@ -8,7 +8,7 @@ export class RequestRateLimiter {
   private readonly ratePerSecond: number;
   private readonly now: () => number;
 
-  constructor(burst: number, ratePerSecond: number, now: () => number = Date.now) {
+  constructor(burst: number, ratePerSecond: number, now: () => number = () => performance.now()) {
     this.burst = burst;
     this.ratePerSecond = ratePerSecond;
     this.now = now;

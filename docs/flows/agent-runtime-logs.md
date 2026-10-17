@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-17
-last_updated_session: authoring-run/ce2b2886-84b1-463a-86b6-7d7544b3bcb7
+last_updated_session: authoring-run/5775742a-69b2-4b9b-947e-198df50d9f40
 ---
 
 # Agent runtime logs flow
@@ -77,7 +77,7 @@ a closed query schema. `apps/controller/src/index.ts:perform` answers `501` when
 the tier action and Agent `read` (plus revision `read` for status only), resolves
 the revision within the exact Agent, then rejects a Driver without
 `describeAgentRuntime` or with `runtimeLogging: "driver"`. `apps/controller/src/http/runtime-logs.ts:RuntimeLogLimiter` admits reads;
-audited denials spend no token. Clock rollback preserves tokens and resumes refill.
+audited denials spend no token. Elapsed-time buckets ignore clock corrections.
 
 ### 2. Describe the runtime
 
@@ -238,7 +238,7 @@ Driver failures use fixed `RUNTIME_LOGS_*` codes; requests have ten-second deadl
 
 ## Changelog
 
-- 2026-10-17 17:30: Clamp backwards elapsed time. (authoring-run/ce2b2886-84b1-463a-86b6-7d7544b3bcb7 - 4c15e69650b440b8b4bbd995bb61669f69d1d049)
+- 2026-10-17 18:04: Use monotonic request-bucket time. (authoring-run/5775742a-69b2-4b9b-947e-198df50d9f40 - 4c15e69650b440b8b4bbd995bb61669f69d1d049)
 
 - 2026-10-16 19:09: Retain Pods unless proven older. (codex/01a10a81-070c-7aa3-97d0-fbce8f285d4d - 646709121b8ad092df151d16cd4ca6a6c523e34d)
 
