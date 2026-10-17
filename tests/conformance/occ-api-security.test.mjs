@@ -2213,6 +2213,31 @@ test("runtime log failures are fixed, content-free and never read after an audit
   assert.equal(hostile.body.error.code, "RUNTIME_LOGS_UNAVAILABLE");
 });
 
+test("runtime log reads retain unspent allowance after the wall clock moves backwards", async (t) => {
+  const initial = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now: initial });
+  const fixture = await createRuntimeLogFixture();
+  const target = await fixture.deployAgent();
+  const first = await fixture.request("GET", target.runtimePath);
+  assert.equal(first.status, 200, first.text);
+
+  // A host clock correction must not turn the nine unspent requests into token debt.
+  t.mock.timers.setTime(initial - 3_600_000);
+  for (let remaining = 9; remaining > 0; remaining -= 1) {
+    const response = await fixture.request("GET", target.runtimePath);
+    assert.equal(response.status, 200, response.text);
+  }
+  const exhausted = await fixture.request("GET", target.runtimePath);
+  assert.equal(exhausted.status, 429);
+  assert.equal(exhausted.headers.get("retry-after"), "1");
+
+  // Refill uses elapsed time from the corrected clock, without creating a new burst.
+  t.mock.timers.setTime(initial - 3_600_000 + 500);
+  const refilled = await fixture.request("GET", target.runtimePath);
+  assert.equal(refilled.status, 200, refilled.text);
+  assert.equal((await fixture.request("GET", target.runtimePath)).status, 429);
+});
+
 test("runtime log reads are rate limited per principal and Agent with Retry-After", async () => {
   const fixture = await createRuntimeLogFixture();
   const target = await fixture.deployAgent();

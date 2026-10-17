@@ -20,7 +20,7 @@ export class RequestRateLimiter {
     const bucket = this.buckets.get(key) ?? { tokens: this.burst, updatedAt: now };
     bucket.tokens = Math.min(
       this.burst,
-      bucket.tokens + ((now - bucket.updatedAt) / 1000) * this.ratePerSecond,
+      bucket.tokens + (Math.max(0, now - bucket.updatedAt) / 1000) * this.ratePerSecond,
     );
     bucket.updatedAt = now;
     if (bucket.tokens < 1) {
