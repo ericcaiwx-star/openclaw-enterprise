@@ -191,11 +191,10 @@ on reviewed control-plane nodes; empty defaults omit it.
 to `EnvoyProxy.spec.provider.kubernetes.envoyDeployment.pod`, keeping the private
 proxy on that pool. Tenant gateway and Agent placement remain Compute-owned.
 
-`database.caSecretName` mounts its CA read-only in all four database clients.
-`deploy/helm/openclaw-enterprise/templates/_helpers.tpl` compares Linux destinations,
-including relative, dot-segment and trailing-slash aliases, against active mounts.
-A collision could hide Installation or bootstrap files. Emitted paths stay unchanged;
-noncolliding relative paths and paths of disabled features remain available.
+With `database.caSecretName`, `_helpers.tpl` rejects CA destinations aliasing active
+client mounts, including relative paths, dot segments and trailing slashes. Linux
+otherwise masks startup files. Emitted paths stay unchanged; noncolliding paths
+remain available.
 
 The [shared egress policy](../../deploy/helm/openclaw-enterprise/templates/networkpolicies.yaml)
 selects only `api`, `worker`, and `initialization` Pods with the release identity.
