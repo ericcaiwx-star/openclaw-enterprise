@@ -41,6 +41,53 @@ const requiredWorkspaceMounts = Object.freeze([
   { subPath: "workspace", mountPath: "/sandbox/enterprise", readOnly: false },
 ]);
 
+// The OpenShell proof's installation cleanups, each its own registration on a bounded teardown
+// context (finding 1711), so a worker stop that never settles cannot keep the later ones from
+// running. Operations are closures, so resources the proof assigns later are read at cleanup
+// time. They run last-registered first: the worker stops before what it uses goes away.
+export const openShellInstallationCleanupOrder = Object.freeze([
+  "workerStop",
+  "portForwards",
+  "productionApp",
+  "observerPool",
+  "workloadNamespace",
+  "temporaryDirectory",
+]);
+
+export function registerOpenShellInstallationCleanups(context, operations) {
+  let stopped;
+  for (const name of [...openShellInstallationCleanupOrder].reverse()) {
+    const operation = operations[name];
+    assert.equal(typeof operation, "function", `OpenShell installation cleanup ${name}`);
+    // Named for the teardown log: every registration comes from this line. Registered after its
+    // test's teardown, each runs at once and throws to stop the setup; register them all first.
+    try {
+      context.after({ [name]: () => operation() }[name]);
+    } catch (error) {
+      stopped ??= error;
+    }
+  }
+  if (stopped !== undefined) {
+    throw stopped;
+  }
+}
+
+// One poll of the gateway-outage proof: the revision's work back in `queued` after at least one
+// attempt, then the deployment's status. The worker can claim the work again between the two
+// reads, and a live lease reads as `running`, so that pair is read again; any other status ends
+// the wait for the proof to assert on, so a revision that failed or activated during the outage
+// still fails it (finding 1846).
+export function outageAttemptRead({ readWork, readStatus }) {
+  return async () => {
+    const work = await readWork();
+    if (work?.state !== "queued" || work.attempt_count < 1) {
+      return undefined;
+    }
+    const status = await readStatus();
+    return status === "running" ? undefined : { work, status };
+  };
+}
+
 export function openshellHash(value, length = 12) {
   return sha256Hex(value, length);
 }
@@ -1184,12 +1231,13 @@ export function createOpenShellKubernetesFixture({
 
       // Timing of commands still running, so an unknown outcome says how long it waited.
       function pendingCommandTimes() {
-        const now = Date.now();
+        const now = performance.now();
         return [...pendingCommands.keys()].map((id) => {
           const { startedAt, deltas = 0, bytes = 0 } = commandTimes.get(id) ?? {};
           return {
-            startedBeforeTurnEndMs: startedAt && turnCompletedAt ? turnCompletedAt - startedAt : null,
-            runningMs: startedAt ? now - startedAt : null,
+            startedBeforeTurnEndMs: startedAt !== undefined && turnCompletedAt !== undefined
+              ? Math.floor(turnCompletedAt - startedAt) : null,
+            runningMs: startedAt === undefined ? null : Math.floor(now - startedAt),
             outputDeltas: deltas,
             outputBytes: bytes,
           };
@@ -1202,7 +1250,7 @@ export function createOpenShellKubernetesFixture({
         process.stderr.write("\nNative execution summary: " + JSON.stringify({
           failedCommands, approvalRequests, sandboxSignals: [...sandboxSignals],
           commandGraceMs: ${codexCommandGraceMs},
-          sinceTurnEndMs: turnCompletedAt ? Date.now() - turnCompletedAt : null,
+          sinceTurnEndMs: turnCompletedAt === undefined ? null : Math.floor(performance.now() - turnCompletedAt),
           pendingCommands: pendingCommandTimes(),
         }));
         process.exit(1);
@@ -1210,6 +1258,13 @@ export function createOpenShellKubernetesFixture({
 
       function unknownCommandOutcome() {
         fail(new Error("Codex command outcome is unknown; not sending another turn"));
+      }
+
+      function waitForCommandDeadline() {
+        // A timer can wake early. Keep the deadline anchored to the end of the turn.
+        const remaining = turnCompletedAt + ${codexCommandGraceMs} - performance.now();
+        if (remaining <= 0) return unknownCommandOutcome();
+        commandDeadline = setTimeout(waitForCommandDeadline, Math.ceil(remaining));
       }
 
       function finish() {
@@ -1304,7 +1359,7 @@ export function createOpenShellKubernetesFixture({
         items.push(message);
         if (starting) {
           pendingCommands.set(item.id, item.command);
-          commandTimes.set(item.id, { startedAt: Date.now(), deltas: 0, bytes: 0 });
+          commandTimes.set(item.id, { startedAt: performance.now(), deltas: 0, bytes: 0 });
         }
         if (ending) {
           pendingCommands.delete(item.id);
@@ -1340,8 +1395,8 @@ export function createOpenShellKubernetesFixture({
           // may reply before it ends. Observe only its original socket until its completion
           // event or the fixture's bound; the overall turn deadline still applies. Never extend
           // either deadline on activity.
-          turnCompletedAt = Date.now();
-          if (pendingCommands.size) commandDeadline = setTimeout(unknownCommandOutcome, ${codexCommandGraceMs});
+          turnCompletedAt = performance.now();
+          if (pendingCommands.size) waitForCommandDeadline();
           else finish();
         } else if (message.method === "error" && message.params?.willRetry !== true) {
           // Codex reports retried model reconnects as errors; only a final error ends the turn,

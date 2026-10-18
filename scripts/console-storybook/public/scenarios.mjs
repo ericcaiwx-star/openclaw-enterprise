@@ -68,6 +68,12 @@ const existingPresetSecret = [
 ];
 const presetSecretsPath = "/namespaces/ns_00000000-0000-4000-8000-000000000001/secrets";
 const repositoryForm = [...readyForm, { selector: "#agent-name", value: "Repository assistant" }];
+// A plugin tool-deny refusal as the API words it, naming the selected plugin.
+const pluginToolRefusal =
+  'Configuration setting agents.entries.research_assistant.tools.deny denies every tool, so every turn of that Agent fails with plugin codex-plugin:calendar@openai-curated-remote selected; remove "*" or move the Agent to a Configuration without plugins.';
+// The same refusal from Create Agent's preflight, worded as the OpenClaw Plugin Driver words it.
+const pluginPreflightRefusal =
+  "Configuration setting tools.deny blocks every tool of plugin codex-plugin:calendar@openai-curated-remote; remove the matching deny entry or deselect the plugin.";
 const pluginCapabilities = {
   driver: { id: "codex-plugin", implementation: "occ/codex-plugin" },
   approvers: { agent: true, plugin: false, tools: false },
@@ -748,7 +754,9 @@ export const scenarios = {
     steps: [
       "Wait for Agents, then select Refresh. The list stays shown, inactive, for 250 ms, then Loading replaces it. When the list returns, focus is on Refresh.",
       "Open Namespaces and wait for it, then use browser Back. The Namespaces page stays shown, inactive; after 300 ms it dims with a progress cursor, without moving, and after 1 s Still checking… appears beside Refresh until the unchanged Agents list returns.",
-      "Switch to another window and back: the list stays shown, undimmed, and says Still checking… after 1 s.",
+      "Focus an Agent link, switch windows, then return. The list stays visible and inactive, says Still checking… after 1 s, then returns focus to the link. If you focus Namespaces while waiting, focus stays there.",
+      "Focus Refresh, the Namespace selector or a sidebar link, switch windows, then return. When the list returns, focus is back on that control.",
+      "Open the Agent. In the sidebar, focus Agents and press Enter. Focus waits on the page heading while the list loads, then returns to the Agent link; it does not drop to the page body.",
     ],
   },
   navigationAgentReturn: {
@@ -1637,6 +1645,23 @@ export const scenarios = {
       "Confirm Create Agent stays disabled and the same provisioning handle is polled.",
     ],
   },
+  createDeploymentNamedWait: {
+    group: "Pages/Create Agent",
+    name: "Initial deployment names its wait",
+    path: create,
+    actions: readyForm,
+    provisionedDeploymentStatus: "running",
+    provisionedDeploymentAttempt: {
+      code: "REVISION_INCOMPLETE",
+      message: "Waiting for the runtime to become ready.",
+    },
+    provisioningNamesDeploymentWait: true,
+    description:
+      "After handoff the provisioning job names its first deployment's wait. Create Agent adds that sentence, the one Deployment activity shows, to the provisioning line.",
+    steps: [
+      "Click Create Agent. The line moves from “Provisioning Agent…” to “Provisioning Agent… Waiting for the runtime to become ready.” and Create Agent stays disabled.",
+    ],
+  },
   createDeploymentPodQuotaFull: {
     group: "Pages/Create Agent",
     name: "Initial deployment waits on a full Pod quota",
@@ -1666,6 +1691,24 @@ export const scenarios = {
     steps: [
       "Click Create Agent. Watch the Pod quota message stay in place while the next read stalls and another gets a 503.",
       "After the deployment read returns 404, the line changes to “Provisioning Agent…”. This does not say the quota cleared or the job stopped.",
+    ],
+  },
+  createDeploymentImagePullFailed: {
+    group: "Pages/Create Agent",
+    name: "Initial deployment cannot pull its image",
+    path: create,
+    actions: readyForm,
+    provisionedDeploymentStatus: "running",
+    provisionedDeploymentAttempt: {
+      code: "REVISION_IMAGE_PULL_FAILED",
+      message:
+        "Kubernetes cannot pull a container image for this Agent and keeps retrying. Ask an administrator to check the runtime image reference and that the cluster's nodes can pull from its registry.",
+    },
+    provisioningNamesDeploymentWait: true,
+    description:
+      "The first deployment waits on a container image the cluster's nodes cannot pull. Create Agent shows that sentence alone in place of the provisioning line, as it does for a full Pod quota.",
+    steps: [
+      "Click Create Agent. The line changes from “Provisioning Agent…” to the image pull sentence, which asks an administrator to check the runtime image reference and registry access.",
     ],
   },
   createDeploymentFailed: {
@@ -2852,6 +2895,68 @@ export const scenarios = {
       "Choose Codex, or Embedded execution if the installation selects no Sandbox Driver, then create the Agent again.",
     ],
   },
+  createPluginPreflightRefusal: {
+    group: "Pages/Create Agent",
+    name: "Plugin refusal before anything is saved",
+    path: create,
+    unsupportedProvisioning: true,
+    pluginCapabilities,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/validate",
+        method: "POST",
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: pluginPreflightRefusal,
+        once: true,
+      },
+    ],
+    actions: [
+      ...readyForm,
+      { selector: ".plugin-json > summary", click: true },
+      { selector: "#agent-plugins", value: pluginSelections },
+      // Pressed as a person would, so focus starts on the button that disables.
+      { ...click("Create Agent"), focus: true },
+    ],
+    description:
+      "Create Agent asks the API first whether it would refuse the plugin selections with this Configuration. The API refuses: the Configuration denies every tool of the selected plugin. Nothing is saved, so the refusal is the only line, takes focus in view, and every field stays editable, the Configuration JSON included.",
+    steps: [
+      "At 360-390 px, confirm the focused refusal is on screen with no Secret or Configuration saved line and no sideways scroll.",
+      "Open Configuration JSON under Advanced settings and confirm it is editable, then select Create Agent again; the Agent is created.",
+    ],
+    gap: "The refusal is simulated; the in-memory API's preflight is covered by tests/browser/console-agent-plugin-refusals.test.mjs and tests/integration/agent-create-validate-api.test.mjs.",
+  },
+  createPluginRefusal: {
+    group: "Pages/Create Agent",
+    name: "Plugin refusal after the Configuration is saved",
+    path: create,
+    unsupportedProvisioning: true,
+    pluginCapabilities,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents",
+        method: "POST",
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: pluginToolRefusal,
+        once: true,
+      },
+    ],
+    actions: [
+      ...readyForm,
+      { selector: ".plugin-json > summary", click: true },
+      { selector: "#agent-plugins", value: pluginSelections },
+      // Pressed as a person would, so focus starts on the button that disables.
+      { ...click("Create Agent"), focus: true },
+    ],
+    description:
+      "Agent create refuses after the form saved its Configuration, as on a retry, which has no preflight: the Configuration denies every tool of the selected plugin. The refusal leads the saved-resources line, scrolls into view with focus, wraps its setting path at phone widths, and names the fix this form allows: deselect the plugin.",
+    steps: [
+      "At 360-390 px, confirm the focused refusal is on screen above the Secret and Configuration saved line, with no sideways scroll.",
+      "Clear Plugin selections JSON to {} and select Create Agent again; the Agent is created.",
+    ],
+    gap: "The refusal is simulated; the in-memory API's plugin check is covered by tests/browser/console-agent-plugin-refusals.test.mjs.",
+  },
   createUnknown: {
     group: "Pages/Create Agent",
     name: "Provisioning outcome unknown",
@@ -3065,6 +3170,34 @@ export const scenarios = {
     description:
       "The permission answer denies Agent update, so Save plugin selections and the plugin fields are disabled, the saved selections stay in view, and the note names the grant to ask for. The API still decides.",
     gap: "The permission answer is simulated; the API still authorizes every save.",
+  },
+  pluginsToolRefusal: {
+    group: "Pages/Agent detail",
+    name: "Plugin selections refused by the Configuration",
+    path: `${draft}&tab=plugins`,
+    // Keep the scroll the refusal's focus gives, rather than jump back to the tabs.
+    scrollToTabs: false,
+    deployed: true,
+    auth: "codex_pat",
+    pluginCapabilities,
+    pluginDiscovery,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001",
+        method: "PATCH",
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: pluginToolRefusal,
+      },
+    ],
+    actions: [
+      { selector: ".plugin-json > summary", click: true },
+      { selector: "#agent-plugins", value: pluginSelections },
+      { ...click("Save plugin selections"), focus: true },
+    ],
+    description:
+      "The Configuration denies every tool of the selected plugin, so the API refuses the save. The refusal shows as an error and takes focus; editing the selections clears it.",
+    gap: "The refusal is simulated; the in-memory API's plugin check is covered by tests/browser/console-agent-plugin-refusals.test.mjs.",
   },
   pluginsDraft: {
     group: "Pages/Agent detail",
@@ -3439,7 +3572,8 @@ export const scenarios = {
       "Back reveals the rechecked Agents list before a slow deployment read finishes. The previous result does not stand in for the pending one.",
     steps: [
       "Wait for the Research assistant’s deployment, open Documentation assistant, then use browser Back.",
-      "The list is usable while Latest deployment says “Reading deployment…”, with no link to the previous revision. It changes to “Deployment access denied”; the Agent is still visible.",
+      "The list is usable immediately. Latest deployment starts blank; after 250 ms it says “Reading deployment…”, never linking to the old result. When access is denied, the Agent stays visible.",
+      "After Back, focus the Research assistant link while its deployment still reads, switch windows, then return. The same list returns with focus on the link.",
     ],
   },
   agentsDeploymentError: {
@@ -3514,6 +3648,24 @@ export const scenarios = {
       "Open v7 Logs and confirm the failed version, then go Back. Open Configuration goes to the draft without deploying, scrolls it into view and focuses its Configuration tab.",
       "At phone width, the failure, both recovery links, and selected version are still near the top.",
     ],
+  },
+  deploymentFailsWhileWatching: {
+    group: "Pages/Agent detail",
+    name: "Deployment fails while watching",
+    path: candidateVersion,
+    deployed: true,
+    candidateDeploymentStatus: "failed",
+    candidateModelProbeCause: { kind: "PROBE_STATUS", detail: "format" },
+    // Show the in-progress record on arrival, then let the next poll read the failed record.
+    rules: [
+      {
+        suffix: "/deployments/rev_00000000-0000-4000-8000-000000000007",
+        once: true,
+        data: { status: "running", progress: null, error: null, warnings: [] },
+      },
+    ],
+    description:
+      "Watch v7 change from running to failed. Recovery appears below Deployment activity instead of pushing the overview down. The status and details update in place. The deployment and failure are simulated.",
   },
   deploymentModelProbeRetried: {
     group: "Pages/Agent detail",
@@ -3642,9 +3794,31 @@ export const scenarios = {
     deployed: true,
     slack: true,
     candidateDeploymentStatus: "succeeded",
-    actions: [click("Run diagnostics for this version")],
+    rules: [{ suffix: "/diagnostics", method: "POST", delayMs: 3000 }],
+    steps: [
+      "Tab to Run diagnostics for this version, then press Enter or Space.",
+      "After 250 ms, focus moves to “Waiting for diagnostic results…” while the button is disabled. Leave focus there.",
+      "When the checks arrive, focus returns to Run diagnostics. Its description gives the Observed time.",
+      "Click Refresh record, which re-renders this panel as a deployment poll does, then press Tab. Run diagnostics still has that description.",
+    ],
     description:
-      "An on-demand observation for viewed v7 reports timestamped Slack configuration, authentication, and connectivity checks. It does not change v7's persisted deployment result.",
+      "Run diagnostics for v7. The panel shows it is waiting for results, then displays timestamped Slack configuration, authentication, and connectivity checks. The recorded deployment result stays the same.",
+  },
+  diagnosticsFast: {
+    group: "Pages/Agent detail",
+    name: "Current observations that answer at once",
+    path: candidateVersion,
+    deployed: true,
+    slack: true,
+    candidateDeploymentStatus: "succeeded",
+    rules: [{ suffix: "/diagnostics", method: "POST", delayMs: 100 }],
+    steps: [
+      "Tab to Run diagnostics for this version, then press Enter. The checks answer in 100 ms.",
+      "No “Waiting for diagnostic results…” line appears and the button does not disable. Focus stays on Run diagnostics, and its description gives the Observed time.",
+      "Press Enter again. No waiting line appears in between; the same checks are inserted again, so a screen reader announces them again.",
+    ],
+    description:
+      "Diagnostics that answer within 250 ms replace the panel's result directly, without painting the waiting line or moving focus.",
   },
   diagnosticsUnknown: {
     group: "Pages/Agent detail",
@@ -3669,10 +3843,16 @@ export const scenarios = {
         path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/rev_00000000-0000-4000-8000-000000000007/diagnostics",
         method: "POST",
         status: 503,
+        delayMs: 3000,
         code: "DEPENDENCY_UNAVAILABLE",
       },
     ],
-    actions: [click("Run diagnostics for this version")],
+    steps: [
+      "Tab to Run diagnostics for this version and press Enter. Leave focus on “Waiting for diagnostic results…” until the response arrives.",
+      "Focus returns to Run diagnostics, described by the alert that current-runtime diagnostics are unavailable (a simulated 503).",
+      "Click Refresh record, which re-renders this panel as a deployment poll does, then press Tab. Run diagnostics is still described by the alert.",
+      "Press Enter to run it again. While waiting, press Shift+Tab to move to Refresh record. Focus should stay there when the same alert appears.",
+    ],
     description:
       "A failed on-demand check reports its own error. The viewed v7 deployment record remains succeeded.",
   },
@@ -3687,8 +3867,8 @@ export const scenarios = {
     steps: [
       "At 390px, open this direct Logs route and check its selected tab is visible. Visit Configuration, then use Back and Forward; selected tabs remain visible without resetting expanded panels.",
       "Inspect Source, Previous instance, and Include debug in the controls card; toggle the two options and check their selected states.",
-      "Expand the runtime.startup_phase row to inspect its fields. The timestamp, level, origin, and message remain aligned in the collapsed rows.",
-      "Select Follow, confirm it changes to Following, then select Following to stop. Resize the preview to 390px and check that controls remain usable and log metadata wraps without clipping messages.",
+      "Expand the runtime.startup_phase row to inspect its fields. Check the local date, time, and UTC offset in each timestamp. From 320px up, each timestamp stays on one line; below about 400px it takes a line of its own, with the level beside the origin under it. When the Logs card is narrower than 662px (at 1000px and below, and from 1101px to about 1280px, where the card sits beside the version list), the message moves under the time, level, and origin instead of shrinking.",
+      "Select Follow, confirm it changes to Following, then select Following to stop. At 390px, check that the controls remain usable, each log level stays on one line, and long messages wrap without horizontal scrolling.",
     ],
     gap: "Runtime records and refreshes are simulated UI evidence; source reads, filtering, and following require real backend verification.",
   },
@@ -3746,6 +3926,39 @@ export const scenarios = {
       "Clear Filter and enable info to restore the loaded rows; the filter status and source retention notice stay visible.",
     ],
   },
+  runtimeLogsRateLimited: {
+    ...runtimeLogsPage,
+    name: "Rate-limited log reads with Follow off or on",
+    rules: [{ suffix: "/runtime/logs", skip: 1, status: 429, code: "RUNTIME_LOGS_RATE_LIMITED" }],
+    actions: [click("Refresh logs")],
+    description:
+      "The first page loads, then log requests are rate limited. This fixture omits Retry-After: Refresh logs asks you to try again, without another audited read.",
+    steps: [
+      "Select Follow. When its next read is rate limited, the message says the Console is waiting for the next read.",
+      "While Following is still selected, choose Download. That action asks you to try again; the Console will not repeat the download.",
+    ],
+  },
+  runtimeLogsRefreshRateLimited: {
+    ...runtimeLogsPage,
+    name: "Rate-limited Refresh logs keeps the loaded lines",
+    rules: [
+      {
+        suffix: "/runtime/logs",
+        skip: 1,
+        status: 429,
+        code: "RUNTIME_LOGS_RATE_LIMITED",
+        retryAfter: 5,
+      },
+    ],
+    actions: [click("Refresh logs")],
+    description:
+      "The first page loads, then Refresh logs is rate limited with Retry-After: 5. The loaded lines and their Showing line stay; the message says when to try again.",
+    steps: [
+      "Check that the loaded log rows are still shown under 'Too many requests. Try again in 5 seconds.'",
+      "Wait 5 seconds. The message changes to 'Too many requests. You can try again now.' without another read.",
+      "Select Include debug. That read is for another selection, so the old rows clear before its rate-limited answer.",
+    ],
+  },
   runtimeLogsDenied: {
     group: "Pages/Agent detail",
     name: "Runtime logs without administer",
@@ -3763,6 +3976,17 @@ export const scenarios = {
       "An Agent operator sees Pod status and Events but no log text. The page names the missing grants and does not request the log view again.",
     steps: [
       "Check that the permission message is visible inside the Logs card and unavailable actions remain disabled.",
+    ],
+  },
+  runtimeLogPodReplaced: {
+    ...runtimeLogsPage,
+    name: "Selected Pod disappears from runtime status",
+    runtimePod: "rollover",
+    description:
+      "On the next status poll, gateway-retiring disappears. The Console starts the selected Pod’s log tail without mixing the two Pods’ output.",
+    steps: [
+      "Select gateway-retiring in Pod / container before the next status poll. Its name appears in the output and the caption.",
+      "After about ten seconds, the picker, output and caption all name the remaining Pod. No action or manual refresh is needed.",
     ],
   },
   runtimeLogAccessLost: {
@@ -5164,6 +5388,69 @@ export const scenarios = {
     ],
     description:
       "Simulated uncertain creation stays guarded until explicit Reload confirms file absence. Reload opens an empty editor; creation still requires Save.",
+  },
+  workspaceVersionReread: {
+    group: "Components/Workspace",
+    name: "Reread after a version change",
+    path: `${currentVersion}&tab=workspace`,
+    deployed: true,
+    candidateDeploymentStatus: "running",
+    candidateActivates: true,
+    rules: [
+      // IDENTITY.md stays missing: the file-specific 404 answers the first read and the reread.
+      {
+        suffix: "/IDENTITY.md",
+        method: "GET",
+        status: 404,
+        code: "NOT_FOUND",
+        message: "The requested workspace file was not found.",
+      },
+      // The new version's gateway cannot answer the SOUL.md reread.
+      { suffix: "/SOUL.md", method: "GET", skip: 1, once: true, status: 503 },
+    ],
+    description:
+      "v7 finishes deploying while Workspace files are open. Unedited files are reread in place from it.",
+    steps: [
+      "Wait about 5 seconds for Deployment activity to record v7 as succeeded, or click Refresh deployment.",
+      "IDENTITY.md keeps its missing-file error and adds no reread warning.",
+      "SOUL.md says it could not be reread. Click Reload SOUL.md: the warning is replaced by SOUL.md loaded.",
+    ],
+    gap: "Simulated API results demonstrate presentation only. Browser tests cover reread ordering and later rereads clearing a failure.",
+  },
+  workspaceVersionRereadUnconfirmed: {
+    group: "Components/Workspace",
+    name: "Reread cannot confirm a missing file",
+    path: `${currentVersion}&tab=workspace`,
+    deployed: true,
+    candidateDeploymentStatus: "running",
+    candidateActivates: true,
+    rules: [
+      {
+        suffix: "/IDENTITY.md",
+        method: "GET",
+        once: true,
+        status: 404,
+        code: "NOT_FOUND",
+        message: "The requested workspace file was not found.",
+      },
+      // A resource 404 does not confirm the file is still missing.
+      {
+        suffix: "/IDENTITY.md",
+        method: "GET",
+        once: true,
+        status: 404,
+        code: "NOT_FOUND",
+        message: "The requested platform resource was not found.",
+      },
+    ],
+    description:
+      "IDENTITY.md was read as missing; the reread for v7 gets a resource 404, which does not confirm that.",
+    steps: [
+      "IDENTITY.md shows its missing-file error.",
+      "Wait about 5 seconds for Deployment activity to record v7 as succeeded, or click Refresh deployment.",
+      "IDENTITY.md says it could not be reread. Click Reload IDENTITY.md: the file now reads, and IDENTITY.md loaded. replaces the warning and the error.",
+    ],
+    gap: "Simulated API results demonstrate presentation only; the resource 404 is controlled.",
   },
   deletionPermissionDuringConfirmation: {
     group: "Components/Deletion",

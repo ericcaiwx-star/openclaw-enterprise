@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import {
   holdRequests,
   login,
   nativeValues,
   newPage,
   persistedDeploymentError,
+  trackSettledFetches,
+  waitForCondition,
+  waitForIdleFetches,
 } from "./console-agents-browser-helpers.mjs";
+import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
 
 // Returning to the Agents list held the Agent page, inert, until the retained list had read
 // every row's /revisions and /deployments again: two reads per Agent, so the hold grew with the
@@ -42,9 +45,7 @@ function deploymentRecord(namespace, status) {
 // `newer` names the Agents (by index) with a second version deployed after the active one, so their
 // Latest deployment link differs from their Current version link.
 async function openTeamList(t, name, { newer = [] } = {}) {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace(name, { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, name);
   const agents = [];
   for (let index = 1; index <= AGENTS; index += 1) {
     const label = `Team Agent ${String(index).padStart(2, "0")}`;
@@ -316,8 +317,12 @@ for (const outcome of ["fills", "is refused"]) {
     await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
     await rows.revisions.requested;
     assert.equal(await viewTag(page), "kept");
-    const loading = row.getByText(READING, { exact: true });
+    // The pending cell's text is blank for its first 250 ms (finding 1656); its holder has focus.
+    const loading = row.locator(".agent-deployment [data-return-focus-href]");
+    assert.equal(await loading.textContent(), READING);
     assert.equal(await isFocused(loading), true, "Back focused the pending deployment");
+    // Blank on screen, the focused holder's text still reaches a screen reader.
+    assert.match(await loading.ariaSnapshot(), /Reading deployment…/);
     const listUrl = page.url();
     await page.keyboard.press("Enter");
     assert.equal(page.url(), listUrl, "Enter must not open the previous deployment");
@@ -344,8 +349,296 @@ for (const outcome of ["fills", "is refused"]) {
   });
 }
 
-// A list left again before its rows' rereads land is not reused: the next return rebuilds it.
-test("A list left again during its rows' rereads is rebuilt on the next return", async (t) => {
+// Sample the first frame, then seek the actual CSS animations. A busy browser may deliver
+// its first animation frame late; elapsed time between two callbacks is not the loading delay.
+function measureReadingDelay(reading) {
+  const sample = () => {
+    const table = globalThis.document.querySelector(
+      '.content [aria-live="polite"]:not([inert]) .agent-table',
+    );
+    const labels = [...(table?.querySelectorAll(".agent-deployment span") ?? [])].filter(
+      (node) => node.textContent === reading && node.childElementCount === 0,
+    );
+    if (!labels.length) {
+      globalThis.requestAnimationFrame(sample);
+      return;
+    }
+    const visible = () =>
+      labels.filter((node) => {
+        const { visibility, opacity } = globalThis.getComputedStyle(node);
+        return visibility === "visible" && opacity !== "0";
+      }).length;
+    const firstFrame = visible();
+    const animations = labels.flatMap((label) => label.getAnimations());
+    const visibleAt = (ms) => {
+      for (const animation of animations) {
+        animation.pause();
+        animation.currentTime = ms;
+      }
+      return visible();
+    };
+    globalThis.__readingVisibility = {
+      labels: labels.length,
+      firstFrame,
+      at249: visibleAt(249),
+      at250: visibleAt(250),
+    };
+  };
+  globalThis.requestAnimationFrame(sample);
+}
+
+// After #2717 a return to a retained list painted "Reading deployment…" in every row for a frame
+// or more (60-142 ms) before the rereads filled them (finding 1656). The text now follows the
+// 250 ms rule: blank at first, shown only if the read is still pending, and the old value is
+// never shown either way. A first visit's rows follow the same rule.
+for (const visit of ["a first visit", "a return"]) {
+  test(`Rows read on ${visit} paint no "Reading deployment…" until the read is slow`, async (t) => {
+    const { fixture, namespace } = await createReadyConsoleNamespace(t, `Quiet rows ${visit}`);
+    const agents = [];
+    for (const label of ["Quiet Agent 1", "Quiet Agent 2", "Quiet Agent 3"]) {
+      const agent = await fixture.createAgent(namespace.id, label, nativeValues(label));
+      await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+      agents.push({ ...agent, name: label });
+    }
+    const { page } = await newPage(t, fixture);
+    await page.route(deploymentsRead(namespace), (route) =>
+      route.fulfill(deploymentRecord(namespace, "succeeded")),
+    );
+    const first = visit === "a first visit";
+    if (!first) {
+      // A row whose read failed has no link to keep: its reread on return is delayed too.
+      await page.route(
+        `**/namespaces/${namespace.id}/agents/${agents[2].id}/deployments/*`,
+        (route) =>
+          route.fulfill({
+            status: 500,
+            json: { error: { code: "INTERNAL", message: "Unavailable." } },
+          }),
+        { times: 1 },
+      );
+    }
+    let rows = first ? await holdRowReads(t, page, namespace) : null;
+    if (first) {
+      await page.addInitScript(`(${measureReadingDelay})(${JSON.stringify(READING)})`);
+    }
+    await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
+    await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+    if (!first) {
+      await page.getByText(READING).first().waitFor({ state: "detached" });
+      await page.getByText("Deployment unavailable").waitFor();
+      await tagView(page);
+      await openAgent(page, agents[0]);
+      rows = await holdRowReads(t, page, namespace);
+      await page.evaluate(measureReadingDelay, READING);
+      await page.goBack();
+      await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+      assert.equal(await viewTag(page), "kept", "the retained list was reused");
+    }
+    await rows.revisions.requested;
+    const observation = await page.waitForFunction(() => globalThis.__readingVisibility);
+    assert.deepEqual(await observation.jsonValue(), {
+      labels: 3,
+      firstFrame: 0,
+      at249: 0,
+      at250: 3,
+    });
+    rows.release();
+    await page.getByText(READING).first().waitFor({ state: "detached" });
+    for (const text of Object.values(await deploymentCells(page))) {
+      assert.match(text, /^v1 · succeeded/);
+    }
+  });
+}
+
+// Opens a list of three Agents, leaves it for an Agent, and goes Back with every row's reread
+// held, the page clock paused and the rows' 250 ms delay animations paused, so the test decides
+// when the rereads land and when "Reading deployment…" shows.
+async function returnWithHeldRows(t, name) {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, name);
+  const agents = [];
+  for (const label of ["Steady Agent 1", "Steady Agent 2", "Steady Agent 3"]) {
+    const agent = await fixture.createAgent(namespace.id, label, nativeValues(label));
+    await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+    agents.push({ ...agent, name: label });
+  }
+  const { page } = await newPage(t, fixture);
+  await page.route(deploymentsRead(namespace), (route) =>
+    route.fulfill(deploymentRecord(namespace, "succeeded")),
+  );
+  await trackSettledFetches(page);
+  await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
+  await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+  await page.getByText(READING).first().waitFor({ state: "detached" });
+  await tagView(page);
+  await openAgent(page, agents[0]);
+  const rows = await holdRowReads(t, page, namespace);
+  let landed = 0;
+  page.on("response", (response) => {
+    if (/\/agents\/[^/]+\/deployments\/[^/]+$/u.test(new URL(response.url()).pathname)) {
+      landed += 1;
+    }
+  });
+  // The page clock does not drive CSS animations: hold the delay until the test ends it. The
+  // console's CSP refuses an inline style, not a constructed sheet.
+  await page.evaluate(() => {
+    const sheet = new globalThis.CSSStyleSheet();
+    sheet.replaceSync(
+      ".agent-deployment :is(.delayed-status, .delayed-text) { animation-play-state: paused; }",
+    );
+    globalThis.document.adoptedStyleSheets = [...globalThis.document.adoptedStyleSheets, sheet];
+  });
+  const start = Date.now();
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(start + 1_000);
+  await page.goBack();
+  await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+  assert.equal(await viewTag(page), "kept", "the retained list was reused");
+  await rows.revisions.requested;
+  const readingCells = async () =>
+    Object.values(await deploymentCells(page)).filter((text) => text === READING).length;
+  assert.equal(await readingCells(), agents.length);
+  return {
+    namespace,
+    page,
+    readingCells,
+    // Ends every row's delay animation `ms` after the last step, so "Reading deployment…" shows,
+    // and waits until the page has handled the animations' end.
+    async reveal(ms) {
+      await page.clock.runFor(ms);
+      const ended = await page.evaluate(() => {
+        const document = globalThis.document;
+        globalThis.__readingShown = 0;
+        document.addEventListener("animationend", (event) => {
+          if (event.target.closest(".agent-deployment")) {
+            globalThis.__readingShown += 1;
+          }
+        });
+        const animations = [
+          ...document.querySelectorAll(
+            '.content [aria-live="polite"]:not([inert]) .agent-deployment :is(.delayed-status, .delayed-text)',
+          ),
+        ].flatMap((label) => label.getAnimations());
+        for (const animation of animations) {
+          animation.finish();
+        }
+        return animations.length;
+      });
+      assert.equal(ended, agents.length);
+      await page.waitForFunction((count) => globalThis.__readingShown >= count, ended, {
+        timeout: 5_000,
+      });
+    },
+    // Lets the held rereads land `ms` after the last step and waits until the page has handled
+    // them.
+    async land(ms) {
+      await page.clock.runFor(ms);
+      const before = landed;
+      rows.release();
+      await waitForCondition(
+        () => landed === before + agents.length,
+        "every row's deployment read lands",
+      );
+      await waitForIdleFetches(page);
+    },
+  };
+}
+
+// With a dozen rows, rereads that landed just past the 250 ms delay replaced "Reading
+// deployment…" a frame or a few after it showed (16-133 ms on oce-dogfood-b, finding 1683). Once
+// shown, it now stays 150 ms; reads that land before it shows, or after that, fill the rows at
+// once. The 150 ms count from the frame the text shows in, which can be a frame or two either
+// side of render time plus 250 ms: counted from that estimate, a reread landing between the two
+// filled a row one frame after its text painted, or after 117-133 ms (finding 1716). The page
+// clock decides when each read lands and when the rows fill; the test ends the delay animations.
+for (const [shownAt, landsAt, fillsAt] of [
+  [undefined, 100, 100],
+  [250, 300, 400],
+  [250, 450, 450],
+  [230, 240, 380],
+  [280, 300, 430],
+]) {
+  test(`Rows shown at ${shownAt ?? "no"} ms whose reread lands at ${landsAt} ms fill at ${fillsAt} ms`, async (t) => {
+    const { page, readingCells, reveal, land } = await returnWithHeldRows(
+      t,
+      `Steady rows ${shownAt ?? "hidden"} ${landsAt}`,
+    );
+    if (shownAt === undefined) {
+      await land(landsAt);
+    } else {
+      await reveal(shownAt);
+      await land(landsAt - shownAt);
+    }
+    if (fillsAt > landsAt) {
+      assert.equal(await readingCells(), 3, "the shown text stays");
+      await page.clock.runFor(fillsAt - landsAt - 1);
+      assert.equal(await readingCells(), 3, "the shown text stays 150 ms");
+      await page.clock.runFor(1);
+    }
+    for (const text of Object.values(await deploymentCells(page))) {
+      assert.match(text, /^v1 · succeeded/);
+    }
+    assert.equal(await viewTag(page), "kept");
+  });
+}
+
+// A refocus that resumes the list while a landed reread waits out those 150 ms starts the rows
+// reading again; the earlier answer never fills a row that reads again.
+test("A list resumed while its rows wait to fill shows only the new rereads", async (t) => {
+  const { namespace, page, readingCells, reveal, land } = await returnWithHeldRows(
+    t,
+    "Steady resume",
+  );
+  await reveal(250);
+  await land(50);
+  assert.equal(await readingCells(), 3);
+  const rereads = await holdRowReads(t, page, namespace);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event("focus")));
+  await rereads.revisions.requested;
+  await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+  await page.clock.runFor(200);
+  assert.equal(await readingCells(), 3, "the earlier answers stay unpainted");
+  rereads.release();
+  await page.getByText(READING).first().waitFor({ state: "detached" });
+  assert.equal(await viewTag(page), "kept");
+});
+
+// Until the resume's list read revalidates, the refocus holds the same list on screen, inert,
+// with its rows' text still connected but the view no longer current: a landed reread waiting
+// out those 150 ms must not fill a row of the held page either (finding 1877).
+test("A list held by a refocus while its rows wait to fill paints no earlier answer", async (t) => {
+  const { namespace, page, reveal, land } = await returnWithHeldRows(t, "Steady held resume");
+  await reveal(250);
+  await land(50);
+  const listRead = `/namespaces/${namespace.id}/agents`;
+  const list = await holdRequests(t, page, (url) => url.pathname.endsWith(listRead), {
+    once: true,
+  });
+  const rereads = await holdRowReads(t, page, namespace);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event("focus")));
+  await list.requested;
+  await page.clock.runFor(200);
+  // The held view is inert, so read it directly: deploymentCells reads only the active view.
+  const held = await page.evaluate((reading) => {
+    const view = globalThis.document.querySelector('.content [aria-live="polite"]');
+    const cells = [...view.querySelectorAll(".agent-deployment")];
+    return {
+      inert: view.inert,
+      reading: cells.filter((cell) => cell.textContent === reading).length,
+    };
+  }, READING);
+  assert.deepEqual(held, { inert: true, reading: 3 }, "the held rows stay unfilled");
+  list.release();
+  await rereads.revisions.requested;
+  await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
+  assert.equal(await viewTag(page), "kept");
+  rereads.release();
+  await page.getByText(READING).first().waitFor({ state: "detached" });
+});
+
+// A list left again before its rows' rereads land is reused on the next return too: rows read
+// again whenever the list resumes, so unfinished ones don't count against it (finding 1663).
+// No row shows the answer it had, or an aborted read's failure, as current.
+test("A list left again during its rows' rereads is reused on the next return and rereads them", async (t) => {
   const { namespace, agents, page } = await openTeamList(t, "Team return again");
   const [opened] = agents;
   await tagView(page);
@@ -364,9 +657,19 @@ test("A list left again during its rows' rereads is rebuilt on the next return",
     .getByRole("region", { name: "Agent state at a glance" })
     .waitFor();
 
+  const rereads = await holdRowReads(t, page, namespace);
+  await startRecording(page);
   await page.goBack();
   await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
-  assert.equal(await viewTag(page), null, "the list was rebuilt");
+  await rereads.revisions.requested;
+  assert.equal(await viewTag(page), "kept", "the list was reused");
+  const cells = await deploymentCells(page);
+  assert.equal(Object.keys(cells).length, AGENTS);
+  assert.deepEqual(new Set(Object.values(cells)), new Set([READING]));
+  assert.equal((await revealed(page)).deployments, 0, "no stale deployment was revealed");
+  rereads.release();
   await page.getByText(READING).first().waitFor({ state: "detached" });
-  assert.equal(await page.locator(activeView).locator(".agent-table tbody tr").count(), AGENTS);
+  for (const text of Object.values(await deploymentCells(page))) {
+    assert.match(text, /^v1 · succeeded/);
+  }
 });

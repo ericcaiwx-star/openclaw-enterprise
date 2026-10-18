@@ -8,10 +8,13 @@ import {
 import {
   ConfigurationHarnessError,
   configurationSettingMessage,
+  DependencyUnavailableError,
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
   SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
+  SandboxWorkspaceSetupRefusedError,
+  TransientDependencyError,
 } from "@openclaw-enterprise/occ";
 import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -29,6 +32,7 @@ import type {
   SandboxHarnessObservation,
   SandboxHarnessStatus,
   SandboxHarnessStatusContext,
+  SandboxHarnessWithdrawalContext,
   SandboxLogChunk,
   SandboxLogContext,
   SandboxLogRequest,
@@ -42,6 +46,8 @@ import {
   type OpenShellGateway,
 } from "../../backends/openshell.ts";
 import {
+  confirmSandboxAbsent,
+  gatewayIdentityRefusal,
   openShellSandboxLogReader,
   openShellSandboxObserver,
   type OpenShellGatewayClient,
@@ -57,11 +63,13 @@ import {
   OpenShellWorkspaceAlreadyExistsError,
   toProtobufStruct,
 } from "./openshell-gateway-client.ts";
+import { OpenShellServiceTransportError } from "./openshell-service-transport.ts";
 import { RUNTIME_WRAPPER_COMMAND } from "../compute/kubernetes/runtime-entrypoints.ts";
 import { harnessWorkspacePreparationScript } from "../compute/kubernetes/index.ts";
 import { nodeProgramArguments } from "../compute/node-program.ts";
 import {
   requireWorkspaceSetupConfiguration,
+  WORKSPACE_SETUP_REFUSED_EXIT_STATUS,
   WORKSPACE_SETUP_RUNTIME,
 } from "../compute/workspace-setup-runtime.ts";
 
@@ -1255,11 +1263,13 @@ const WORKSPACE_SETUP_WAIT = String.raw`{
 // Remote execution can outlive a lost RPC response. Keep the lock across the
 // initializer process so a retry cannot race its writes; kernel locks also release
 // after a crash. Private document bytes travel only through stdin, never argv.
+// The runner's refusal status passes through; any other failure exits 1 (finding 1708).
 const WORKSPACE_SETUP_EXEC = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 let lock;
+let refused = false;
 try {
   const workspace = process.env.OPENCLAW_WORKSPACE_DIR;
   if (!workspace || !path.isAbsolute(workspace)) throw new Error();
@@ -1275,9 +1285,10 @@ try {
     env: { ...process.env, OPENCLAW_WORKSPACE_SETUP_PATH: undefined },
     stdio: ["pipe", "ignore", "ignore", lock], timeout: 250000,
   });
+  refused = !result.error && result.status === ${WORKSPACE_SETUP_REFUSED_EXIT_STATUS};
   if (result.error || result.status !== 0) throw new Error();
 } catch {
-  process.exitCode = 1;
+  process.exitCode = refused ? ${WORKSPACE_SETUP_REFUSED_EXIT_STATUS} : 1;
 } finally {
   if (lock !== undefined) fs.closeSync(lock);
 }
@@ -2647,7 +2658,15 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     // Every reconcile pass reaches here. Re-sending CreateSandbox for a Sandbox that
     // exists would hit the gateway's request_id replay, which refuses a changed spec
     // (REQUEST_ID_PAYLOAD_MISMATCH) and forgets the create after 24 h (ALREADY_EXISTS).
-    let existing = await client.getSandbox(selector, context.signal);
+    // GetSandbox also answers NOT_FOUND for a Sandbox this identity may not see (finding
+    // 1676). That is safe here without a Workspace read: nothing is recorded as gone, and
+    // CreateSandbox keeps PERMISSION_DENIED for a non-member, so a hidden Sandbox is neither
+    // adopted nor created over; the create fails with SANDBOX_GATEWAY_UNAUTHORIZED below.
+    const refused = gatewayIdentityRefusal(
+      workspace,
+      `Sandbox ${sandbox.resourceName} cannot be created or adopted`,
+    );
+    let existing = await refused(() => client.getSandbox(selector, context.signal));
     if (!codex && existing === undefined) {
       await prepareNativeWorkspace(context, this.options, sandbox);
     }
@@ -2670,9 +2689,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       let created;
       let alreadyExists = false;
       try {
-        created = await client.createSandbox(
-          { ...create, requestId: requestIds[attempt]! },
-          context.signal,
+        created = await refused(() =>
+          client.createSandbox({ ...create, requestId: requestIds[attempt]! }, context.signal),
         );
       } catch (error) {
         if (error instanceof OpenShellRequestReplayRefusedError) {
@@ -2691,6 +2709,17 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         }
         if (exposed) {
           validateHarnessServiceUrl(created.serviceUrls[""]);
+          if (!codex && context.workspaceNodeEnrolled === true) {
+            // A Sandbox created again after the node enrolled (the stale one was removed)
+            // gets the exposure its immutable request carries and loses it at once: nothing
+            // of Compute's listens there any more (finding 1657).
+            await this.withdrawNativeExposure(
+              client,
+              workspace,
+              sandbox.resourceName,
+              context.signal,
+            );
+          }
         } else if (Object.keys(created.serviceUrls).length !== 0) {
           throw new OpenShellSandboxConfigurationFailure(
             "OpenShell exposed an unexpected service for the native OpenClaw Harness.",
@@ -2704,7 +2733,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         await this.initializeWorkspace(context, sandbox, client);
         return Object.freeze(sandbox);
       }
-      existing = await client.getSandbox(selector, context.signal);
+      existing = await refused(() => client.getSandbox(selector, context.signal));
       if (existing === undefined && alreadyExists) {
         throw new OpenShellSandboxConfigurationFailure(
           `OpenShell Sandbox ${sandbox.resourceName} disappeared during creation.`,
@@ -2723,7 +2752,12 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         `OpenShell Sandbox ${sandbox.resourceName} has stopped; remove the stale Sandbox before retrying.`,
       );
     }
-    if (exposed) {
+    if (exposed && !codex && context.workspaceNodeEnrolled === true) {
+      // The worker's node has enrolled: Compute reads nothing more through the exposure,
+      // so a Sandbox adopted after enrollment is without it (finding 1657). A withdrawal
+      // the enrolling pass could not finish is completed here.
+      await this.withdrawNativeExposure(client, workspace, sandbox.resourceName, context.signal);
+    } else if (exposed) {
       // The spec match above already proves the live Sandbox was created with this
       // exposure, so a missing service is an anomaly, not an older Sandbox.
       const service = await client.getService(workspace, sandbox.resourceName, "", context.signal);
@@ -2742,6 +2776,72 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     return Object.freeze(sandbox);
   }
 
+  /**
+   * Drops the dedicated OpenClaw worker's bearer-passthrough exposure once its node has
+   * enrolled. OpenShell routes the exposure to the Sandbox without authenticating the caller,
+   * and nothing of Compute's listens on the worker's transport port after enrollment, so the
+   * exposure would otherwise hand agent-run code an inbound channel for the Sandbox's lifetime
+   * (finding 1657). Fails closed: resolves only once OpenShell confirms the service gone.
+   */
+  async withdrawHarnessExposure(context: SandboxHarnessWithdrawalContext): Promise<void> {
+    this.requireOperatorWorkspaceMode("withdraw a Harness exposure");
+    if (
+      context.revision.harness.mode !== "dedicated" ||
+      context.revision.harness.id !== "openclaw"
+    ) {
+      throw new SandboxRevisionUnsupportedError(
+        "SANDBOX_HARNESS_UNSUPPORTED",
+        "OpenShell withdraws a Harness exposure only for dedicated OpenClaw revisions; a Codex Harness keeps its exposure as the Gateway transport.",
+      );
+    }
+    if (context.revision.sandboxDriverId !== this.id) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "Refusing to withdraw a Harness exposure for another Sandbox Driver.",
+      );
+    }
+    const sandbox = this.sandboxRef(context);
+    await this.withdrawNativeExposure(
+      this.gatewayClientForNamespace(sandbox.namespaceName),
+      workspaceName(context.namespace),
+      sandbox.resourceName,
+      context.signal,
+    );
+  }
+
+  private async withdrawNativeExposure(
+    client: OpenShellGatewayClient,
+    workspace: string,
+    sandbox: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // A refusal from any of the three calls is the same lost or expired identity: the
+    // deployment fails with that code instead of spending its attempts on a generic failure.
+    const unconfirmed = `the Harness exposure of Sandbox ${sandbox} cannot be confirmed withdrawn`;
+    const refused = gatewayIdentityRefusal(workspace, unconfirmed);
+    // Read first: after the first withdrawal every reconcile pass passes here, and a
+    // DeleteService per pass would be a gateway mutation per pass for nothing.
+    const read = () => client.getService(workspace, sandbox, "", signal);
+    // An absent service is withdrawn only once GetWorkspace proves the identity still sees the
+    // Workspace and a second read still finds none (findings 1670, 1692); a service the second
+    // read finds is deleted. The next worker start's sweep reads the service again.
+    const exposed =
+      (await refused(read)) ??
+      (await confirmSandboxAbsent(
+        client,
+        workspace,
+        signal,
+        refused,
+        () =>
+          new OpenShellSandboxConfigurationFailure(
+            `OpenShell reports no Workspace ${workspace}, so ${unconfirmed}.`,
+          ),
+        read,
+      ));
+    if (exposed !== undefined) {
+      await refused(() => client.deleteService(workspace, sandbox, "", signal));
+    }
+  }
+
   private async initializeWorkspace(
     context: SandboxHarnessContext,
     sandbox: SandboxResourceRef,
@@ -2758,9 +2858,13 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     );
     // Supervisor readiness permits private exec; the Harness is still waiting for
     // the completion marker. A later reconciliation handles a still-starting Pod.
+    // NOT_FOUND here (also a Sandbox hidden from this identity, finding 1676) only defers the
+    // setup: this pass read or created the Sandbox a moment ago, so it is a flap within one
+    // pass, nothing is recorded as gone, and the next pass's create fails closed.
     if (current?.phase !== "SANDBOX_PHASE_READY" && current?.phase !== 2) {
       return;
     }
+    let exit: number;
     try {
       const secret = await kubernetes(context).read({
         apiVersion: "v1",
@@ -2790,7 +2894,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       ) {
         throw new Error();
       }
-      const exit = await client.execSandbox(
+      exit = await client.execSandbox(
         {
           workspace,
           sandbox: sandbox.resourceName,
@@ -2806,12 +2910,17 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         },
         context.signal,
       );
-      if (exit !== 0) {
-        throw new Error();
-      }
     } catch {
       context.signal.throwIfAborted();
       // Neither API/parser diagnostics nor remote output may disclose initial files.
+      throw new OpenShellSandboxConfigurationFailure("OpenShell workspace initialization failed.");
+    }
+    if (exit === WORKSPACE_SETUP_REFUSED_EXIT_STATUS) {
+      // Every retry would refuse the same way: fail the deployment now, as Kubernetes Compute
+      // does for its init container (finding 1708).
+      throw new SandboxWorkspaceSetupRefusedError("OpenShell workspace initialization refused.");
+    }
+    if (exit !== 0) {
       throw new OpenShellSandboxConfigurationFailure("OpenShell workspace initialization failed.");
     }
   }
@@ -2839,25 +2948,48 @@ export class OpenShellSandboxDriver implements SandboxDriver {
    * Anything else, including OpenShell's own `502` while nothing listens, is still starting.
    */
   async harnessStatus(context: SandboxHarnessStatusContext): Promise<SandboxHarnessStatus> {
-    const { client, service } = await this.exactHarnessService(context, "observe a Harness");
-    // Handshake first, so a serving app-server never receives a plain request. A
-    // Harness wrapper holding a startup failure answers the upgrade 503 with the held
-    // code and serves the failure itself on the status path.
-    if (
-      await client.serviceWebSocketHandshake(service.url, context.transportToken, context.signal)
-    ) {
-      return Object.freeze({ state: "serving" });
+    if (context.revision.harness.id === "openclaw" && context.workspaceNodeEnrolled === true) {
+      // The exposure is withdrawn with enrollment, and nothing of Compute's listens there.
+      throw new OpenShellSandboxConfigurationFailure(
+        "Refusing to observe a dedicated OpenClaw worker whose node has enrolled; its Harness exposure is withdrawn.",
+      );
     }
-    const document = await client.getServiceDocument(
-      service.url,
-      HARNESS_RUNTIME_STATUS_PATH,
-      context.transportToken,
-      context.signal,
-    );
-    const runtimeFailure = asRecord(document.json)?.runtimeFailure;
-    return document.status === 200 && runtimeFailure !== undefined
-      ? Object.freeze({ state: "failed", runtimeFailure })
-      : Object.freeze({ state: "starting" });
+    try {
+      const { client, service } = await this.exactHarnessService(context, "observe a Harness");
+      // Handshake first, so a serving app-server never receives a plain request. A
+      // Harness wrapper holding a startup failure answers the upgrade 503 with the held
+      // code and serves the failure itself on the status path.
+      if (
+        await client.serviceWebSocketHandshake(service.url, context.transportToken, context.signal)
+      ) {
+        return Object.freeze({ state: "serving" });
+      }
+      const document = await client.getServiceDocument(
+        service.url,
+        HARNESS_RUNTIME_STATUS_PATH,
+        context.transportToken,
+        context.signal,
+      );
+      const runtimeFailure = asRecord(document.json)?.runtimeFailure;
+      return document.status === 200 && runtimeFailure !== undefined
+        ? Object.freeze({ state: "failed", runtimeFailure })
+        : Object.freeze({ state: "starting" });
+    } catch (error) {
+      // A gateway that does not answer, over gRPC or its service listener, is no evidence
+      // about the Harness: the read waits for convergence without spending the revision's
+      // attempt budget (finding 1658). Refusals and invalid answers keep their classes, and
+      // so does the client's own transient class (OpenShellAdmissionLimitError), which is
+      // not a DependencyUnavailableError.
+      if (error instanceof DependencyUnavailableError) {
+        throw new TransientDependencyError(
+          "sandbox_gateway",
+          error instanceof OpenShellServiceTransportError ? error.reason : "unavailable",
+          "OpenShell did not answer the Harness status read.",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 
   /**
@@ -2943,20 +3075,44 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       }
       const client = this.gatewayClientForNamespace(sandbox.namespaceName);
       const workspace = workspaceName(context.namespace);
-      await client.deleteSandbox(
-        {
-          name: sandbox.resourceName,
+      const selector = { name: sandbox.resourceName, workspace };
+      // A stop, retire or delete records the Sandbox removed only once OpenShell confirms it.
+      // GetSandbox and DeleteSandbox answer NOT_FOUND alike for a Sandbox that is gone and for
+      // one this identity may not see (finding 1676), so an absent Sandbox counts as removed
+      // only after GetWorkspace proves the identity still sees the Workspace and a second read
+      // still finds none (finding 1692); a Sandbox the second read finds is deleted. A refusal
+      // on any call fails with SANDBOX_GATEWAY_UNAUTHORIZED, so the worker fails the stop or
+      // deletion with that code (a replay tries again) instead of recording a live Sandbox,
+      // with its exposure and credentials, as gone. The read also spares a DeleteSandbox per
+      // pass once the Sandbox is gone.
+      const unconfirmed = `Sandbox ${sandbox.resourceName} cannot be confirmed removed`;
+      const refused = gatewayIdentityRefusal(workspace, unconfirmed);
+      const read = () => client.getSandbox(selector, context.signal);
+      const present =
+        (await refused(read)) ??
+        (await confirmSandboxAbsent(
+          client,
           workspace,
-        },
-        context.signal,
-      );
+          context.signal,
+          refused,
+          () =>
+            new OpenShellSandboxConfigurationFailure(
+              `OpenShell reports no Workspace ${workspace}, so ${unconfirmed}.`,
+            ),
+          read,
+        ));
+      if (present !== undefined) {
+        await refused(() => client.deleteSandbox(selector, context.signal));
+      }
       const harnessId = context.revision.harness.id;
       if (
         context.revision.harness.mode === "dedicated" &&
         (harnessId === "codex" || harnessId === "openclaw")
       ) {
         const provider = runtimeProviderName(context.revision.id);
-        const existing = await client.getProvider(workspace, provider, context.signal);
+        const existing = await refused(() =>
+          client.getProvider(workspace, provider, context.signal),
+        );
         if (existing !== undefined) {
           verifyRuntimeProvider(
             existing,
@@ -3062,7 +3218,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   /**
    * Reads the dedicated revision's own Sandbox record without touching it. Only the
    * gateway's lifecycle phase and restart state are used; the Harness transport is not
-   * contacted.
+   * contacted. A Sandbox hidden from this identity reads `lost` (`SANDBOX_MISSING`, finding
+   * 1676): an observation, not a removal, and no controller path acts on it today.
    */
   async observeHarness(context: SandboxLogContext): Promise<SandboxHarnessObservation> {
     this.requireOperatorWorkspaceMode("observe a Harness");
@@ -3097,7 +3254,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   /**
    * The revision's supervisor Pod opens its workspace-node connection. OpenShell labels that
    * Pod with the Sandbox's gateway-minted ID (`sandbox_runtime.rs` `control_labels`), a UUID
-   * distinct from the Sandbox name, so the ID is read from the gateway's own record.
+   * distinct from the Sandbox name, so the ID is read from the gateway's own record. A Sandbox
+   * hidden from this identity (finding 1676) contributes no peer: the Gateway then admits its
+   * node connection from nowhere, which is restrictive, not a removal.
    */
   async workspaceNodePeerLabels(
     context: SandboxNamespaceContext & { readonly revision: Readonly<AgentRevision> },

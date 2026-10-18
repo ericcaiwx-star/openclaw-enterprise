@@ -214,6 +214,16 @@ export function assertReadableConfiguration(resource) {
   }
 }
 
+// A row's deployment while it is read. The text follows the 250 ms rule, so a read that lands
+// sooner, as most do on a return to a retained list, never paints it (finding 1656). Text that a
+// focusable holder wraps stays readable to a screen reader meanwhile.
+const readingDeployment = (className = "delayed-status") =>
+  element("span", { className }, "Reading deployment…");
+// With a dozen rows, reads that landed just after the 250 ms rule's delay (console.css
+// .delayed-status and .delayed-text) replaced the text a frame or a few after it showed (16-133
+// ms, finding 1683), so once shown it stays at least READING_SHOWN_MS.
+const READING_SHOWN_MS = 150;
+
 export function renderAgentList(context) {
   const { view, items } = context;
   const search = element("input", {
@@ -248,18 +258,20 @@ export function renderAgentList(context) {
   );
   // Each row's latest deployment, read after the list paints. A return to a retained list
   // revalidates only the list's own reads, so these never hold its reveal (finding 1644); the
-  // retained rows read them again in place instead.
+  // retained rows read them again in place instead. So one still running doesn't keep the list
+  // from being retained either (finding 1663): leaving aborts it, and the list rereads it.
   const cells = new Map(); // The shown rows' deployment cells, each with its Agent.
+  const rowRead = { revalidate: false, rereadOnResume: true };
   function readDeployment(item) {
     const agentPath = `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(item.id)}`;
-    return latestReadableRevision(context, `${agentPath}/revisions`, { revalidate: false }).then(
+    return latestReadableRevision(context, `${agentPath}/revisions`, rowRead).then(
       async (latest) => {
         if (!latest) {
           return null;
         }
         const status = await context.request(
           `${agentPath}/deployments/${encodeURIComponent(latest.id)}`,
-          { revalidate: false },
+          rowRead,
         );
         return { revision: latest, status };
       },
@@ -280,6 +292,31 @@ export function renderAgentList(context) {
     if (!deployments.has(item.id)) {
       deployments.set(item.id, readDeployment(item));
     }
+    // The cell's "Reading deployment…" (or its focusable holder) and when its text shows: the
+    // frame its delay animation ends in, not render time plus the delay. The animation starts
+    // with the frame that first styles the text, which can be a frame or two either side of the
+    // render, so that estimate let a read landing between the two fill the cell one frame after
+    // the text painted (finding 1716).
+    const reading = deployment.firstElementChild;
+    let shownAt;
+    reading.addEventListener("animationend", () => {
+      shownAt = performance.now();
+    });
+    // A read that lands before the text shows, or after it has shown long enough, fills the cell
+    // now; otherwise once it has. A later resume or render replaces the text, and its own read
+    // fills the cell instead.
+    const fill = (...content) => {
+      const wait = shownAt === undefined ? 0 : shownAt + READING_SHOWN_MS - performance.now();
+      if (wait <= 0) {
+        fillDeployment(deployment, ...content);
+        return;
+      }
+      setTimeout(() => {
+        if (context.isCurrent() && reading.isConnected) {
+          fillDeployment(deployment, ...content);
+        }
+      }, wait);
+    };
     void deployments
       .get(item.id)
       .then((result) => {
@@ -287,7 +324,7 @@ export function renderAgentList(context) {
           return;
         }
         if (result === null) {
-          fillDeployment(deployment, "No visible deployments");
+          fill("No visible deployments");
           return;
         }
         const neutral = neutralDeploymentOutcome(result.status);
@@ -296,8 +333,7 @@ export function renderAgentList(context) {
             ? (result.status.error?.message ?? "Deployment failed.")
             : null;
         // A long failure fits one line; its title and the Agent page give the whole text.
-        fillDeployment(
-          deployment,
+        fill(
           link(
             `v${result.revision.revision} · ${deploymentOutcome(result.status)}`,
             `agents/${item.id}?revision=${result.revision.id}`,
@@ -315,10 +351,11 @@ export function renderAgentList(context) {
         );
       })
       .catch((error) => {
-        fillDeployment(
-          deployment,
-          error.status === 403 ? "Deployment access denied" : "Deployment unavailable",
-        );
+        // A read the list's reset aborted fails here; it never paints the list it left.
+        if (!context.isCurrent()) {
+          return;
+        }
+        fill(error.status === 403 ? "Deployment access denied" : "Deployment unavailable");
       });
   }
   function render() {
@@ -366,7 +403,7 @@ export function renderAgentList(context) {
     for (const item of matches) {
       // The cell keeps its column's width once its read lands, and its outcome link and one
       // note line fit the two lines the Agent cell already gives the row (finding 1488).
-      const deployment = element("td", { className: "agent-deployment" }, "Reading deployment…");
+      const deployment = element("td", { className: "agent-deployment" }, readingDeployment());
       cells.set(deployment, item);
       showDeployment(item, deployment);
       body.append(
@@ -404,18 +441,25 @@ export function renderAgentList(context) {
     rows.replaceChildren(element("div", { className: "table-scroll" }, table));
   }
   // A retained list is mounted without rereading its rows' deployments, so what they showed is
-  // not presented as current: each row reads its deployment again from "Reading deployment…".
-  // Back from a deployment can focus the loading text. Keep its address only to match that
-  // return: until the read settles, the previous revision must not be an active link.
+  // not presented as current: each row reads its deployment again from "Reading deployment…",
+  // blank for its first 250 ms. Back from a deployment can focus the pending cell. Keep its
+  // address only to match that return: until the read settles, the previous revision must not
+  // be an active link.
   context.onResume?.(() => {
     deployments.clear();
     for (const [deployment, item] of cells) {
-      const shown = deployment.querySelector("a");
-      const reading = "Reading deployment…";
+      // A cell still reading from an earlier resume keeps the address it was given.
+      const shown =
+        deployment.querySelector("a")?.href ??
+        deployment.querySelector("[data-return-focus-href]")?.dataset.returnFocusHref;
       deployment.replaceChildren(
         shown
-          ? element("span", { tabindex: "-1", "data-return-focus-href": shown.href }, reading)
-          : reading,
+          ? element(
+              "span",
+              { tabindex: "-1", "data-return-focus-href": shown },
+              readingDeployment("delayed-text"),
+            )
+          : readingDeployment(),
       );
       showDeployment(item, deployment);
     }

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { delimiter, join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   k3sImage,
   kubectlVersion,
@@ -20,6 +21,7 @@ import {
   createOpenShellServiceLoopbackLookup,
   openShellChartImageValues,
   openShellGatewayNetworkPolicies,
+  outageAttemptRead,
 } from "../helpers/openshell-kubernetes-real.mjs";
 
 async function fixture(t, prefix = "ci-openshell-test") {
@@ -74,6 +76,49 @@ test("OpenShell Helm chart image values use the v0.1.4 registry and digest contr
     () => openShellChartImageValues("gateway.image", "localhost/example/gateway:local"),
     /immutable OpenShell image digest/,
   );
+});
+
+// Finding 1846: the worker claimed the work again between the queued read and the deployment read,
+// so the proof saw `running` while nothing had activated. Each poll replays one interleaving.
+test("OpenShell outage proof rereads a deployment the worker claimed again between reads", async () => {
+  const queued = (attempt) => ({ state: "queued", reason_code: null, attempt_count: attempt });
+  const claimed = (attempt) => ({ state: "claimed", reason_code: null, attempt_count: attempt });
+  const polls = [
+    [queued(0), undefined],
+    [queued(3), "running"],
+    [claimed(4), undefined],
+    [queued(4), "queued"],
+  ];
+  let reads = 0;
+  const poll = outageAttemptRead({
+    readWork: async () => polls[reads][0],
+    readStatus: async () => {
+      assert.notEqual(
+        polls[reads][1],
+        undefined,
+        "status is read only once the work is queued after an attempt",
+      );
+      return polls[reads][1];
+    },
+  });
+  const results = [];
+  for (; reads < polls.length; reads += 1) {
+    results.push(await poll());
+  }
+  assert.deepEqual(results, [
+    undefined,
+    undefined,
+    undefined,
+    { work: queued(4), status: "queued" },
+  ]);
+  // A revision that failed or activated during the outage ends the wait, so the proof fails on it.
+  for (const status of ["failed", "succeeded", null]) {
+    const ended = await outageAttemptRead({
+      readWork: async () => queued(1),
+      readStatus: async () => status,
+    })();
+    assert.deepEqual(ended, { work: queued(1), status });
+  }
 });
 
 test("OpenShell host probes retain the exposed hostname while connecting to loopback", async (t) => {
@@ -303,6 +348,27 @@ test("OpenShell probe waits for a command that outlives its turn up to the fixtu
   t.after(() => server.close());
   await once(server, "listening");
   const directory = await fixture(t);
+  // Finding 1665: wakes the client's first command-deadline timer after 1 ms instead of its
+  // delay, as an early libuv wake would, and records that it did.
+  const earlyWake = join(directory, "early-wake.mjs");
+  const earlyWakeMarker = join(directory, "early-wake");
+  await writeFile(
+    earlyWake,
+    [
+      'import { writeFileSync } from "node:fs";',
+      "const grace = Number(process.env.EARLY_WAKE_GRACE_MS);",
+      "const setTimeoutOriginal = globalThis.setTimeout;",
+      "let woken = false;",
+      "globalThis.setTimeout = (callback, delay, ...rest) => {",
+      "  if (!woken && delay > grace - 50 && delay <= grace) {",
+      "    woken = true;",
+      `    writeFileSync(${JSON.stringify(earlyWakeMarker)}, String(delay));`,
+      "    delay = 1;",
+      "  }",
+      "  return setTimeoutOriginal(callback, delay, ...rest);",
+      "};",
+    ].join("\n"),
+  );
   await writeFile(
     join(directory, "kubectl"),
     [
@@ -310,6 +376,7 @@ test("OpenShell probe waits for a command that outlives its turn up to the fixtu
       'while [ "$1" != "--" ] && [ "$#" -gt 0 ]; do shift; done',
       "shift",
       `export APP_SERVER_URL=ws://127.0.0.1:${server.address().port}`,
+      `if [ -n "$EARLY_WAKE_GRACE_MS" ]; then export NODE_OPTIONS="\${NODE_OPTIONS:+$NODE_OPTIONS }--import=${pathToFileURL(earlyWake)}"; fi`,
       'exec "$@"',
     ].join("\n"),
     { mode: 0o755 },
@@ -325,6 +392,7 @@ test("OpenShell probe waits for a command that outlives its turn up to the fixtu
   // The command completes this long after the turn: past the former fixed 5 s wait would make
   // the test slow, so the bounds below scale it down. The client sees only message order and time.
   const lateMs = 800;
+  let turnCompletedAt;
   peer.on("connection", (socket) => {
     socket.on("message", (data) => {
       const { method, id } = JSON.parse(data);
@@ -349,6 +417,7 @@ test("OpenShell probe waits for a command that outlives its turn up to the fixtu
         method: "item/commandExecution/outputDelta",
         params: { threadId, turnId, itemId: item.id, delta: "TOOL_EXIT=" },
       });
+      turnCompletedAt = performance.now();
       send({
         method: "turn/completed",
         params: { threadId, turn: { ...turn, status: "completed" } },
@@ -379,11 +448,10 @@ test("OpenShell probe waits for a command that outlives its turn up to the fixtu
   };
 
   // Within the bound, the late completion settles the probe with the command's own result.
-  const started = Date.now();
   const { run } = await probe(lateMs * 4);
   assert.equal(run.exitCode, 28, "keep the late command's actual result");
-  // The wait ends on the completion event, not at the bound.
-  assert.ok(Date.now() - started < lateMs * 4, "settle on the completion event");
+  // The grace starts when the turn ends; launching the client isn't part of that wait.
+  assert.ok(performance.now() - turnCompletedAt < lateMs * 4, "settle on the completion event");
 
   // Past the bound, the outcome stays unknown and the failure says how long the command ran.
   const error = await probe(lateMs / 4).then(
@@ -400,6 +468,39 @@ test("OpenShell probe waits for a command that outlives its turn up to the fixtu
   assert.equal(summary.pendingCommands[0].outputBytes, "TOOL_EXIT=".length);
   assert.ok(summary.pendingCommands[0].startedBeforeTurnEndMs >= 0);
   assert.ok(summary.pendingCommands[0].runningMs >= lateMs / 4);
+
+  // An early timer wake must not end the grace before turn completion plus the bound: the
+  // client re-arms for the remainder. A one-shot timer would report an unknown outcome here.
+  const probeWithEarlyWake = async (codexCommandGraceMs) => {
+    await rm(earlyWakeMarker, { force: true });
+    process.env.EARLY_WAKE_GRACE_MS = String(codexCommandGraceMs);
+    const outcome = await probe(codexCommandGraceMs).then(
+      (result) => ({ result }),
+      (error) => ({ error }),
+    );
+    delete process.env.EARLY_WAKE_GRACE_MS;
+    // The deadline was armed for the grace less the moment since the turn ended.
+    const woke = Number(await readFile(earlyWakeMarker, "utf8").catch(() => NaN));
+    assert.ok(
+      woke > codexCommandGraceMs - 50 && woke <= codexCommandGraceMs,
+      "the command-deadline timer must wake early",
+    );
+    if (outcome.error) {
+      throw outcome.error;
+    }
+    return outcome.result;
+  };
+  const early = await probeWithEarlyWake(lateMs * 4);
+  assert.equal(early.run.exitCode, 28, "an early wake keeps waiting for the late command");
+  const expired = await probeWithEarlyWake(lateMs / 4).then(
+    () => assert.fail("a command that outlives the bound must leave the outcome unknown"),
+    (failure) => failure,
+  );
+  assert.match(expired.message, /Codex command outcome is unknown/);
+  const expiredSummary = JSON.parse(
+    /Native execution summary: (\{.*?\]\})/s.exec(expired.message)[1],
+  );
+  assert.ok(expiredSummary.sinceTurnEndMs >= lateMs / 4, "never end the grace before its bound");
 
   for (const codexCommandGraceMs of [0, 1.5, 60_001, "5000"]) {
     assert.throws(

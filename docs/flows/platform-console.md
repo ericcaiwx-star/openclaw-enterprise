@@ -1,6 +1,6 @@
 ---
 created: 2026-09-01
-updated: 2026-10-15
+updated: 2026-10-17
 last_updated_session: authoring-run/05ac6c84-8444-4dc1-8311-13c4e84369a3
 ---
 
@@ -147,9 +147,9 @@ reads, password input, and mutations prevent reuse; read-only catalog and diagno
 
 **Back to Agents:** session, Namespace, permission, and collection checks gate the
 list, not each row’s deployment read. On reuse, `agents/list.mjs:renderAgentList`
-sets visible deployment cells to **Reading deployment…** before paint, then shows
-each fresh result or refusal. Back from a deployment focuses its loading text,
-not a link to the old revision. Leaving during these reads makes the next return rebuild the list.
+sets visible deployment cells to **Reading deployment…**, hidden for 250 ms and, once shown, kept at least 150 ms, before paint, then shows
+each fresh result or refusal. Back or refocus from a deployment focuses that cell,
+not a link to the old revision. Unfinished or failed row reads never prevent reuse; resuming rereads them.
 
 A changed user or session key clears retained views and drafts before further
 private reads. Missing sessions open login; failed reads offer Retry.
@@ -233,10 +233,11 @@ access, and Secret references to [provisioning](agent-provisioning.md), even aft
 that outage. The worker reauthorizes, creates resources and exact Secret grants,
 and deploys; Console polls, then opens the revision.
 
-Ordinary drafts post `{kind: "agent", values, secretBindings}` to
-`POST /namespaces/:namespaceId/configurations`, then submit its ID, plugins,
-`initialWorkspaceFiles`, and `workspaceDefaultsId` to
-`POST /namespaces/:namespaceId/agents`. Success opens `revision=draft`.
+Ordinary drafts first check values and plugins with
+`POST /namespaces/:namespaceId/agents/validate`, then post
+`{kind: "agent", values, secretBindings}` to `.../configurations` and submit its ID,
+plugins, `initialWorkspaceFiles`, and `workspaceDefaultsId` to `.../agents`.
+Success opens `revision=draft`.
 OCC stages all four workspace textareas, including unchanged/empty values, outside
 Agent/Configuration for [workspace setup](workspace-files.md).
 
@@ -292,11 +293,13 @@ Stop and Delete stay put. Direct navigation focuses and scrolls to the output; s
 the tab leaves visible output in place. Recovery links scroll their version tab into view
 and focus its tab control, smoothly unless the page rebuilds or motion is reduced.
 
-[Runtime logs](agent-runtime-logs.md) explains access. A status `403` hides Pod details,
-not separately authorized logs. Denials last until logout; newly granted `operate` permits
-another status read. A refused log read or download clears the rows. A late success cannot
-restore them or start a download. Refusing previously allowed log text rereads status at
-once; that read supersedes a stale one in flight. Back rebuilds a refused view; otherwise it shows the page it checked.
+[Runtime logs](agent-runtime-logs.md) explains access. Status `403` hides Pod details, not
+separately authorized logs. Denials last until logout; newly granted `operate` permits another
+status read. Refused reads or downloads clear the rows; late successes cannot restore them or
+download. Refusing allowed log text rereads status at once, superseding stale reads. Back
+rebuilds refused views, else shows the checked page. Refresh keeps rows and cursor until
+replaced; rate-limit notices update at the retry time without rereading. New streams or
+rejected cursors clear rows.
 
 ### 7. Commit only the current response, or clear the view
 
@@ -308,8 +311,9 @@ opened from the list focuses its heading when the title renders. Tabs and
 focused controls keep focus. Navigation, Namespace changes, and logout invalidate
 reads; generations reject late responses. Refocus coalesces events. Agent detail
 rechecks access in place, preserving controls, input, and saves; failures clear it.
-Other pages revalidate before reuse, a shown 403 or 404 included; forms defer refocus. Draft save baselines and
-Namespace scopes stay separate.
+Other pages revalidate before reuse, including a shown 403 or 404; forms defer the check.
+Returning to the tab restores focus after the unchanged view is admitted, if the control is still
+present and the reader hasn’t moved on. Draft save baselines and Namespace scopes stay separate.
 
 Authorization and dependency failures clear affected content and expose recovery;
 a current protected `401` clears all private state. `pagehide` clears
@@ -374,9 +378,7 @@ refresh and inspection.
 
 ## Changelog
 
-- 2026-10-17 08:32: Show the rechecked Agents list before refreshing visible deployment cells. (fix-1644 - c29af02c98)
-- 2026-10-16 22:40: Hold loading 300 ms; open recovery links in view; reread status on a log refusal. (ui-jank-code-12)
-- 2026-10-16 18:30: Forget denials at logout, clear refused logs or Pod status, and show the page Back checked. (lows-1016o / log-refusal-followup - 1fb2170)
-- 2026-10-16 16:40: Open a Logs URL at its output; reuse a member's Agent view on Back; keep the startup status to 400 ms. (ui-jank-code-11)
+- 2026-10-18 10:30: Count the row loading text's 150 ms from the frame it shows in. (lows-1018f)
+- 2026-10-17 16:30: Keep row loading text 150 ms once shown; refocus at phone width focuses Open navigation. (ui-fix-1680)
 
 [Platform console request documentation history](platform-console/history.md) preserves the older dated entries.

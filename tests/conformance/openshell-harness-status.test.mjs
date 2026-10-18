@@ -15,6 +15,7 @@ import {
   NATIVE_WORKER_ENTRYPOINT,
 } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
+import { OpenShellServiceTransportError } from "../../apps/controller/src/drivers/sandbox/openshell-service-transport.ts";
 import { DependencyUnavailableError } from "../../packages/occ/src/errors.ts";
 
 // A provider-owned Codex Harness (OpenShell) receives only the transport token's
@@ -550,6 +551,9 @@ test("an unreachable OpenShell gateway listener is a dependency failure, not a s
   ]) {
     await assert.rejects(observe(), (error) => {
       assert.ok(error instanceof DependencyUnavailableError, String(error));
+      // The reason is closed vocabulary for the worker's transient-dependency log.
+      assert.ok(error instanceof OpenShellServiceTransportError);
+      assert.equal(error.reason, "unreachable");
       return true;
     });
   }
@@ -577,6 +581,8 @@ test("an OpenShell service that never answers times out as a dependency failure"
     // The caller's own deadline is longer: the request bound must fire first.
     await assert.rejects(observe(AbortSignal.timeout(20_000)), (error) => {
       assert.ok(error instanceof DependencyUnavailableError, String(error));
+      assert.ok(error instanceof OpenShellServiceTransportError);
+      assert.equal(error.reason, "timeout");
       assert.match(error.message, /timed out/);
       return true;
     });
@@ -916,7 +922,7 @@ test("runtime wrapper status servers answer 400 to a request target that is not 
 // A provider-owned dedicated OpenClaw worker (finding 1642) holds a failed model
 // check the same way: it never connects its node, so without this nothing reports
 // the hold and the revision waits for its deadline as WORKSPACE_NODE_PENDING.
-function runNativeWorkerEntrypoint({ env = {}, upfrontStatus = 3, probeStatus }) {
+function runNativeWorkerEntrypoint({ env = {}, upfrontStatus = 3, upfrontStdout, probeStatus }) {
   const directory = mkdtempSync(join(tmpdir(), "native-held-failure-"));
   const servers = [];
   const diagnostics = [];
@@ -988,13 +994,15 @@ function runNativeWorkerEntrypoint({ env = {}, upfrontStatus = 3, probeStatus })
       if (specifier === "node:child_process") {
         return {
           execFile() {},
-          // The upfront credential check: exit 3-6 is a 401 (3 unclassified, 4
-          // invalid_api_key, 5 missing_api_key, 6 insufficient_permissions). The
-          // full probe, when reached, reports `probeStatus` for the model.
+          // The upfront credential check: the exit status is a 401's header marker
+          // (0 none, 10 provider-like, 20 openshell-policy, 30 mixed) plus its class (3 unclassified, 4
+          // invalid_api_key, 5 missing_api_key, 6 insufficient_permissions); its
+          // stdout is `upfrontStdout`, the 401 body's closed-set tokens. The full
+          // probe, when reached, reports `probeStatus` for the model.
           spawnSync(command, args) {
             if (args[0] === "-e") {
               assert.equal(command, process.execPath);
-              return { status: upfrontStatus };
+              return { status: upfrontStatus, stdout: upfrontStdout };
             }
             assert.equal(command, "node");
             assert.equal(args[0], "/app/openclaw.mjs");
@@ -1040,27 +1048,89 @@ function runNativeWorkerEntrypoint({ env = {}, upfrontStatus = 3, probeStatus })
 const nativeProviderEnv = { APP_TOKEN_SHA: sha256(TOKEN), APP_SERVER_PORT: "18790" };
 
 test("a provider-owned native OpenClaw worker serves its held model-check failure to the transport token holder", async (t) => {
-  for (const [name, upfrontStatus, providerCode] of [
-    ["an unclassified 401", 3, undefined],
-    ["a rejected key", 4, "invalid_api_key"],
-    ["a request that arrived without its credential", 5, "missing_api_key"],
-    ["a key without the endpoint's scope", 6, "insufficient_permissions"],
+  const hostile = "sk-proj-HostileFixtureKey0123456789abcdef";
+  for (const [name, upfrontStatus, providerCode, responseHeaderMarker, upfrontStdout, body] of [
+    ["an unclassified 401 without known header names", 3, undefined, "none"],
+    [
+      "an unclassified 401 whose error carries a closed-set code and type",
+      13,
+      undefined,
+      "provider-like",
+      '["json-error-code","no_organization","invalid_request_error"]',
+      {
+        bodyShape: "json-error-code",
+        providerErrorCode: "no_organization",
+        providerErrorType: "invalid_request_error",
+      },
+    ],
+    [
+      "an unclassified 401 whose error has an off-set code and no type",
+      13,
+      undefined,
+      "provider-like",
+      '["json-error-code","other",""]',
+      { bodyShape: "json-error-code", providerErrorCode: "other" },
+    ],
+    [
+      "an unclassified non-JSON 401",
+      23,
+      undefined,
+      "openshell-policy",
+      '["non-json","",""]',
+      { bodyShape: "non-json" },
+    ],
+    [
+      "a 401 whose child output is off-set",
+      15,
+      "missing_api_key",
+      "provider-like",
+      JSON.stringify([hostile, hostile, "Bearer " + hostile]),
+      {},
+    ],
+    ["a rejected key with provider-like headers", 14, "invalid_api_key", "provider-like"],
+    [
+      "a request that arrived at the provider without its credential",
+      15,
+      "missing_api_key",
+      "provider-like",
+    ],
+    ["a key without the endpoint's scope", 6, "insufficient_permissions", "none"],
+    ["an unclassified 401 stamped X-OpenShell-Policy", 23, undefined, "openshell-policy"],
+    ["a rejected key forwarded with the relay's stamp", 34, "invalid_api_key", "mixed"],
   ]) {
     await t.test(name, () => {
       const { servers, diagnostics, events, connectStarts } = runNativeWorkerEntrypoint({
         env: nativeProviderEnv,
         upfrontStatus,
+        upfrontStdout,
       });
       assert.equal(connectStarts, 0, "a held failure never starts the node");
       assert.ok(diagnostics.includes("Harness model authentication probe failed."));
-      // The probe event names the HTTP status and a closed-vocabulary code only.
+      // The probe event names the HTTP status, a closed-vocabulary code and the
+      // responder's closed-vocabulary source only.
       const probe = events.find((event) => event.event === "openclaw.model_probe");
       assert.equal(probe.code, "AUTHENTICATION_FAILED");
       assert.equal(probe.providerStatus, 401);
       assert.equal(probe.providerCode, providerCode);
+      assert.equal(probe.responseHeaderMarker, responseHeaderMarker);
+      // The 401 body's closed-set tokens, each only when the child named it.
+      assert.deepEqual(
+        {
+          bodyShape: probe.bodyShape,
+          providerErrorCode: probe.providerErrorCode,
+          providerErrorType: probe.providerErrorType,
+        },
+        {
+          bodyShape: undefined,
+          providerErrorCode: undefined,
+          providerErrorType: undefined,
+          ...body,
+        },
+      );
       assert.equal(probe.cause, undefined);
       for (const line of diagnostics) {
         assert.ok(!line.includes("fixture-model-key"), "the credential never reaches the log");
+        assert.ok(!line.includes("Hostile"), "off-set child output never reaches the log");
       }
 
       const listening = servers.filter((server) => server.listening !== undefined);
@@ -1143,4 +1213,28 @@ test("a native OpenClaw worker without an exposed port, or with a Compute status
     computeOwned.servers.map((server) => server.listening),
     [{ port: 18789, host: "0.0.0.0" }],
   );
+  // A present but malformed verifier or port never starts the server (finding 1661): a
+  // loosened check would serve the held failure against a credential nobody can hold.
+  const verifier = sha256(TOKEN);
+  for (const env of [
+    { ...nativeProviderEnv, APP_TOKEN_SHA: "" },
+    { ...nativeProviderEnv, APP_TOKEN_SHA: verifier.toUpperCase() },
+    { ...nativeProviderEnv, APP_TOKEN_SHA: verifier.slice(0, 63) },
+    { ...nativeProviderEnv, APP_TOKEN_SHA: `${verifier}a` },
+    { ...nativeProviderEnv, APP_TOKEN_SHA: `${verifier.slice(0, 63)}g` },
+    { ...nativeProviderEnv, APP_SERVER_PORT: "" },
+    { ...nativeProviderEnv, APP_SERVER_PORT: "0" },
+    { ...nativeProviderEnv, APP_SERVER_PORT: "65536" },
+    { ...nativeProviderEnv, APP_SERVER_PORT: "18790.5" },
+    { ...nativeProviderEnv, APP_SERVER_PORT: "-18790" },
+    { ...nativeProviderEnv, APP_SERVER_PORT: "port" },
+  ]) {
+    const malformed = runNativeWorkerEntrypoint({ env });
+    assert.equal(malformed.connectStarts, 0, JSON.stringify(env));
+    assert.deepEqual(
+      malformed.servers.filter((server) => server.listening !== undefined),
+      [],
+      JSON.stringify(env),
+    );
+  }
 });

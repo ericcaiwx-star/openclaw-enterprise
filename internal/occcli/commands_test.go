@@ -71,32 +71,17 @@ func (fake *fakeOCC) ServeHTTP(writer http.ResponseWriter, request *http.Request
 
 func runOCC(t *testing.T, responses map[string]string, args ...string) (string, []string, error) {
 	t.Helper()
-	fake := &fakeOCC{responses: responses}
-	server := httptest.NewServer(fake)
-	defer server.Close()
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	command := New(&out, &bytes.Buffer{})
-	command.SetArgs(append([]string{"--url", server.URL, "--service-key-file", keyFile}, args...))
-	err := command.Execute()
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	return out.String(), append([]string(nil), fake.requested...), err
+	out, _, requested, err := runOCCWithNotices(t, responses, args...)
+	return out, requested, err
 }
 
-// runOCCWithNotices is runOCC that also returns what the command wrote to stderr.
+// runOCCWithNotices returns stdout, stderr, and the request trace.
 func runOCCWithNotices(t *testing.T, responses map[string]string, args ...string) (string, string, []string, error) {
 	t.Helper()
 	fake := &fakeOCC{responses: responses}
 	server := httptest.NewServer(fake)
 	defer server.Close()
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	var out, errOut bytes.Buffer
 	command := New(&out, &errOut)
 	command.SetArgs(append([]string{"--url", server.URL, "--service-key-file", keyFile}, args...))
@@ -271,27 +256,17 @@ func TestServiceAccountDeleteForceReportsTheUnrevokedToken(t *testing.T) {
 	unrevoked := map[string]string{
 		"DELETE " + path: `{"id":"` + accountID + `","namespaceId":"` + testNamespaceID + `","revocation":"skipped","backendId":"chatgpt"}`,
 	}
-	var warnings bytes.Buffer
-	fake := &fakeOCC{responses: unrevoked}
-	server := httptest.NewServer(fake)
-	defer server.Close()
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
+	out, warnings, _, err := runOCCWithNotices(t, unrevoked,
+		"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var stdout bytes.Buffer
-	command := New(&stdout, &warnings)
-	command.SetArgs([]string{"--url", server.URL, "--service-key-file", keyFile,
-		"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
+	if out != "Deleted service account "+accountID+"; its access token was not revoked.\n" {
+		t.Fatalf("unexpected table output %q", out)
 	}
-	if stdout.String() != "Deleted service account "+accountID+"; its access token was not revoked.\n" {
-		t.Fatalf("unexpected table output %q", stdout.String())
-	}
-	if !strings.Contains(warnings.String(), "revoke it at the provider") ||
-		!strings.Contains(warnings.String(), `ChatGPT Backend "chatgpt"`) {
-		t.Fatalf("expected a revocation warning, got %q", warnings.String())
+	if !strings.Contains(warnings, "revoke it at the provider") ||
+		!strings.Contains(warnings, `ChatGPT Backend "chatgpt"`) {
+		t.Fatalf("expected a revocation warning, got %q", warnings)
 	}
 
 	out, _, err = runOCC(t, unrevoked,
@@ -317,10 +292,7 @@ func TestServiceAccountDeleteForceReportsTheUnrevokedToken(t *testing.T) {
 
 func TestServiceAccountForceDeleteRejectsAMalformedSuccess(t *testing.T) {
 	const accountID = "sa_66666666-6666-4666-8666-666666666666"
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	// A forced delete succeeds only with a bodyless 204 or a full 200 envelope.
 	for _, test := range []struct {
 		respond func(http.ResponseWriter)
@@ -961,6 +933,8 @@ func TestAgentRevisionBrowsingKeepsHealthyStatusBesideUnreadableSnapshot(t *test
 // The revisions command shows one page; it passes --limit and --cursor through
 // and prints how to read the next page.
 func TestAgentRevisionsPagesWithCursor(t *testing.T) {
+	// A stale environment scope must not replace the explicitly selected Namespace.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
 	responses := agentRevisionResponses()
 	agentPath := "/namespaces/" + testNamespaceID + "/agents/" + testAgentID
 	responses["GET "+agentPath+"/revisions"] = `raw:200 {"data":[{"id":"` + testRevision2ID + `","revision":2,"createdAt":"2026-09-30T01:00:00.000Z"}],"meta":{"requestId":"req_test","nextCursor":"v1.2"}}`
@@ -974,8 +948,21 @@ func TestAgentRevisionsPagesWithCursor(t *testing.T) {
 	if !strings.Contains(out, testRevision2ID) || strings.Contains(out, testRevision1ID) {
 		t.Fatalf("expected only the page's revision:\n%s", out)
 	}
-	if !strings.Contains(notices, "occ agent revisions "+testAgentID+" --limit 1 --cursor v1.2") {
+	if !strings.Contains(notices, "agent revisions "+testAgentID+" --limit 1 --cursor v1.2") {
 		t.Fatalf("expected a next-page hint that keeps --limit: %q", notices)
+	}
+	_, continuation, found := strings.Cut(notices, `older revisions may exist; run "`)
+	if !found {
+		t.Fatalf("missing next-page command: %q", notices)
+	}
+	continuation, _, _ = strings.Cut(continuation, `"`)
+	responses["GET "+agentPath+"/revisions"] = `raw:200 {"data":[{"id":"` + testRevision1ID + `","revision":1,"createdAt":"2026-09-30T00:00:00.000Z"}],"meta":{"requestId":"req_test","nextCursor":null}}`
+	nextOut, nextRequested, err := runOCC(t, responses, strings.Fields(continuation)[1:]...)
+	if err != nil {
+		t.Fatalf("advertised next-page command failed: %v", err)
+	}
+	if !slices.Contains(nextRequested, "GET "+agentPath+"/revisions?cursor=v1.2&limit=1") || !strings.Contains(nextOut, testRevision1ID) {
+		t.Fatalf("next-page command lost the selected Namespace, limit, or cursor: %v\n%s", nextRequested, nextOut)
 	}
 	for _, limit := range []string{"0", "101"} {
 		if _, _, err := runOCC(t, responses, "--namespace", testNamespaceID, "agent", "revisions", testAgentID, "--limit", limit); err == nil {

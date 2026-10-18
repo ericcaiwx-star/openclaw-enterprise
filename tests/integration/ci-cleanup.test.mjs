@@ -69,6 +69,13 @@ async function writeState(path, state) {
   await chmod(path, 0o600);
 }
 
+async function createK3dClusterResource(identity, directory) {
+  const kubeconfig = join(directory, "kubeconfig");
+  await mkdir(directory);
+  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  return { id: "cluster-1", kind: "k3d-cluster", ...identity, directory, kubeconfig };
+}
+
 function runCleanup(statePath, env = {}) {
   return spawnSync(process.execPath, [cleanupPath, "--state", statePath], {
     cwd: repositoryRoot,
@@ -145,13 +152,15 @@ test("k3d routing reset removes only the owned test database", async (t) => {
 
 test("cleanup removes an owned k3d cluster resource through the CLI", async (t) => {
   const root = await fixture(t);
+  const prefix = "openclaw-ci-local-1234567890abcdef";
   const clusterName = "openclaw-k8s-old-truncated-name-abc123def456";
   const k3dLog = join(root, "k3d.log");
   const dockerLog = join(root, "docker.log");
   const clusterDirectory = join(root, `${clusterName}-state`);
-  const kubeconfig = join(clusterDirectory, "kubeconfig");
-  await mkdir(clusterDirectory);
-  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  const cluster = await createK3dClusterResource(
+    { owner: prefix, name: clusterName },
+    clusterDirectory,
+  );
   const deletedMarker = join(root, "deleted");
   await writeExecutable(
     join(root, "bin/k3d"),
@@ -175,20 +184,13 @@ test("cleanup removes an owned k3d cluster resource through the CLI", async (t) 
   await writeState(statePath, {
     version: 1,
     repositoryRoot,
-    prefix: "openclaw-ci-local-1234567890abcdef",
+    prefix,
     resources: [
-      {
-        id: "cluster-1",
-        kind: "k3d-cluster",
-        owner: "openclaw-ci-local-1234567890abcdef",
-        name: clusterName,
-        directory: clusterDirectory,
-        kubeconfig,
-      },
+      cluster,
       {
         id: "image-1",
         kind: "k3d-image",
-        owner: "openclaw-ci-local-1234567890abcdef",
+        owner: prefix,
         name: `${"localhost"}/${clusterName}/occ-test:local`,
         reference:
           "registry.example/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -230,12 +232,14 @@ for (const scenario of [
 ]) {
   test(`cleanup verifies owned cluster absence: ${scenario}`, async (t) => {
     const root = await fixture(t);
+    const prefix = "openclaw-ci-local-abcdef1234567890";
     const clusterName = "openclaw-k8s-readback-123abc456def";
     const clusterDirectory = join(root, `${clusterName}-state`);
-    const kubeconfig = join(clusterDirectory, "kubeconfig");
     const log = join(root, "k3d.log");
-    await mkdir(clusterDirectory);
-    await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+    const cluster = await createK3dClusterResource(
+      { owner: prefix, name: clusterName },
+      clusterDirectory,
+    );
     await writeExecutable(
       join(root, "bin/k3d"),
       [
@@ -283,17 +287,8 @@ for (const scenario of [
     const state = {
       version: 1,
       repositoryRoot,
-      prefix: "openclaw-ci-local-abcdef1234567890",
-      resources: [
-        {
-          id: "cluster-1",
-          kind: "k3d-cluster",
-          owner: "openclaw-ci-local-abcdef1234567890",
-          name: clusterName,
-          directory: clusterDirectory,
-          kubeconfig,
-        },
-      ],
+      prefix,
+      resources: [cluster],
     };
     await writeState(statePath, state);
     const result = runCleanup(statePath, {
@@ -449,7 +444,7 @@ for (const scenario of [
       skip: process.platform === "win32" && "POSIX process groups and executable fixtures",
     },
     async (t) => {
-      const { root, descendantPidPath } = await commandTreeFixture(t);
+      const { root, descendantPidPath, waitForTermination } = await commandTreeFixture(t);
       const heartbeat = join(root, "heartbeat");
       const descendantPath = join(root, "descendant.cjs");
       await writeFile(
@@ -495,39 +490,87 @@ for (const scenario of [
 
       // Apply the short command budget only to the hung drop. A separate test checks
       // that cleanup continues to Compose down after a deterministic failure.
-      const drop = `import { cleanupResourceIds } from ${JSON.stringify(pathToFileURL(cleanupPath).href)};
-        await cleanupResourceIds(process.argv[1], ["database-1"]);`;
+      // The deadline starts at fork, but the supervisor, wrapper and descendant are
+      // Node processes that handle TERM only once booted. Under CPU pressure a TERM
+      // during startup killed the descendant before its first heartbeat (finding
+      // 1652). The driver starts the drop's deadline once the heartbeat exists, when
+      // every process in the tree has its TERM handler, and records that start.
+      const budgetStartPath = join(root, "budget-start");
+      const drop = `import { existsSync, writeFileSync } from "node:fs";
+        import { cleanupResourceIds } from ${JSON.stringify(pathToFileURL(cleanupPath).href)};
+        const [statePath, readyPath, budgetStartPath] = process.argv.slice(1);
+        const budgetMs = Number(process.env.OPENCLAW_CI_CLEANUP_COMMAND_TIMEOUT_MS);
+        const setTimer = globalThis.setTimeout;
+        let deadline;
+        let ready = false;
+        globalThis.setTimeout = (callback, ms, ...args) => {
+          if (deadline || ms !== budgetMs) return setTimer(callback, ms, ...args);
+          deadline = setTimer(() => ready && callback(...args), ms);
+          const poll = setInterval(check, 10);
+          poll.unref();
+          function check() {
+            if (ready || !existsSync(readyPath)) return;
+            ready = true;
+            clearInterval(poll);
+            writeFileSync(budgetStartPath, String(Date.now()));
+            deadline.refresh();
+          }
+          check();
+          return deadline;
+        };
+        process.on("exit", () => {
+          if (!ready) {
+            process.stderr.write(deadline ? "fixture never became ready\\n" : "no command deadline\\n");
+            process.exitCode = 2;
+          }
+        });
+        await cleanupResourceIds(statePath, ["database-1"]);`;
       const started = Date.now();
-      const result = spawnSync(process.execPath, ["--input-type=module", "-e", drop, statePath], {
-        cwd: repositoryRoot,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          OCC_DOCKER_BIN: join(root, "bin/docker"),
-          OPENCLAW_CI_CLEANUP_COMMAND_TIMEOUT_MS: "500",
-          OPENCLAW_CI_COMMAND_KILL_GRACE_MS: "200",
+      const result = spawnSync(
+        process.execPath,
+        ["--input-type=module", "-e", drop, statePath, heartbeat, budgetStartPath],
+        {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            OCC_DOCKER_BIN: join(root, "bin/docker"),
+            OPENCLAW_CI_CLEANUP_COMMAND_TIMEOUT_MS: "500",
+            OPENCLAW_CI_COMMAND_KILL_GRACE_MS: "200",
+          },
+          timeout: 6000,
+          killSignal: "SIGKILL",
         },
-        timeout: 6000,
-        killSignal: "SIGKILL",
-      });
-      t.diagnostic(`cleanup command completed in ${Date.now() - started} ms`);
+      );
       assert.equal(result.error, undefined, "cleanup waited for the inherited pipes");
-      assert.ok(Date.now() - started < 2500, "cleanup exceeded the command and pipe deadlines");
       assert.equal(result.status, 1, result.stderr);
+      const budgetStart = Number(await readFile(budgetStartPath, "utf8"));
+      const elapsed = Date.now() - budgetStart;
+      t.diagnostic(`command tree ready after ${budgetStart - started} ms`);
+      t.diagnostic(`cleanup command completed ${elapsed} ms after its deadline started`);
+      assert.ok(elapsed < 2500, "cleanup exceeded the command and pipe deadlines");
       assert.match(
         result.stderr,
         /Cleanup failed for postgres-database:openclaw_ci_failed_drop:.* psql .* timed out after 500 ms/,
       );
       assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), state);
-      const ticks = await readFile(heartbeat, "utf8");
-      await delay(250);
-      const laterTicks = await readFile(heartbeat, "utf8");
+      // PID state, not heartbeat timing, is the evidence: a heartbeat can stall under
+      // CPU pressure, and the descendant's own four-second expiry runs from its boot.
       if (scenario === "escaped-group") {
-        // A separate group is outside the executor's signalling authority. Closing
-        // its inherited pipes must bound cleanup without killing that process.
-        assert.notEqual(laterTicks, ticks);
+        // A separate group is outside the executor's signalling authority. Cleanup
+        // must end without killing that process.
+        const pid = await readFile(descendantPidPath, "utf8");
+        const observation = spawnSync("ps", ["-p", pid, "-o", "stat="], {
+          encoding: "utf8",
+          timeout: 5000,
+        });
+        assert.equal(observation.error, undefined, "could not observe escaped descendant");
+        assert.equal(observation.status, 0, "escaped descendant stopped during cleanup");
+        assert.doesNotMatch(observation.stdout, /^Z/, "escaped descendant stopped during cleanup");
       } else {
-        assert.equal(laterTicks, ticks, "owned descendant survived cleanup");
+        // Every owned kill path fires before the driver exits; the limit only covers
+        // observing the reaped or zombie process.
+        await waitForTermination(1000);
       }
     },
   );
@@ -535,12 +578,14 @@ for (const scenario of [
 
 test("cleanup rejects a k3d cluster directory outside the owned cluster prefix", async (t) => {
   const root = await fixture(t);
+  const prefix = "openclaw-ci-local-abcdef1234567890";
   const clusterName = "openclaw-k8s-owned-cluster-abcdef123456";
   const clusterDirectory = join(root, "foreign-directory");
-  const kubeconfig = join(clusterDirectory, "kubeconfig");
   const k3dLog = join(root, "k3d.log");
-  await mkdir(clusterDirectory);
-  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  const cluster = await createK3dClusterResource(
+    { owner: prefix, name: clusterName },
+    clusterDirectory,
+  );
   await writeExecutable(
     join(root, "bin/k3d"),
     ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(k3dLog)}`, "exit 0", ""].join("\n"),
@@ -550,17 +595,8 @@ test("cleanup rejects a k3d cluster directory outside the owned cluster prefix",
   const state = {
     version: 1,
     repositoryRoot,
-    prefix: "openclaw-ci-local-abcdef1234567890",
-    resources: [
-      {
-        id: "cluster-1",
-        kind: "k3d-cluster",
-        owner: "openclaw-ci-local-abcdef1234567890",
-        name: clusterName,
-        directory: clusterDirectory,
-        kubeconfig,
-      },
-    ],
+    prefix,
+    resources: [cluster],
   };
   await writeState(statePath, state);
 
@@ -579,10 +615,8 @@ test("cleanup rejects ownerless resources before invoking cleanup commands", asy
   const root = await fixture(t);
   const clusterName = "openclaw-k8s-ownerless-cluster-abcdef123456";
   const clusterDirectory = join(root, `${clusterName}-state`);
-  const kubeconfig = join(clusterDirectory, "kubeconfig");
   const k3dLog = join(root, "k3d.log");
-  await mkdir(clusterDirectory);
-  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  const cluster = await createK3dClusterResource({ name: clusterName }, clusterDirectory);
   await writeExecutable(
     join(root, "bin/k3d"),
     ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(k3dLog)}`, "exit 0", ""].join("\n"),
@@ -593,15 +627,7 @@ test("cleanup rejects ownerless resources before invoking cleanup commands", asy
     version: 1,
     repositoryRoot,
     prefix: "openclaw-ci-local-abcdef1234567890",
-    resources: [
-      {
-        id: "cluster-1",
-        kind: "k3d-cluster",
-        name: clusterName,
-        directory: clusterDirectory,
-        kubeconfig,
-      },
-    ],
+    resources: [cluster],
   };
   await writeState(statePath, state);
 

@@ -55,7 +55,9 @@ export const CreateProvisioningSecrets = {
   name: "Provisioning with saved Secrets",
 };
 export const CreateDeploymentPending = story("createDeploymentPending");
+export const CreateDeploymentNamedWait = story("createDeploymentNamedWait");
 export const CreateDeploymentPodQuotaFull = story("createDeploymentPodQuotaFull");
+export const CreateDeploymentImagePullFailed = story("createDeploymentImagePullFailed");
 export const CreateDeploymentFailed = story("createDeploymentFailed");
 export const CreateDeploymentStopped = story("createDeploymentStopped");
 export const CreateProvisioningStopped = story("createProvisioningStopped");
@@ -196,6 +198,14 @@ export const CreateConflict = { ...story("createConflict"), name: "Provisioning 
 export const CreateRefusalReason = {
   ...story("createRefusalReason"),
   name: "Provisioning refusal with a reason",
+};
+export const CreatePluginPreflightRefusal = {
+  ...story("createPluginPreflightRefusal"),
+  name: "Plugin refusal before anything is saved",
+};
+export const CreatePluginRefusal = {
+  ...story("createPluginRefusal"),
+  name: "Plugin refusal after the Configuration is saved",
 };
 export const CreateUnknown = { ...story("createUnknown"), name: "Provisioning outcome unknown" };
 

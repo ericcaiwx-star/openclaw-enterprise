@@ -191,16 +191,24 @@ async function cancelledAgentState(request, namespaceId, agentId) {
   }
 }
 
-// First-deployment waits that someone must act on (finding 1617): the deployment's own fixed
-// sentence replaces the bare provisioning line. The deployment read needs read access to the
-// Agent. Clear the reason if the deployment is no longer readable or names a different wait;
-// keep it through a cancelled read or temporary outage (finding 1637).
-const NAMED_DEPLOYMENT_WAITS = new Set(["NAMESPACE_POD_QUOTA_EXCEEDED"]);
+// First-deployment waits that someone must act on: a full Pod quota (finding 1617) and an image
+// the nodes cannot pull (finding 1881). The deployment's own fixed sentence replaces the bare
+// provisioning line. The deployment read needs read access to the Agent. Clear the reason if the
+// deployment is no longer readable or names a different wait; keep it through a cancelled read
+// or temporary outage (finding 1637).
+const NAMED_DEPLOYMENT_WAITS = new Set([
+  "NAMESPACE_POD_QUOTA_EXCEEDED",
+  "REVISION_IMAGE_PULL_FAILED",
+]);
 // An outage, unlike the Installation's shape, needs no administrator change (finding 1624). Agent
 // save and deploy answer 503 for every harness until the selected Sandbox Driver returns.
 const SANDBOX_DRIVER_OUTAGE =
   "Agents cannot be created right now: this installation's Sandbox Driver is unavailable. Reload this page to check again, or ask an administrator if it persists.";
+// The deployment read was refused (401, 403 or 404): the reader can't see its waits now.
+const DEPLOYMENT_UNREADABLE = Symbol("deployment unreadable");
 
+// The deployment's actionable wait (a sentence), none (null), DEPLOYMENT_UNREADABLE, or undefined
+// when the read was cut off or temporarily unavailable.
 async function namedDeploymentWait(request, namespaceId, job, signal) {
   if (
     typeof job.agentId !== "string" ||
@@ -222,8 +230,29 @@ async function namedDeploymentWait(request, namespaceId, job, signal) {
       ? attempt.message
       : null;
   } catch (error) {
-    return [401, 403, 404].includes(error.status) ? null : undefined;
+    return [401, 403, 404].includes(error.status) ? DEPLOYMENT_UNREADABLE : undefined;
   }
+}
+
+// The wait a job past handoff names for its first deployment (finding 1690), as the deployment's
+// status does: its fixed sentence after the provisioning line. A reader who can't read the
+// deployment gets the job's own PROVISIONING_DEPLOYMENT_PENDING, which says no more than the
+// provisioning line, so that line stays. A wait someone must act on stands alone, as above, and
+// so does a stop, which provisioning no longer continues.
+const STANDALONE_JOB_WAITS = new Set([...NAMED_DEPLOYMENT_WAITS, "AGENT_STOP_YIELDED"]);
+
+function jobDeploymentWait(job) {
+  const attempt = job.progress?.lastAttempt;
+  if (
+    typeof attempt?.message !== "string" ||
+    !attempt.message ||
+    attempt.code === "PROVISIONING_DEPLOYMENT_PENDING"
+  ) {
+    return null;
+  }
+  return STANDALONE_JOB_WAITS.has(attempt.code)
+    ? attempt.message
+    : `${provisioningStatusText("running")} ${attempt.message}`;
 }
 
 async function waitForProvisioning({ request, status, first, namespaceId, isCurrent }) {
@@ -232,8 +261,9 @@ async function waitForProvisioning({ request, status, first, namespaceId, isCurr
   // A started job goes back to queued between retries. Keep one label once it has started,
   // and write it only when it changes, since this rereads every second (finding 1424).
   let started = false;
-  // The last named wait stays shown until a later deployment read names another or none: a read
-  // cut off at the next poll would otherwise flip the line back to the bare text (finding 1637).
+  // The actionable wait the last fresh deployment read named. It fills in when a later read is
+  // cut off or unavailable and the job names no wait, so the line doesn't flip back to the bare
+  // text (finding 1637); a fresh answer or a refusal replaces it.
   let named = null;
   while (current?.status === "queued" || current?.status === "running") {
     if (typeof current.url !== "string" || !current.url) {
@@ -245,10 +275,20 @@ async function waitForProvisioning({ request, status, first, namespaceId, isCurr
     const detail = new AbortController();
     const nextPoll = wait(1_000).then(() => detail.abort());
     const read = await namedDeploymentWait(request, namespaceId, current, detail.signal);
-    if (read !== undefined) {
+    let detailText;
+    if (read === DEPLOYMENT_UNREADABLE) {
+      // A refusal clears every detail, the job's too: the job was read before the refusal.
+      named = null;
+      detailText = null;
+    } else if (read !== undefined) {
+      // A fresh answer's actionable wait comes first; otherwise the job names the wait.
       named = read;
+      detailText = read ?? jobDeploymentWait(current);
+    } else {
+      // Without a fresh answer, the job's wait is newer than the one kept from an earlier read.
+      detailText = jobDeploymentWait(current) ?? named;
     }
-    setText(status, named ?? provisioningStatusText(started ? "running" : current.status));
+    setText(status, detailText ?? provisioningStatusText(started ? "running" : current.status));
     await nextPoll;
     if (!isCurrent()) {
       throw new DOMException("View closed", "AbortError");
@@ -1894,7 +1934,8 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   };
   // The pressed control disables while its request runs. Keep focus on the line that reports
   // progress, then on the outcome, rather than drop it to the page (finding 1490). Focus the
-  // reader moved elsewhere stays there.
+  // reader moved elsewhere stays there. The line sits below a long form, so bring it into view
+  // too: a focused refusal under the fold read as progress (finding 1862).
   function focusFeedbackLine(line) {
     const active = document.activeElement;
     if (
@@ -1907,6 +1948,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     ) {
       line.tabIndex = -1;
       line.focus({ preventScroll: true });
+      line.scrollIntoView({ block: "nearest" });
     }
   }
   function showSavedStatus() {
@@ -2235,10 +2277,48 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         : "Choose a model credential Secret before creating the Agent.";
       return;
     }
-    context.setDraftCapture(null);
     pending = true;
     updateControls();
     feedback.textContent = "";
+    // Before anything is saved, ask the API whether Agent create would refuse these plugin
+    // selections or initial workspace files with this Configuration. A refusal then leaves the
+    // whole form editable, the Configuration included, instead of a saved Configuration this
+    // form can no longer change (finding 1863). Provisioning admits its plan in one request
+    // before it saves a Configuration, with its own rules, so it needs no preflight.
+    if (!shouldProvision() && !savedConfiguration && !savedAgent) {
+      try {
+        await request(`${namespacePath(namespaceId)}/agents/validate`, {
+          method: "POST",
+          expectedStatus: 204,
+          body: {
+            configuration: { kind: "agent", values },
+            executionMode: body.executionMode,
+            initialWorkspaceFiles: body.initialWorkspaceFiles,
+            ...(body.plugins ? { plugins: body.plugins } : {}),
+            ...(body.pluginApprovers ? { pluginApprovers: body.pluginApprovers } : {}),
+          },
+        });
+      } catch (error) {
+        if (!context.isCurrent()) {
+          return;
+        }
+        if (error.status === 401) {
+          context.onExpired();
+        } else {
+          feedback.textContent =
+            rejectionMessage(error) + (error.requestId ? ` Request ID: ${error.requestId}` : "");
+          // While the pressed control is still disabled, as after a save.
+          focusFeedbackLine(feedback);
+        }
+        pending = false;
+        updateControls();
+        return;
+      }
+      if (!context.isCurrent()) {
+        return;
+      }
+    }
+    context.setDraftCapture(null);
     let mutationStarted = false;
     let creatingSecret = false;
     try {
@@ -2403,7 +2483,19 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         rejectedAgentAttempt = undefined;
         recovery.hidden = true;
       }
-      feedback.textContent = detail + (error.requestId ? ` Request ID: ${error.requestId}` : "");
+      // A plugin refusal's own fixes edit the Configuration or move the Agent, and this form can
+      // no longer edit the Configuration it saved. Name the fix that works here (finding 1863).
+      const refusedPlugin =
+        !savedAgent && savedConfiguration && error.status === 400 && error.serverMessage
+          ? Object.keys(body.plugins ?? {})
+              .filter((id) => error.serverMessage.includes(`plugin ${id}`))
+              .sort((a, b) => b.length - a.length)[0]
+          : undefined;
+      const guidance = refusedPlugin
+        ? ` This form cannot edit saved Configuration ${savedConfiguration.id}. Deselect plugin ${refusedPlugin} under Plugins and select Create Agent again; to use the plugin, fix the setting on the new Agent's Configuration tab, then select the plugin on its Plugins tab.`
+        : "";
+      feedback.textContent =
+        detail + guidance + (error.requestId ? ` Request ID: ${error.requestId}` : "");
       focusFeedbackLine(feedback);
     } finally {
       if (context.isCurrent()) {
@@ -2421,8 +2513,9 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     ),
     form,
     channelEditor,
-    savedStatus,
+    // The outcome leads; the saved-resources line explains what a retry reuses (finding 1862).
     feedback,
+    savedStatus,
     recovery,
     actions,
   );

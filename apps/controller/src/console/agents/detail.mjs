@@ -791,7 +791,7 @@ function createVersionDeploymentRecord(
         "div",
         { className: "deployment-heading" },
         element("h3", {}, "This version’s deployment record"),
-        button(loading ? "Refreshing..." : "Refresh record", () => void load(), {
+        button(loading ? "Refreshing…" : "Refresh record", () => void load(), {
           disabled: loading,
         }),
       ),
@@ -835,22 +835,56 @@ function createVersionDeploymentRecord(
   return { section, show, release, current: () => status };
 }
 
+// The console's delay for loading text (console.css .delayed-status): a diagnostics answer within
+// it never shows the waiting line (finding 1714).
+const DIAGNOSTICS_WAITING_DELAY_MS = 250;
+
 function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus = () => null) {
   const section = element("section", { className: "agent-card version-diagnostics" });
   let diagnostics = null;
   let error = null;
   let loading = false;
+  // Set once a run outlasts DIAGNOSTICS_WAITING_DELAY_MS: the waiting line replaces the last
+  // result and the button disables itself.
+  let waitingShown = false;
+  // The id of the result that describes the button after a run. render() sets it on both: a
+  // deployment poll re-renders the panel, and patchChildren drops attributes that render()
+  // does not set (finding 1712).
+  let outcomeId = null;
 
   async function run() {
     if (loading || !context.isCurrent()) {
       return;
     }
     loading = true;
-    error = null;
-    diagnostics = null;
-    render();
+    const runButton = section.querySelector(".deployment-heading button");
+    // Until the delay passes, the last result and the focused button stay as they are, so a fast
+    // answer replaces the result directly: no waiting line is painted or announced, and focus
+    // does not move (finding 1714). A second press meanwhile does nothing.
+    let waitingLine = null;
+    const waitingTimer = setTimeout(() => {
+      if (!loading || !context.isCurrent()) {
+        return;
+      }
+      // Only a reader still on the button follows it to the waiting line; one who moved on, even
+      // to the page itself, stays where they are.
+      const onButton = document.activeElement === runButton;
+      waitingShown = true;
+      error = null;
+      diagnostics = null;
+      outcomeId = null;
+      render();
+      // The button disables itself while it waits: move focus to the waiting line, as Deploy
+      // does, so a keyboard reader is not dropped to the page (finding 1705).
+      waitingLine = section.lastElementChild;
+      if (onButton) {
+        focusSaveOutcome(section, [], waitingLine);
+      }
+    }, DIAGNOSTICS_WAITING_DELAY_MS);
+    let answer = null;
+    let failure = null;
     try {
-      diagnostics = await context.request(
+      answer = await context.request(
         `${path}/deployments/${encodeURIComponent(revisionId)}/diagnostics`,
         { method: "POST", readOnly: true },
       );
@@ -862,16 +896,49 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
         context.onExpired();
         return;
       }
-      error = cause;
+      failure = cause;
     } finally {
+      clearTimeout(waitingTimer);
       if (context.isCurrent()) {
+        const active = document.activeElement;
+        const waited = active === runButton || (waitingLine !== null && active === waitingLine);
+        if (!waitingShown) {
+          // With no waiting line in between, patching would keep a result identical to the last
+          // one in place, and nothing would be announced: insert it anew instead.
+          for (const node of [section.querySelector('[role="alert"]'), section.lastElementChild]) {
+            node?.remove();
+          }
+        }
         loading = false;
+        waitingShown = false;
+        diagnostics = answer;
+        error = failure;
+        outcomeId = null;
         render();
+        // The result replaces the waiting line (or the last result): focus returns to, or stays
+        // on, the button, described by the alert or the "Observed" line (not the whole check
+        // list, which the view's live region already reads), unless the reader has moved on.
+        if (waited) {
+          const outcome = error
+            ? section.querySelector('[role="alert"]')
+            : section.lastElementChild.firstElementChild;
+          focusSaveOutcome(section, [runButton], outcome);
+          outcomeId = runButton.getAttribute("aria-describedby") ? outcome.id : null;
+        }
       }
     }
   }
 
   function renderChecks() {
+    if (waitingShown) {
+      // Focusable here, not only by focusSaveOutcome: a deployment poll re-renders the panel,
+      // and patchChildren drops attributes that render() does not set.
+      return element(
+        "p",
+        { className: "muted", role: "status", tabindex: "-1" },
+        "Waiting for diagnostic results…",
+      );
+    }
     if (!diagnostics) {
       return element(
         "p",
@@ -895,7 +962,11 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
     return element(
       "div",
       {},
-      element("p", { className: "muted" }, `Observed ${displayDate(diagnostics.observedAt)}`),
+      element(
+        "p",
+        { className: "muted", ...describedOutcome() },
+        `Observed ${displayDate(diagnostics.observedAt)}`,
+      ),
       diagnostics.checks.length
         ? checks
         : element("p", { className: "muted" }, "No diagnostic checks were returned."),
@@ -946,6 +1017,10 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
       : [];
   }
 
+  function describedOutcome() {
+    return outcomeId ? { id: outcomeId } : {};
+  }
+
   // The version's record calls this on every deployment poll: rewrite only what changed.
   function render() {
     patchChildren(section, [
@@ -953,13 +1028,13 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
         "div",
         { className: "deployment-heading" },
         element("h3", {}, "Current observations"),
-        button(
-          loading ? "Running diagnostics..." : "Run diagnostics for this version",
-          () => void run(),
-          {
-            disabled: loading,
-          },
-        ),
+        // The button keeps its label while it waits, as Deploy and Save do: the status line
+        // below is the one announcement, and a changed label inside the Agent view's live
+        // region was announced as well (finding 1698).
+        button("Run diagnostics for this version", () => void run(), {
+          disabled: waitingShown,
+          ...(outcomeId ? { "aria-describedby": outcomeId } : {}),
+        }),
       ),
       element(
         "p",
@@ -975,7 +1050,7 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
         ? [
             element(
               "p",
-              { className: "error", role: "alert" },
+              { className: "error", role: "alert", ...describedOutcome() },
               error.status === 403
                 ? "Diagnostics require Agent read and operate access plus read access to this version. Ask a Namespace administrator to confirm those grants."
                 : error.status === 503
@@ -1288,17 +1363,18 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     recoveryActions,
   );
   let recoveryTarget;
+  const overviewStatus = element(
+    "div",
+    { className: "agent-overview-status" },
+    currentSummary,
+    statusLine,
+    deploymentStatus,
+  );
   view.replaceChildren(
     header,
     recovery,
     nativeAdmin.section,
-    element(
-      "div",
-      { className: "agent-overview-status" },
-      currentSummary,
-      statusLine,
-      deploymentStatus,
-    ),
+    overviewStatus,
     // Sharing policy reads need Installation administration and a denial is audited, so
     // skip the panel when the session probe already showed that access is missing.
     ...(context.installationAdmin === false ? [] : [renderAgentAccess(context, agent)]),
@@ -1637,11 +1713,17 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
 
   // Without a version list yet (still loading), its first render shows the new state.
   function updateCurrentAgent(freshAgent, revisionResult, snapshot) {
+    // A read answered after deletion was shown has nothing left to update.
+    if (deleting) {
+      return;
+    }
     if (freshAgent.status === "deleting") {
       showDeleting();
       return;
     }
     const revisionChanged = freshAgent.activeRevisionId !== currentRevisionId;
+    const workspaceAvailabilityChanged =
+      Boolean(freshAgent.activeRevisionId) !== Boolean(currentRevisionId);
     const servingChanged =
       revisionChanged || freshAgent.desiredRuntimeState !== currentRuntimeState;
     currentRevisionId = freshAgent.activeRevisionId;
@@ -1653,9 +1735,13 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       if (mountedTab) {
         // Leaving must not put a tab built for the old serving state back in the cache.
         mountedTab.reusable = false;
-        if (revisionChanged && mountedTab.id === "workspace") {
+        if (workspaceAvailabilityChanged && mountedTab.id === "workspace") {
           // Capture drafts and retire the old file controls now, not on the next tab visit.
           void renderTab();
+        } else if (revisionChanged && mountedTab.id === "workspace") {
+          // Another current version keeps the editors, so a reader typing keeps focus, caret
+          // and edits; files without unsaved edits are reread from it (finding 1836).
+          mountedTab.refresh?.();
         }
       }
       // Native admin access depends on the serving version, so a finished deployment rereads it.
@@ -1812,13 +1898,24 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     // waits for the caller's permission answer, which decides its draft link, so it never
     // shows a draft link the answer then withdraws (finding 1478). That read starts first, so
     // it has usually settled by now.
-    setHidden(
-      recovery,
+    const hideRecovery =
       latestDeploymentStatus !== "failed" ||
-        currentHidden ||
-        currentUnknown ||
-        !callerPermissionsSettled,
-    );
+      currentHidden ||
+      currentUnknown ||
+      !callerPermissionsSettled;
+    // A page shown before its failure lands (a deploy the reader is watching, say) cannot wait
+    // for it as a load does (finding 1489): above the overview, the card pushed what the reader
+    // was watching down (finding 1655). It lands below the deployment activity it explains
+    // instead, and moves only the cards under it.
+    if (
+      recovery.hidden &&
+      !hideRecovery &&
+      !view.classList.contains("agent-detail-pending") &&
+      overviewStatus.nextElementSibling !== recovery
+    ) {
+      overviewStatus.after(recovery);
+    }
+    setHidden(recovery, hideRecovery);
     if (!recovery.hidden) {
       const version = `v${latest.revision}`;
       const code = latestDeploymentErrorCode;
@@ -2796,7 +2893,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     content.style.minHeight = `${content.getBoundingClientRect().height}px`;
     content.replaceChildren();
     if (tab === "workspace") {
-      content.append(renderWorkspaceFiles(tabContext, currentAgent, path));
+      const workspace = renderWorkspaceFiles(tabContext, currentAgent, path);
+      state.refresh = workspace.refresh;
+      content.append(workspace.section);
       state.loading = false;
       content.style.minHeight = "";
       return;
