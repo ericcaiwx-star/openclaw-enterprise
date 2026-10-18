@@ -27,7 +27,7 @@ export function selectPackageExport(exports, subpath, conditions) {
         decoded
           .slice(2)
           .split(/[/?#]/)
-          .some((part) => ["..", ".", "node_modules"].includes(part))
+          .some((part) => ["..", ".", "node_modules"].includes(part.toLowerCase()))
       ) {
         return invalid();
       }
