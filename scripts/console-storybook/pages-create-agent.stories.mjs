@@ -198,6 +198,14 @@ export const CreateRefusalReason = {
   ...story("createRefusalReason"),
   name: "Provisioning refusal with a reason",
 };
+export const CreatePluginPreflightRefusal = {
+  ...story("createPluginPreflightRefusal"),
+  name: "Plugin refusal before anything is saved",
+};
+export const CreatePluginRefusal = {
+  ...story("createPluginRefusal"),
+  name: "Plugin refusal after the Configuration is saved",
+};
 export const CreateUnknown = { ...story("createUnknown"), name: "Provisioning outcome unknown" };
 
 export const CreatePasswordPreset = {
