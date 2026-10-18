@@ -1069,6 +1069,39 @@ describe("module boundaries", { concurrency: true }, () => {
     );
   });
 
+  test("preserves valid export query and fragment names while checking slash segments", async (t) => {
+    const { root, write, cli, link, exports } = await workspace(t);
+    await exports({
+      "./query": "./src/entry.mjs?NoDe_MoDuLeS",
+      "./fragment": "./src/entry.mjs#NoDe_MoDuLeS",
+      "./query-slash": "./src/entry.mjs?q=/NoDe_MoDuLeS/end",
+    });
+    await link();
+    await write("packages/library/src/entry.mjs", "export const value = 1;\n");
+    for (const name of ["query", "fragment", "query-slash"]) {
+      await write(
+        `apps/app/src/${name}.mjs`,
+        `import { value } from "@fixture/library/${name}"; console.log(value);`,
+      );
+    }
+    for (const name of ["query", "fragment"]) {
+      assert.equal((await node([join(root, `apps/app/src/${name}.mjs`)])).stdout.trim(), "1");
+    }
+    const rejected = await failure(node([join(root, "apps/app/src/query-slash.mjs")]), 1);
+    assert.match(rejected.stderr, /ERR_INVALID_PACKAGE_TARGET/);
+
+    const result = await failure(cli(["--json"]), 1);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual(rules(report), ["unsupported-package-export"]);
+    for (const name of ["query", "fragment"]) {
+      assert.equal(
+        from(report, `apps/app/src/${name}.mjs`)[0].to,
+        "packages/library/src/entry.mjs",
+      );
+    }
+    assert.equal(from(report, "apps/app/src/query-slash.mjs").length, 0);
+  });
+
   test("does not treat a declaration-only target as runtime code", async (t) => {
     const { write, check } = await workspace(t);
     await write("apps/app/src/declaration.d.ts", "export interface Value {};");
