@@ -1,7 +1,7 @@
 ---
 created: 2026-09-02
-updated: 2026-10-16
-last_updated_session: authoring-run/d2f628d3-43ac-470f-907d-2a17c299f7c2
+updated: 2026-10-20
+last_updated_session: authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d
 ---
 
 # Common Operational Logging Flow
@@ -249,6 +249,8 @@ then appends the original release hash. Ending with the hash separates these
 names from unchanged component-suffixed Service names. `templates/deployments.yaml` creates those Services;
 `templates/grafana.yaml` uses the same names in both datasource URLs.
 Deployment names, Pod selectors and discovery identity keep the full release.
+Before rendering, `demo.validate` refuses an uppercase image repository path
+that kubelet cannot pull. Registry hosts and tags may retain uppercase spelling.
 The separately configured Collector endpoint remains in its exporter Secret.
 If an upgrade renames Loki, the operator updates that endpoint and refreshes
 the Collector Pods before new records can reach Loki; the
@@ -287,6 +289,8 @@ for panels, correlation, and authorization limits.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-20 02:25: Refuse uppercase demo image repository paths before rendering. (authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d - d331d24fd)
 
 - 2026-10-16 00:17: Reject negative and nonnumeric stop-yield counts at the local logging boundary. (authoring-run/d2f628d3-43ac-470f-907d-2a17c299f7c2 - f916021bf235e9f8e91630484948eb6fc88ccfa7)
 
