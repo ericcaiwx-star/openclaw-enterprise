@@ -1,7 +1,7 @@
 ---
 created: 2026-09-04
-updated: 2026-10-14
-last_updated_session: authoring-run/d5130a41-8ae6-4a80-aef3-32d61a53348c
+updated: 2026-10-20
+last_updated_session: authoring-run/38d7de41-ba23-47a0-8084-a11002084ce3
 ---
 
 # GitHub Actions testing flow
@@ -13,7 +13,7 @@ The [ordinary CI lanes](../testing/ci.md#ci) reject missing or skipped coverage.
 ## Entry Points
 
 - `.github/workflows/ci.yml:jobs`: PR, main push, merge-group and manual checks on ephemeral runners.
-- `.github/workflows/qa-advisory.yml:jobs`: trusted PR Codex and OpenShell jobs, outside `CI Required`.
+- `.github/workflows/qa-advisory.yml:jobs`: post-merge and 6-hourly QA on `main`; trusted pull requests opt in with `full-qa`.
 - `.github/workflows/full-integration.yml:jobs`: manual integrations from main or approved Kubernetes model/OpenShell branches, pinned to the dispatched commit.
 
 ## Flow
@@ -48,7 +48,9 @@ graph TD
 
 ## Execution Trace
 
-### 1. Select one source revision and coverage group
+<a id="1-select-one-source-revision-and-coverage-group" class="anchor-alias"></a>
+
+### 1. Select one source commit and coverage group
 
 `scripts/ci/run-tests.mjs:main` audits, runs and aggregates both locally and in CI.
 
@@ -60,7 +62,7 @@ graph TD
 `scripts/ci/test-suites/<lane>.json` references for runners and preparation.
 Each lane owns its tests, environment, required inputs and preparation settings.
 
-CI uses the event checkout without external service credentials. Impact and Suite Audit start independently. In every mode, `static-checks` verifies checkout identity and runs workspace, lint, format, OpenAPI and docs checks (no product tests), alone in docs mode. The [coverage map](../testing/ci.md#tests-in-each-workflow) lists matrix jobs and the separate `runtime-image-fixture`; tests mode runs only selected lanes. Image startup, PostgreSQL Application and the `checks-baseline` and `checks-browser` parts use `blacksmith-32vcpu-ubuntu-2404` for its 8 CPUs, k3d fixture and observability for its NetworkPolicy-enforcing kernel; `runtime-image-fixture` uses `ubuntu-22.04`. Other lanes, Static Checks and audit use `blacksmith-16vcpu-ubuntu-2404`; `keycloak-oidc` uses `blacksmith-8vcpu-ubuntu-2404`.
+CI uses the event checkout without external service credentials. Impact and Suite Audit start independently. In every mode, `static-checks` verifies checkout identity and runs workspace, lint, format, OpenAPI and docs checks (no product tests), alone in docs mode. The [coverage map](../testing/ci.md#tests-in-each-workflow) lists matrix jobs and the separate `runtime-image-fixture`; tests mode runs only selected lanes. Image startup, PostgreSQL Application and the `checks-baseline` and `checks-browser` parts use `blacksmith-32vcpu-ubuntu-2404` for its 8 CPUs, k3d fixture and observability for its NetworkPolicy-enforcing kernel; `runtime-image-fixture` uses `ubuntu-22.04`. Other lanes, Static Checks and audit use `blacksmith-16vcpu-ubuntu-2404`.
 
 For a PR, the selector verifies the tested checkout and that the event head is the merge's second parent, then compares the first parent (the current base) and tested trees. Git path decoding preserves a leading UTF-8 BOM as filename data; paths outside the allowlist select full. API reference outputs and Markdown under `docs/reference/api/` select full for `openapi:check`. Only nonempty changes to allowlisted regular Markdown files select docs mode. Registered test files (with documentation and their own lane manifest entries) select tests mode: their `ci` lanes in either tree (`checks-baseline-1` if only the fixture job would run). Other test-tree, code, configuration, workflow or unknown changes and non-PR events select full. Missing or unverifiable policy or source evidence selects full or fails closed. Policy comes from that first parent; a base without it selects full. `CI Required` re-verifies the mode (and tests mode's lane set) and requires impact, audit and every selected job to succeed and the rest skipped. Full and tests modes aggregate same-source results of their lanes; docs mode does not aggregate or invent test artifacts.
 
@@ -91,7 +93,7 @@ PostgreSQL migration and application suites own separate servers; each Kubernete
 
 The application lane gives the native IAM barrier test its own migrated PostgreSQL database; only that test receives its application and migrator connection details, which the CLI keeps out of `GITHUB_ENV`. Its unregistered supplier stays in that disposable database. This fixture does not establish production writer participation in the barrier.
 
-Full CI and Full Integration call the [run-ci-lane action](../../.github/actions/run-ci-lane/action.yml) for setup, selected baseline checks, preparation, execution, unconditional cleanup, and sanitized result upload. Callers own the revision, protected environment, explicit credentials and timeout; tests stop five minutes earlier.
+Full CI and Full Integration call the [run-ci-lane action](../../.github/actions/run-ci-lane/action.yml) for setup, selected baseline checks, preparation, execution, unconditional cleanup, and sanitized result upload. Callers own the commit, protected environment, explicit credentials and timeout; tests stop five minutes earlier.
 
 Ordinary PR dependency caches may be restored and saved within GitHub's PR merge-ref scope. Main jobs use main-scoped caches. Test results and credential-bearing state are not dependency caches, and protected jobs do not promote PR build artifacts.
 
@@ -108,7 +110,7 @@ For `logging-collector`, `scripts/ci/prepare.mjs:prepareLane` pre-pulls the pinn
 `checks-browser`, `checks-browser-2`, `postgres-auth`, `postgres-platform`, `images-model-probes`, `images-runtime-startup`, `images-runtime-startup-2` and `images-runtime-startup-3` use separate runners and required artifacts. `scripts/ci/prepare.mjs:imageBuildArgs` enables scoped BuildKit caches for hosted image jobs: packaging exports; probes, runtime startup and `repository-credentials-platform` restore. Images load into the job's Docker engine; cache credentials stay in preparation.
 
 Kubernetes fixture startup records phase timings and host snapshots. On failure,
-bounded reads save `<state-file>.diagnostics.json` outside the cluster directory
+reads with time and size limits save `<state-file>.diagnostics.json` outside the cluster directory
 before cleanup. These lanes use `--no-rollback` so the workflow owns teardown
 after capture; local callers still clean up using the failed run's state file.
 Collection preserves the original error even if observation fails or times out.
@@ -141,28 +143,33 @@ manual profile. Production node provisioning remains outside CI ownership; see
 
 `scripts/ci/run-tests.mjs:main`, `scripts/ci/reporter.mjs:jsonLinesReporter` and `scripts/ci/failure-redaction.mjs:redactFailure`
 
-Each file receives one lane and invocation-scoped inputs; distinct prerequisites
-require separate files. The reporter emits names, locations and outcomes.
-The runner redacts messages (600 characters) and frames (240) for paths,
+The runner verifies one lane per discovered file, then invokes whole files with
+invocation-scoped inputs. Separate prerequisites require separate
+files. Its Node reporter emits case names, locations and outcomes without arbitrary
+output. The runner redacts messages (600 characters) and frames (240) for paths,
 nonpublic job/child environment values of eight or more characters, and known
-credential shapes; job logs use that text. Unrecognized runtime-generated values
-can remain. Structured provider, traffic and plugin diagnostics use closed
-allowlists without addresses, response bodies, credentials or identities.
-The [CI guide](../testing/ci.md) owns retained fields and redaction markers.
+credential shapes; job logs use that text. Other runtime-generated values can
+remain. Provider fields retain numeric statuses and allowlisted errors; traffic
+diagnostics keep allowlisted categories. Plugin diagnostics retain readiness/rollout
+stages, Pod phases, readiness/scheduling flags, restart counts, exit codes and reasons.
+They exclude addresses, response bodies, credentials and identities.
+The [CI guide](../testing/ci.md) lists fields and markers.
 
-Required named cases must pass; every skip or TODO fails the lane. There are no counterpart-skip lists or CI name filters. Synthetic file-wrapper success, missing output, zero cases, or interruption without final reporter output cannot establish coverage. Lane results retain failure, timeout and cleanup outcomes.
+Required cases must pass; every skip or TODO fails the lane. There are no counterpart-skip lists or CI name filters. Synthetic file-wrapper success, missing output, zero cases, or interruption without final reporter output cannot establish coverage. Lane results retain failure, timeout and cleanup outcomes.
 
-The reporter projects `cause` and `AggregateError.errors` into message/stack
-fields with context labels, at most 32 values/eight levels. Cycles/limits are
-marked; shared siblings remain separate. `scripts/ci/failure-redaction.mjs:captureFailureText`
-normalizes controls and multiline key shapes before retaining complete leading/tail
+The reporter projects `cause` and `AggregateError.errors` with context labels into
+message/stack fields: at most 32 values/eight levels. It marks cycles/limits and
+keeps shared siblings separate. `scripts/ci/failure-redaction.mjs:captureFailureText`
+normalizes controls and multiline key shapes, then retains complete leading/tail
 lines within 16,384 JavaScript UTF-16 units, including omission markers.
-Oversized single lines may be omitted. Reporter-generated boundary flags preserve
-safe tails through redaction; expanded labels are re-budgeted. Flags stay out of artifacts. Top-frame and
-600-character summary limits remain unchanged. Integration covers actual Node
-events and diagnostic artifacts; passing files gain no text.
+Oversized lines may be omitted. Reporter flags preserve redacted tails; expanded
+labels are re-budgeted. Artifacts omit flags. Top-frame and 600-character summary
+limits remain. Integration covers Node events and diagnostic artifacts;
+passing files gain no text.
 
-### 4. Clean up and publish the bounded result
+<a id="4-clean-up-and-publish-the-bounded-result" class="anchor-alias"></a>
+
+### 4. Clean up and report results
 
 `scripts/ci/cleanup.mjs:main` and `scripts/ci/run-tests.mjs:main`
 
@@ -217,7 +224,7 @@ exit; cleanup failure arms that grace immediately. A 60-second backstop covers
 skipped hooks. The parent runner accounts for failures. Failed resources stay in state; cleanup continues.
 
 `CI Required` checks jobs even after failures. Full-mode aggregation verifies
-same-revision lane identity, success, required evidence and cleanup; the runner
+matching commit SHAs, success, required evidence and cleanup; the runner
 validates cases. Docs mode checks documentation, audit and skipped test jobs
 without aggregation, proving only those checks. Full Integration accounts for
 its selected `full` group or lane. `ssh-host` stays outside automatic groups until
@@ -247,6 +254,8 @@ External reconciliation awaits an approved resource ledger.
 
 ## Changelog
 
+- 2026-10-20 07:20: Preserve diagnostic traces and cleanup anchors. (authoring-run/38d7de41-ba23-47a0-8084-a11002084ce3 - ca20ea0e3ef4f82a129223a187bd68c03eb2f4a6)
+
 - 2026-10-14 22:31: Complete all selection. (authoring-run/d5130a41-8ae6-4a80-aef3-32d61a53348c - 9b50982b75a578d6967ee12befb1fa3904e20a38)
 
 - 2026-10-14 14:09: Remove environment approvals. (authoring-run/ff0eb53f-ceb9-43fc-a81a-c1bc88b5c9fb - 909b0b9d4)
@@ -257,7 +266,7 @@ External reconciliation awaits an approved resource ledger.
 
 - 2026-10-14 10:19: Retain cleanup ownership. (authoring-run/ee448fbe-3e0a-40d4-b7d1-3f122d3e5f1b - 10f34280f56dc2375f48df9d2161024520a35882)
 
-- 2026-10-14 09:44: Document command-group termination, bounded pipes, and abandoned runner and fixture handoffs in the accompanying fix. (authoring-run/6dec0b67-a5cd-4a9e-82dc-7609f956b115 - 47d5b8cc901e225e51227a905ee688c69c8ea729)
+- 2026-10-14 09:44: Document command-group termination, pipes with shutdown deadlines, and abandoned runner and fixture handoffs in the accompanying fix. (authoring-run/6dec0b67-a5cd-4a9e-82dc-7609f956b115 - 47d5b8cc901e225e51227a905ee688c69c8ea729)
 
 - 2026-10-08 11:04: Isolate launcher queue. (authoring-run/09563984-5be9-4e9d-bf17-142ceb70d96d - 9e7a30a5da374826b1a2ba79b3bca9cdcb74d1f2)
 

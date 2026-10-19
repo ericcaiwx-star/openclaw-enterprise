@@ -5,6 +5,7 @@
   "fileConcurrency": 8,
   "parallelFiles": [
     "tests/integration/dev-up.test.mjs",
+    "tests/integration/dev-up-compose.test.mjs",
     "tests/integration/occ-api.test.mjs",
     "tests/integration/stored-document-serialization.test.mjs",
     "tests/integration/list-summaries.test.mjs",
@@ -12,6 +13,7 @@
     "tests/conformance/codex-native-startup.test.mjs",
     "tests/conformance/occ-api-security.test.mjs",
     "tests/integration/configuration-startup.test.mjs",
+    "tests/integration/installation-change-preflight.test.mjs",
     "tests/conformance/kubernetes-secret-driver.test.mjs",
     "tests/docs/docs-site.test.mjs",
     "tests/integration/github-login-transport.test.mjs",
@@ -32,6 +34,7 @@
     "tests/conformance/workspace-files.test.mjs",
     "tests/conformance/runtime-logs-sandbox.test.mjs",
     "tests/integration/device-authorization-api.test.mjs",
+    "tests/integration/openshell-device-authorization-api.test.mjs",
     "tests/integration/dependency-unavailable-log.test.mjs",
     "tests/integration/git-hooks.test.mjs",
     "tests/integration/profile-renderer.test.mjs",
@@ -50,9 +53,10 @@
     "tests/conformance/test-files.test.mjs",
     "tests/conformance/socket-directory.test.mjs",
     "tests/integration/production-controller-security.test.mjs",
-    "tests/integration/sandbox-driver-startup.test.mjs",
     "tests/conformance/kubernetes-runtime-credentials.test.mjs",
     "tests/conformance/openshell-gateway-wire.test.mjs",
+    "tests/conformance/openshell-oauth-wire.test.mjs",
+    "tests/conformance/openshell-codex-device.test.mjs",
     "tests/conformance/openshell-harness-status.test.mjs",
     "tests/integration/bootstrap-volume.test.mjs",
     "tests/integration/secret-driver-startup.test.mjs",
@@ -62,6 +66,7 @@
     "tests/conformance/configuration-occ.test.mjs",
     "tests/conformance/credential-source-occ.test.mjs",
     "tests/conformance/kubernetes-real-kubectl.test.mjs",
+    "tests/conformance/k3d-failure-diagnostics.test.mjs",
     "tests/conformance/secret-occ.test.mjs",
     "tests/conformance/http-errors.test.mjs",
     "tests/conformance/docker-compute.test.mjs",
@@ -70,7 +75,6 @@
     "tests/conformance/codex-seccomp-profile.test.mjs",
     "tests/conformance/kubernetes-ownership.test.mjs",
     "tests/conformance/service-account-driver.test.mjs",
-    "tests/conformance/harness-device-auth.test.mjs",
     "tests/conformance/iam.test.mjs",
     "tests/conformance/platform-state-memory.test.mjs",
     "tests/conformance/contracts.test.mjs",
@@ -80,11 +84,15 @@
     "tests/conformance/codex-stderr-filter.test.mjs",
     "tests/docs/docs-server.test.mjs",
     "tests/integration/console-build-metadata.test.mjs",
+    "tests/conformance/console-design-tokens.test.mjs",
     "tests/conformance/audit.test.mjs",
     "tests/conformance/compute-lifecycle-hooks.test.mjs",
     "tests/conformance/utils.test.mjs",
     "tests/conformance/console-api-client.test.mjs",
     "tests/conformance/console-carry.test.mjs",
+    "tests/conformance/console-namespace-name.test.mjs",
+    "tests/conformance/console-agent-name-runs.test.mjs",
+    "tests/conformance/console-json-errors.test.mjs",
     "tests/integration/bootstrap-output.test.mjs",
     "tests/conformance/slack-configuration.test.mjs",
     "tests/conformance/grafana-overview-dashboard.test.mjs",
@@ -109,10 +117,22 @@
       "path": "tests/conformance/filesystem-configuration.test.mjs"
     },
     {
+      "path": "tests/conformance/console-agent-name-runs.test.mjs"
+    },
+    {
       "path": "tests/conformance/console-api-client.test.mjs"
     },
     {
       "path": "tests/conformance/console-carry.test.mjs"
+    },
+    {
+      "path": "tests/conformance/console-namespace-name.test.mjs"
+    },
+    {
+      "path": "tests/conformance/console-json-errors.test.mjs"
+    },
+    {
+      "path": "tests/conformance/console-design-tokens.test.mjs"
     },
     {
       "path": "tests/conformance/contracts.test.mjs"
@@ -128,9 +148,6 @@
     },
     {
       "path": "tests/docs/generated-api-reference.test.mjs"
-    },
-    {
-      "path": "tests/conformance/harness-device-auth.test.mjs"
     },
     {
       "path": "tests/conformance/http-errors.test.mjs"
@@ -169,6 +186,9 @@
       "path": "tests/conformance/kubernetes-real-kubectl.test.mjs"
     },
     {
+      "path": "tests/conformance/k3d-failure-diagnostics.test.mjs"
+    },
+    {
       "path": "tests/conformance/kubernetes-runtime-credentials.test.mjs"
     },
     {
@@ -200,6 +220,12 @@
     },
     {
       "path": "tests/conformance/openshell-gateway-wire.test.mjs"
+    },
+    {
+      "path": "tests/conformance/openshell-oauth-wire.test.mjs"
+    },
+    {
+      "path": "tests/conformance/openshell-codex-device.test.mjs"
     },
     {
       "path": "tests/conformance/openshell-harness-status.test.mjs"
@@ -282,6 +308,9 @@
       "path": "tests/integration/configuration-startup.test.mjs"
     },
     {
+      "path": "tests/integration/installation-change-preflight.test.mjs"
+    },
+    {
       "path": "tests/integration/console-api.test.mjs"
     },
     {
@@ -315,22 +344,22 @@
       "path": "tests/integration/production-image-upgrade.test.mjs"
     },
     {
-      "path": "tests/integration/sandbox-driver-startup.test.mjs",
-      "expectedTests": [
-        "OpenShell reconciles renewed workspace-node setup into its revision provider"
-      ]
-    },
-    {
       "path": "tests/integration/secret-api.test.mjs"
     },
     {
-      "path": "tests/integration/credential-source-api.test.mjs"
+      "path": "tests/integration/credential-source-api.test.mjs",
+      "expectedTests": [
+        "Installation discovery serializes OpenShell model authentication and refresh source metadata"
+      ]
     },
     {
       "path": "tests/integration/plugin-discovery-api.test.mjs"
     },
     {
       "path": "tests/integration/device-authorization-api.test.mjs"
+    },
+    {
+      "path": "tests/integration/openshell-device-authorization-api.test.mjs"
     },
     {
       "path": "tests/integration/dependency-unavailable-log.test.mjs"
@@ -352,21 +381,36 @@
     },
     {
       "path": "tests/integration/dev-entry-cdpath.test.mjs",
-      "expectedTests": ["development wrappers resolve relative paths without changing CDPATH"]
+      "expectedTests": [
+        "development wrappers resolve relative paths without changing CDPATH",
+        "k3d and CI tool setup resolve the checkout without CDPATH"
+      ]
     },
     {
       "path": "tests/integration/dev-up.test.mjs",
       "expectedTests": [
+        "Kubernetes dev-up authenticates the Installation and cleanup uses its saved endpoint and Compose configuration",
+        "Kubernetes Compute defaults to the Compose control plane",
+        "Kubernetes dev-up rejects an unsupported control-plane selection",
+        "Kubernetes dev-up rolls back owned resources after node-dns-refused",
+        "Kubernetes dev-down preserves recovery state after incomplete cleanup and can retry",
+        "cancelling Kubernetes startup during readiness rolls back its owned resources",
+        "launcher case recovery follows real Go rollback after node-dns-refused"
+      ]
+    },
+    {
+      "path": "tests/integration/dev-up-compose.test.mjs",
+      "expectedTests": [
         "dev-up builds the default runtime only when real Compose leaves runtime images unselected",
         "dev-up preserves a selected custom runtime image and skips the quickstart build",
         "dev-up applies per-image overrides on top of the shared runtime image",
-        "Kubernetes dev-up rejects an unsupported control-plane selection",
         "dev-up rejects a public controller port rendered by real Compose",
         "dev-up refuses an existing key destination before invoking Compose",
         "dev-up fails closed when bootstrap exits unsuccessfully",
         "dev-up fails closed when the worker exits before readiness",
         "dev-up preserves a copied key when the authenticated installation check is rejected",
-        "dev-up rejects an authenticated installation response for a different Installation"
+        "dev-up rejects an authenticated installation response for a different Installation",
+        "development cleanup defaults to the Compose profile"
       ]
     },
     {

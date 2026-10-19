@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
 import { AGENT_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
+import { CODEX_FAILURE_OUTPUT_CLASSES } from "../../packages/contracts/src/runtime-failure.mjs";
 
 const nodeRequire = createRequire(import.meta.url);
 const transportToken = "fixture-transport-token";
@@ -26,7 +27,8 @@ export const timedOut = { status: null, signal: "SIGKILL", error: { code: "ETIME
 export function login(result = { status: 0 }) {
   return { operation: "login", result };
 }
-export function probe(events, result = {}, timeout) {
+// elapsed advances the fixture clock by a probe's run time when it does not time out.
+export function probe(events, result = {}, timeout, elapsed) {
   return {
     operation: "probe",
     result: {
@@ -35,6 +37,7 @@ export function probe(events, result = {}, timeout) {
       ...result,
     },
     timeout,
+    elapsed,
   };
 }
 
@@ -217,6 +220,7 @@ export function createCodexStartup(
                 if (step.result.error?.code === "ETIMEDOUT" && step.result.signal === "SIGKILL") {
                   clock += options.timeout;
                 }
+                clock += step.elapsed ?? 0;
               }
               return step.result;
             } catch (error) {
@@ -331,7 +335,9 @@ export function checkCodexStartup(t, scenario) {
       assert.ok(expected.cause);
     }
     assert.deepEqual(status.runtimeFailure.cause, expected.cause);
-    assert.deepEqual(probes.at(-1)?.cause, expected.cause);
+    // The probe log line names each attempt's own cause; only the held cause says
+    // that the check was retried.
+    assert.deepEqual(probes.at(-1)?.cause, scenario.lastProbeCause ?? expected.cause);
     assert.deepEqual(
       [probes.at(-1)?.providerStatus, probes.at(-1)?.providerCode],
       [expected.provider?.status, expected.provider?.code],
@@ -341,6 +347,7 @@ export function checkCodexStartup(t, scenario) {
     JSON.stringify(status) + runtime.diagnostics.join("\n"),
     /fixture-api-key|at-fixture-token|fixture-transport-token|openshell:resolve:env|Bad Request|Unauthorized|Unavailable|Reconnecting|usage limit|Too Many|quota exceeded/i,
   );
+  return { status, diagnostics: runtime.diagnostics };
 }
 
 function checkStartupDiagnostics(runtime, scenario) {
@@ -352,10 +359,30 @@ function checkStartupDiagnostics(runtime, scenario) {
     probes.map(({ code }) => code),
     scenario.probeCodes ?? (expected.check === "login" ? [] : [expected.code]),
   );
+  if (scenario.probeCauses !== undefined) {
+    assert.deepEqual(
+      probes.map(({ cause }) => cause),
+      scenario.probeCauses,
+    );
+  }
   for (const [index, diagnostic] of probes.entries()) {
     assert.equal(diagnostic.event, "codex.model_probe");
     assert.equal(diagnostic.attempt, index + 1);
     assert.ok(diagnostic.elapsedMs >= 0);
+    if (diagnostic.code === "READY") {
+      assert.equal(Object.hasOwn(diagnostic, "failureClass"), false);
+    } else {
+      assert.ok(CODEX_FAILURE_OUTPUT_CLASSES.includes(diagnostic.failureClass));
+    }
+  }
+  if (scenario.probeFailureClasses !== undefined) {
+    assert.deepEqual(
+      probes.map(({ failureClass }) => failureClass),
+      scenario.probeFailureClasses,
+    );
+  }
+  if (expected.check === "model-probe" && scenario.failureClass !== undefined) {
+    assert.equal(probes.at(-1)?.failureClass, scenario.failureClass);
   }
   // Startup timing reports fixed phase names and outcomes only: no model,
   // provider, credential or path value can appear in these lines.
@@ -363,7 +390,10 @@ function checkStartupDiagnostics(runtime, scenario) {
     phases.map(({ phase, outcome }) => [phase, outcome]),
     expected.phases,
   );
+  // A failed native login, like a failed probe that ran, adds only the closed-list
+  // class of Codex's error output (finding 2017).
   for (const phase of phases) {
+    const classified = phase.phase === "codex-login" && phase.outcome === "failed";
     assert.deepEqual(Object.keys(phase), [
       "event",
       "container",
@@ -371,7 +401,14 @@ function checkStartupDiagnostics(runtime, scenario) {
       "outcome",
       "ms",
       "sinceStartMs",
+      ...(classified ? ["failureClass"] : []),
     ]);
+    if (classified) {
+      assert.ok(CODEX_FAILURE_OUTPUT_CLASSES.includes(phase.failureClass));
+      if (scenario.failureClass !== undefined) {
+        assert.equal(phase.failureClass, scenario.failureClass);
+      }
+    }
     assert.equal(phase.container, "agent");
     assert.ok(Number.isInteger(phase.ms) && phase.ms >= 0);
     assert.ok(phase.sinceStartMs >= phase.ms);
