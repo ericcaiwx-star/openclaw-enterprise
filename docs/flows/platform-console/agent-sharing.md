@@ -45,7 +45,7 @@ graph TD
 
 `apps/controller/src/console/agents/access.mjs:renderAgentAccess`
 
-Agent detail mounts sharing independently of revision/configuration reads and
+Agent detail mounts sharing independently of version/configuration reads and
 native admission, but not when the console's observability probe already showed
 the person lacks Installation administration: the policy endpoints require it and
 the API audits each denial. The panel reads the selected Namespace's existing
@@ -83,7 +83,7 @@ The panel retains discovery grants and explains other possible access sources.
   grants before submitting again. A present binding does not prove an earlier
   request's outcome.
 - The real-runtime sharing case is described in
-  [gateway routing tests](../../testing/gateway-routing.md#native-gateway-sharing).
+  [gateway routing tests](../../testing/kubernetes.md#native-gateway-sharing).
 
 ## Related docs
 

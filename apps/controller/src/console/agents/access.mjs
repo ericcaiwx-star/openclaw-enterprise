@@ -1,4 +1,4 @@
-import { button, element } from "../dom.mjs";
+import { button, element, revealStatus, setStatusTone, validateOnSubmit } from "../dom.mjs";
 import { message, namespacePath, rejectionMessage } from "./list.mjs";
 
 const discoveryPermissions = [{ action: "read", resourceKind: "namespace" }];
@@ -50,8 +50,9 @@ export function renderAgentAccess(context, agent) {
     "aria-describedby": "share-principal-help",
   });
   const acknowledge = element("input", { type: "checkbox", required: true });
-  const share = element("button", { type: "submit", className: "primary" }, "Share Agent");
-  const refresh = button("Refresh sharing", () => void load());
+  // The Agent page's one primary action is its next deployment step, not sharing.
+  const share = element("button", { type: "submit" }, "Share Agent");
+  const refresh = button("Refresh sharing", () => void load(), { tone: "ghost", size: "sm" });
   const form = element(
     "form",
     { className: "agent-access-form" },
@@ -74,6 +75,8 @@ export function renderAgentAccess(context, agent) {
     ),
     element("div", { className: "form-actions" }, share),
   );
+  // The console checks the Principal ID and the acknowledgement, not the browser (UX plan C3).
+  validateOnSubmit(form);
   const state = {
     pending: false,
     loaded: false,
@@ -115,19 +118,32 @@ export function renderAgentAccess(context, agent) {
     acknowledge.disabled = blocked;
     share.disabled = blocked;
     refresh.disabled = state.pending;
-    form.hidden = !state.loaded;
+    // The form shows disabled while the policy loads, instead of popping in above the grants
+    // once it has (finding 1410); it hides only when the policy could not be read.
+    form.hidden = !state.loaded && !state.pending;
+    // The first read holds the line its "Current policy loaded" result takes, so the form
+    // below does not move when it lands.
+    const progress =
+      state.progress.length || state.loaded || !state.pending || state.error
+        ? state.progress
+        : ["Reading the current sharing policy…"];
     feedback.replaceChildren(
-      ...(state.progress.length
+      ...(progress.length
         ? [
             element(
               "ul",
               { className: "agent-access-progress" },
-              ...state.progress.map((text) => element("li", {}, text)),
+              ...progress.map((text) => element("li", {}, text)),
             ),
           ]
         : []),
       ...(state.error ? [element("p", { className: "error", role: "alert" }, state.error)] : []),
     );
+    // A refusal shows in the danger status block (UX plan C1).
+    const refusal = feedback.querySelector("[role=alert]");
+    if (refusal) {
+      setStatusTone(refusal, "danger");
+    }
     grants.replaceChildren();
     if (!state.loaded) {
       grants.append(
@@ -163,7 +179,9 @@ export function renderAgentAccess(context, agent) {
       const permissions =
         role?.permissions.map((item) => `${item.resourceKind}: ${item.action}`).join(", ") ??
         "Role unavailable";
+      // Removal deletes the binding at once, so it takes the destructive tone (finding 1967).
       const remove = button("Remove binding", () => void removeBinding(binding), {
+        tone: "danger",
         disabled: blocked,
       });
       grants.append(
@@ -231,6 +249,8 @@ export function renderAgentAccess(context, agent) {
     if (state.pending || !context.isCurrent()) {
       return;
     }
+    // Refresh is disabled while it reads, which drops its focus; give it back (finding 1446).
+    const refocus = document.activeElement === refresh;
     state.pending = true;
     state.error = null;
     render();
@@ -255,6 +275,9 @@ export function renderAgentAccess(context, agent) {
       if (context.isCurrent()) {
         state.pending = false;
         render();
+        if (refocus && !section.hidden && document.activeElement === document.body) {
+          refresh.focus({ preventScroll: true });
+        }
       }
     }
   }
@@ -325,6 +348,9 @@ export function renderAgentAccess(context, agent) {
       if (context.isCurrent()) {
         state.pending = false;
         render();
+        // Share disables while it runs, which dropped focus to the page and left a refusal
+        // above the form unread; it takes focus and comes into view (findings 1862, 1864).
+        revealStatus(feedback.querySelector("[role=alert]"), section);
       }
     }
   }

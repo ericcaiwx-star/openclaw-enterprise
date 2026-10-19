@@ -28,7 +28,7 @@ console uses the current origin and has no separate environment settings.
 - `OCC_PORT` — API listener port; no process default.
 - `OCC_CONFIG_PATH` — Absolute path to trusted Installation YAML; required in production and shared with the worker.
 - `OCC_AUTH_SECRET` — Production requires a high-entropy session-signing secret; development has a local-only fallback.
-- `OCC_AUTH_BASE_URL` — Authentication and cookie origin; required in production; default in development: `http://127.0.0.1:3000`.
+- `OCC_AUTH_BASE_URL` — Authentication, cookie, and exact development browser origin; required in production; default in development: `http://127.0.0.1:3000`.
 - `OCC_AUTH_GITHUB_CLIENT_ID` — Optional GitHub App client ID, not App ID; selects the provider instance. Requires PostgreSQL, native IAM, and both GitHub settings below; see [GitHub sign-in](../authentication/external-sign-in.md#github-sign-in-for-existing-accounts).
 - `OCC_AUTH_GITHUB_CLIENT_SECRET` — Protected server-side client secret for the configured GitHub App; its private key stays with the repository credential consumer.
 - `OCC_AUTH_GITHUB_ALLOWED_ORGS` — Optional comma-separated GitHub organization logins; when set (or with the teams), GitHub sign-in requires active membership. See the [allowlist](../authentication/external-sign-in.md#organization-and-team-allowlist).
@@ -117,8 +117,8 @@ for supported engines, images, and security restrictions.
 - `OCC_DOCKER_RUNTIME_IMAGE` — Shared image for the Docker gateway and Agent; may replace the two separate images.
 - `OCC_DOCKER_GATEWAY_IMAGE` — Docker gateway image when a shared image is not used.
 - `OCC_DOCKER_AGENT_IMAGE` — Docker Codex Agent image when a shared image is not used.
-- `OCC_KUBERNETES_RUNTIME_IMAGE` — Existing local Kubernetes runtime image; Kubernetes-only startup requires a matching controller digest and checkout revision.
-- `OCC_DEVELOPMENT_CONTROLLER_IMAGE` — Existing local OCE controller digest matching the runtime and checkout revision for the Kubernetes-only profile.
+- `OCC_KUBERNETES_RUNTIME_IMAGE` — Existing local Kubernetes runtime image; Kubernetes-only startup requires a matching controller digest and checkout commit.
+- `OCC_DEVELOPMENT_CONTROLLER_IMAGE` — Existing local OCE controller digest matching the runtime and checkout commit for the Kubernetes-only profile.
 - `OCC_DEVELOPMENT_REPOSITORY_INPUT_DIRECTORY` — Private local repository registry, App key, and approved upstream IPv4 `/32` endpoint inputs.
 - `OCC_DEVELOPMENT_REPOSITORY_IMAGE` — Optional matching immutable repository service image for the Kubernetes-only profile.
 - `OCC_DEVELOPMENT_POSTGRES_IMAGE` — Existing local PostgreSQL image for the Kubernetes-only profile; defaults to the pinned PostgreSQL 18.6 image.
@@ -147,6 +147,7 @@ Use only one of the two credential inputs. In production, use
 credential on the controller.
 
 - `OPENAI_API_KEY` — Authorized credential for local real-model use.
+- `CODEX_ACCESS_TOKEN`, `CODEX_ACCESS_TOKEN_FILE` — Personal access token or private token file for the OpenShell dedicated Codex first-Agent helper. Select one credential input.
 - `OPENAI_API_KEY_FILE` — Absolute path to a private credential file for the first-Agent helper.
 - `OPENCLAW_FIRST_AGENT_MODEL` — Plain OpenAI model ID, without a provider prefix; default for a new Agent: `gpt-6-astra`.
 
