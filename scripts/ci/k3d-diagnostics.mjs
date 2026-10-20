@@ -147,7 +147,12 @@ export function nodeLogExcerpt(stdout = "", stderr = "", note) {
         continue;
       }
       entries.push({
-        at: Date.parse(stamp),
+        // Docker timestamps are UTC. Canonical decimal fractions preserve precision
+        // and compare equal when their only difference is trailing zeroes.
+        at: stamp.replace(
+          /(?:\.(\d+))?Z$/u,
+          (_match, fraction = "") => `.${fraction.replace(/0+$/u, "")}`,
+        ),
         stream,
         index: entries.length,
         // Test the whole line for credentials before truncating it.
@@ -157,7 +162,7 @@ export function nodeLogExcerpt(stdout = "", stderr = "", note) {
       });
     }
   }
-  entries.sort((a, b) => a.at - b.at || a.stream - b.stream || a.index - b.index);
+  entries.sort((a, b) => a.at.localeCompare(b.at) || a.stream - b.stream || a.index - b.index);
   const kept = [];
   const problems = new Set();
   const retries = new Map();
@@ -183,7 +188,7 @@ export function nodeLogExcerpt(stdout = "", stderr = "", note) {
     // the order they first appeared.
     ...[...retries]
       .map((entry, order) => ({ entry, order }))
-      .sort((a, b) => b.entry[1].lastAt - a.entry[1].lastAt)
+      .sort((a, b) => b.entry[1].lastAt.localeCompare(a.entry[1].lastAt))
       .slice(0, KUBECTL_RETRY_KINDS)
       .sort((a, b) => a.order - b.order)
       .map(

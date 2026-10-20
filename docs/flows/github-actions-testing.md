@@ -1,7 +1,7 @@
 ---
 created: 2026-09-04
-updated: 2026-10-14
-last_updated_session: authoring-run/d5130a41-8ae6-4a80-aef3-32d61a53348c
+updated: 2026-10-21
+last_updated_session: authoring-run/458f4777-70d1-4992-a922-ab387c6a4aba
 ---
 
 # GitHub Actions testing flow
@@ -109,12 +109,11 @@ For `logging-collector`, `scripts/ci/prepare.mjs:prepareLane` pre-pulls the pinn
 
 `checks-browser`, `checks-browser-2`, `postgres-auth`, `postgres-platform`, `images-model-probes`, `images-runtime-startup`, `images-runtime-startup-2` and `images-runtime-startup-3` use separate runners and required artifacts. `scripts/ci/prepare.mjs:imageBuildArgs` enables scoped BuildKit caches for hosted image jobs: packaging exports; probes, runtime startup and `repository-credentials-platform` restore. Images load into the job's Docker engine; cache credentials stay in preparation.
 
-Kubernetes fixture startup records phase timings and host snapshots. On failure,
-reads with time and size limits save `<state-file>.diagnostics.json` outside the cluster directory
-before cleanup. These lanes use `--no-rollback` so the workflow owns teardown
-after capture; local callers still clean up using the failed run's state file.
-Collection preserves the original error even if observation fails or times out.
-The [CI guide](../testing/ci.md) describes the retained evidence.
+Kubernetes preparation records host snapshots. Failed reads, bounded
+by time and size, save `<state-file>.diagnostics.json` outside the cluster directory.
+These lanes use `--no-rollback`; workflows own teardown after capture, while
+local callers use the failed state file. Observation failures preserve the original error. `nodeLogExcerpt` orders Docker streams
+and retry summaries by full UTC timestamp precision. See the [CI guide](../testing/ci.md).
 
 Tests delete Agent namespaces and their events before file exit. While each file
 runs, `scripts/ci/run-tests.mjs:runFile` watches Compute-managed Pods and events
@@ -233,6 +232,8 @@ External reconciliation awaits an approved resource ledger.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-21 04:42: Preserve submillisecond Docker event order. (authoring-run/458f4777-70d1-4992-a922-ab387c6a4aba - e8185dac805b737363c7178d3068b310a53a7c24)
 
 - 2026-10-14 22:31: Complete all selection. (authoring-run/d5130a41-8ae6-4a80-aef3-32d61a53348c - 9b50982b75a578d6967ee12befb1fa3904e20a38)
 
