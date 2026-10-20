@@ -133,10 +133,10 @@ user in place. The next preparation accepts it only when the local user's gid
 is the recorded gid and the group came from an earlier attempt, then stores
 the uid. An already-existing user is refused when this attempt created the group,
 and its claim is removed so retry and deletion cannot treat that user as owned. If `useradd` creates the account and
-then fails before it returns, the claim stays so that resume can finish. When
-rollback removes both local account entries, it clears the claim even if
-`userdel` already removed the private group. Remaining entries or failed lookups
-retain the claim. Namespace
+then fails before it returns, the claim stays so that resume can finish. For a
+group created during the failed attempt, rollback clears the claim once both
+local entries are confirmed absent, even if `userdel` removed the private group.
+Remaining entries or failed checks retain that claim. Namespace
 deletion still clears the claim when the recorded group is already gone. A different ServicePrincipal does not
 match the claim and is refused before account commands. An account with no
 marker is not adopted. The
