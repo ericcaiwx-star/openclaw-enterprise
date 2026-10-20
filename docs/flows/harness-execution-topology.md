@@ -128,9 +128,9 @@ exact-owned, identical password; foreign or conflicting sources fail.
 [Namespaces and isolation](../reference/drivers/kubernetes-compute/networking-and-isolation.md#namespaces-and-isolation)
 owns qualified DNS and exact NetworkPolicy/Service selectors. Harness selectors
 include version and network profile; Gateway selectors omit version for stability.
-The execution chart’s `routing.yaml` validates DNS and Envoy peer label maps
-before emitting NetworkPolicies. Values must be strings or native null; map shape
-and type errors identify the setting before installation.
+`deploy/helm/openclaw-execution/templates/routing.yaml` validates DNS and Envoy peer maps
+before rendering NetworkPolicies. Values must be strings or native null; type
+errors identify the setting.
 `runtime.gatewayNodeSelector`
 independently places the Gateway Pod and private-state initializer on trusted nodes.
 After Harness readiness, preparation starts a candidate Gateway if its predecessor is stopped or unready. Activation waits for workspace node enrollment. Dedicated Codex keeps `agent-<agent digest>-workspace` across versions.
@@ -356,9 +356,5 @@ owns claim sizes, mount paths, StorageClass requirements, and final teardown.
 - 2026-09-30 09:30: Include the Harness network profile in Service selectors for EKS policy resolution. (authoring-run/1373b7f3-e273-466a-b9da-bb197bdb469e - 0d00e8970b69)
 
 - 2026-09-30 21:00: Delete a repaired embedded predecessor's Secret and ConfigMap copies at repair time. (fix/dogfood3b-1)
-
-- 2026-09-30 10:30: Repair a never-served unready embedded Gateway during redeploy with pending workspace setup. (fix-dogfood-1)
-
-- 2026-09-30 09:54: Correct dedicated replacement: the worker stops the predecessor Gateway before preparation, so redeploys interrupt service. (authoring-run/a37a9c9b-9e94-4bd2-88c5-dfa5c5f94d12 - 90899dc55ab7)
 
 [Harness execution topology documentation history](harness-execution-topology/history.md) preserves the older dated entries.

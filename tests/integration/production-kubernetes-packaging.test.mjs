@@ -166,8 +166,11 @@ test("execution peer label maps reject non-string values before rendering", tool
       const policy = objects.find(({ kind }) => kind === "NetworkPolicy");
       const labels = policy.spec.egress[peer].to[0].podSelector.matchLabels;
       const requested = JSON.parse(value);
-      for (const [key, label] of Object.entries(requested ?? {}))
-        if (label !== null) assert.equal(labels[key], label);
+      for (const [key, label] of Object.entries(requested ?? {})) {
+        if (label !== null) {
+          assert.equal(labels[key], label);
+        }
+      }
     }
     await renderExecution(`${field}.probe`, "true", "--set-string");
   }
