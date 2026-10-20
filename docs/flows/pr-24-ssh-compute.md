@@ -1,7 +1,7 @@
 ---
 created: 2026-09-07
-updated: 2026-10-15
-last_updated_session: authoring-run/3514d5b8-3645-4154-815a-9abe487cd1de
+updated: 2026-10-21
+last_updated_session: authoring-run/a8cd3da0-89d1-42c4-889b-944be56156f2
 ---
 
 <a id="pr-24-ssh-compute-flow"></a>
@@ -133,7 +133,10 @@ user in place. The next preparation accepts it only when the local user's gid
 is the recorded gid and the group came from an earlier attempt, then stores
 the uid. An already-existing user is refused when this attempt created the group,
 and its claim is removed so retry and deletion cannot treat that user as owned. If `useradd` creates the account and
-then fails before it returns, the claim stays so that resume can finish. Namespace
+then fails before it returns, the claim stays so that resume can finish. When
+rollback removes both local account entries, it clears the claim even if
+`userdel` already removed the private group. Remaining entries or failed lookups
+retain the claim. Namespace
 deletion still clears the claim when the recorded group is already gone. A different ServicePrincipal does not
 match the claim and is refused before account commands. An account with no
 marker is not adopted. The
@@ -239,6 +242,8 @@ retire, which frees its gateway port.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-21 04:58: Clear a rolled-back preparation claim after both local account entries are confirmed absent, including private-group removal by `userdel`. (authoring-run/a8cd3da0-89d1-42c4-889b-944be56156f2 - 9d64343f63cab523c5841ad6a5c640834f23e753)
 
 - 2026-10-15 10:22: Distinguish groups created by the current attempt before accepting an existing user. (authoring-run/3514d5b8-3645-4154-815a-9abe487cd1de - 264692a5f462c76798d6629400eea139410bed4a)
 

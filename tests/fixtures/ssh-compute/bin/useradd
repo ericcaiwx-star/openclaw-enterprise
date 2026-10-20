@@ -28,6 +28,11 @@ mkdir -p "$users"
   cat "$group_file"
 } > "$users/$name"
 printf 'useradd %s %s\n' "$name" "$group" >> "$OCC_SSH_FIXTURE_STATE/accounts.log"
+# Fail the helper's owner lookup only after useradd reports successful creation.
+if [ -f "$OCC_SSH_FIXTURE_STATE/useradd.lookup-fail" ]; then
+  rm -f "$OCC_SSH_FIXTURE_STATE/useradd.lookup-fail"
+  printf 'once\n' > "$OCC_SSH_FIXTURE_STATE/getent.fail"
+fi
 # The account exists, but the command has not returned success.
 if [ -f "$OCC_SSH_FIXTURE_STATE/useradd.fail-after" ]; then
   rm -f "$OCC_SSH_FIXTURE_STATE/useradd.fail-after"

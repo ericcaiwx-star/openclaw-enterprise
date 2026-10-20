@@ -462,10 +462,13 @@ async function ensureRuntimeIdentity(input) {
       await command("userdel", [name], true);
     }
     if (groupCreatedThisRun) {
-      // useradd can create the account and still fail before it returns. groupdel
-      // then fails while that user remains, so the claim has to stay for resume.
-      const removed = await command("groupdel", [name], true);
-      if (removed.success && (await localEntry("group", name)) === undefined) {
+      // userdel can remove the private group too. Confirm both entries are gone
+      // before dropping the claim, regardless of groupdel's exit status.
+      await command("groupdel", [name], true);
+      if (
+        (await localEntry("group", name)) === undefined &&
+        (await localEntry("passwd", name)) === undefined
+      ) {
         fs.rmSync(markerPath, { force: true });
       }
     } else if (claimedThisRun) {

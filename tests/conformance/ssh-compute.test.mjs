@@ -1274,6 +1274,25 @@ test("SSH account creation rolls back a failed useradd without adopting a later 
   await assert.rejects(f.driver.prepareRevision(rev), /foreign ownership|snapshot/);
 });
 
+test("SSH preparation retries after rollback removes the private group", async (t) => {
+  const f = await fixture(t);
+  const rev = revision(f.driver, 1, "agent-ssh-rollback-private-group");
+  const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+  assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+  bind(f.driver, rev);
+  await writeFile(join(f.state, "useradd.lookup-fail"), "once");
+  await writeFile(join(f.state, "userdel.remove-group"), "enabled");
+  await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+  await missing(join(f.state, "accounts", "users", account));
+  await missing(join(f.state, "accounts", "groups", account));
+  await missing(join(f.root, "accounts", `${account}.json`));
+  assert.equal((await f.driver.prepareRevision(rev)).ready, true);
+  const marker = await json(join(f.root, "accounts", `${account}.json`));
+  assert.equal(marker.pending, undefined);
+  assert.equal(marker.uid, process.getuid());
+  assert.equal(marker.gid, process.getgid());
+});
+
 test("SSH resume keeps a pending claim when account lookups fail", async (t) => {
   const f = await fixture(t);
   const rev = revision(f.driver, 1, "agent-ssh-lookup-fail");
