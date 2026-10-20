@@ -1,7 +1,7 @@
 ---
 created: 2026-10-15
-updated: 2026-10-19
-last_updated_session: authoring-run/a9906404-d12d-4f05-ba24-16be225b527c
+updated: 2026-10-21
+last_updated_session: authoring-run/a66234ce-95fd-4d64-9fe8-3ce3d143e572
 ---
 
 # Agent sandbox policy flow
@@ -40,6 +40,12 @@ The solid arrows trace source paths, not a claim that all providers are verified
 ## Execution Trace
 
 ### 1. Admit and persist desired additions
+
+`internal/occcli/agent_policy.go:agentPolicyCommand` declares JSON and YAML
+output for each policy subcommand. The CLI selects JSON by default before
+sending the request, then prints its acknowledged result through
+`internal/occcli/output.go:printStructured`. A successful mutation therefore
+returns its result without a later table-format error.
 
 `packages/occ/src/index.ts:updateAgentSandboxPolicy` independently authorizes
 Agent `manage_policy` and SandboxPolicy `update`, locks the Namespace and Agent,
@@ -136,6 +142,8 @@ destinations, preserving an Agent's Policy denials link after sign-in.
 ## Manual Notes
 
 ## Changelog
+
+- 2026-10-21 04:25: Declare structured policy CLI output before requests. (authoring-run/a66234ce-95fd-4d64-9fe8-3ce3d143e572 - e8185dac805b737363c7178d3068b310a53a7c24)
 
 - 2026-10-19 14:18: Align Agent creation and reload defaults for policy editing in both state adapters. (authoring-run/a9906404-d12d-4f05-ba24-16be225b527c - 7e677523ba1ad953707b14f6b6c2f041e5ccd6b7)
 
