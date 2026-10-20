@@ -1,7 +1,7 @@
 ---
 created: 2026-08-21
-updated: 2026-10-16
-last_updated_session: Codex/01a13654-be66-7741-b54f-f8ae80f2d496
+updated: 2026-10-21
+last_updated_session: authoring-run/9c5e8c34-6292-465b-a82a-7b56e03b535d
 ---
 
 # Harness Execution Topology Flow
@@ -128,6 +128,9 @@ exact-owned, identical password; foreign or conflicting sources fail.
 [Namespaces and isolation](../reference/drivers/kubernetes-compute/networking-and-isolation.md#namespaces-and-isolation)
 owns qualified DNS and exact NetworkPolicy/Service selectors. Harness selectors
 include version and network profile; Gateway selectors omit version for stability.
+The execution chart’s `routing.yaml` validates DNS and Envoy peer label maps
+before emitting NetworkPolicies. Values must be strings or native null; map shape
+and type errors identify the setting before installation.
 `runtime.gatewayNodeSelector`
 independently places the Gateway Pod and private-state initializer on trusted nodes.
 After Harness readiness, preparation starts a candidate Gateway if its predecessor is stopped or unready. Activation waits for workspace node enrollment. Dedicated Codex keeps `agent-<agent digest>-workspace` across versions.
@@ -296,6 +299,8 @@ owns claim sizes, mount paths, StorageClass requirements, and final teardown.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-21 05:00: Validate execution peer label types. (authoring-run/9c5e8c34-6292-465b-a82a-7b56e03b535d - e8185dac805b737363c7178d3068b310a53a7c24)
 
 - 2026-10-16 17:02: Persist worktrees and Git sources. (Codex/01a13654-be66-7741-b54f-f8ae80f2d496 - 68b95a2514f183b194a478e72d734b719bf4c2e8)
 
