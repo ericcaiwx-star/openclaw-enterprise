@@ -1,7 +1,7 @@
 ---
 created: 2026-09-04
 updated: 2026-10-20
-last_updated_session: authoring-run/38d7de41-ba23-47a0-8084-a11002084ce3
+last_updated_session: authoring-run/bf83e367-c806-4cef-9b98-ff6d7b1f3846
 ---
 
 # GitHub Actions testing flow
@@ -143,13 +143,12 @@ manual profile. Production node provisioning remains outside CI ownership; see
 
 `scripts/ci/run-tests.mjs:main`, `scripts/ci/reporter.mjs:jsonLinesReporter` and `scripts/ci/failure-redaction.mjs:redactFailure`
 
-The runner verifies one lane per discovered file, then invokes whole files with
-invocation-scoped inputs. Separate prerequisites require separate
-files. Its Node reporter emits case names, locations and outcomes without arbitrary
-output. The runner redacts messages (600 characters) and frames (240) for paths,
+The runner invokes whole files with one lane and invocation-scoped inputs.
+Separate prerequisites require separate files. The reporter emits case names,
+locations and outcomes without arbitrary output. The runner redacts messages (600 characters) and frames (240) for paths,
 nonpublic job/child environment values of eight or more characters, and known
 credential shapes; job logs use that text. Other runtime-generated values can
-remain. Provider fields retain numeric statuses and allowlisted errors; traffic
+remain. Provider fields keep numeric statuses/allowlisted errors; traffic
 diagnostics keep allowlisted categories. Plugin diagnostics retain readiness/rollout
 stages, Pod phases, readiness/scheduling flags, restart counts, exit codes and reasons.
 They exclude addresses, response bodies, credentials and identities.
@@ -160,7 +159,7 @@ Required cases must pass; every skip or TODO fails the lane. There are no counte
 The reporter projects `cause` and `AggregateError.errors` with context labels into
 message/stack fields: at most 32 values/eight levels. It marks cycles/limits and
 keeps shared siblings separate. `scripts/ci/failure-redaction.mjs:captureFailureText`
-normalizes controls and multiline key shapes, then retains complete leading/tail
+normalizes controls and contextual shapes before retaining complete leading/tail
 lines within 16,384 JavaScript UTF-16 units, including omission markers.
 Oversized lines may be omitted. Reporter flags preserve redacted tails; expanded
 labels are re-budgeted. Artifacts omit flags. Top-frame and 600-character summary
@@ -253,6 +252,8 @@ External reconciliation awaits an approved resource ledger.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-20 09:20: Preserve context before windowing. (authoring-run/bf83e367-c806-4cef-9b98-ff6d7b1f3846 - c233531705acbd852655557b894043748cc275c6)
 
 - 2026-10-20 07:20: Preserve diagnostic traces and cleanup anchors. (authoring-run/38d7de41-ba23-47a0-8084-a11002084ce3 - ca20ea0e3ef4f82a129223a187bd68c03eb2f4a6)
 

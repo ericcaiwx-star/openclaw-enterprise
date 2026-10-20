@@ -322,8 +322,8 @@ UTF-16 units each, and 400 output lines; `omittedFailureFiles` counts the rest.
 Labelled causes/siblings share each cap across 32 values/eight levels; cycles/limits
 are marked. Long reported test-failure fields retain complete leading lines (up to 4,096 units) and
 tail lines within the remaining budget, including a counted marker. Oversized
-single lines may be omitted. This reporter path normalizes controls and multiline
-key shapes first, and re-budgets after redaction; private flags never reach artifacts. Existing redaction and
+single lines may be omitted. This reporter path normalizes controls and context-dependent
+shapes first, and re-budgets after redaction; private flags never reach artifacts. Existing redaction and
 credential-line drops apply; unrecognized runtime-minted values can remain,
 so tests must not print secrets. Each record's `reason` distinguishes timeout
 (running tests and output so far, with `omittedLines`) from preparation failure

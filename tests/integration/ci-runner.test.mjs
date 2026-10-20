@@ -2424,6 +2424,20 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
       '  const output = Array.from({ length: 1000 }, (_, i) => "ordinary progress " + i + " " + process.env.LONG_SYNTHETIC_ENVIRONMENT_FIXTURE_NAME);',
       '  throw new Error(["ordinary wrapper failed", ...output, "ordinary wrapper stderr: final dependency failure", `final env ${process.env.CI_RUNNER_FIXTURE_CREDENTIAL}`].join("\\n"));',
       "});",
+      // These harmless values are deliberately absent from the environment. The
+      // actual reporter and artifact consumer must preserve their surrounding context.
+      'for (const kind of ["object", "array", "quoted"]) {',
+      '  test("multiline assignment " + kind, () => {',
+      '    const before = Array.from({ length: 200 }, (_, i) => "ordinary before " + i + " " + "x".repeat(60));',
+      '    const middle = Array.from({ length: 40 }, (_, i) => "ordinary middle " + i + " " + "x".repeat(60));',
+      '    const after = Array.from({ length: 150 }, (_, i) => "ordinary after " + i + " " + "x".repeat(60));',
+      '    const value = "fictional-context-value-" + kind;',
+      '    const open = kind === "object" ? "{" : kind === "array" ? "[" : String.fromCharCode(34);',
+      '    const close = kind === "object" ? "}" : kind === "array" ? "]" : String.fromCharCode(34);',
+      '    const body = kind === "object" ? JSON.stringify({ current: value }) : value;',
+      '    throw new Error(["ordinary assignment wrapper", ...before, "client_secret: " + open, ...middle, body, close, ...after, "ordinary final after assignment"].join("\\n"));',
+      "  });",
+      "}",
       'test("multiline key boundary", () => {',
       '  const before = "ordinary before\\n".repeat(500);',
       '  const body = Array.from({ length: 500 }, (_, i) => "synthetic-pem-body-" + i + " " + "x".repeat(80));',
@@ -2591,6 +2605,16 @@ test("run keeps a failed file's whole messages, stacks and output in the diagnos
   assert.match(multiline.message, /final env \[env:CI_RUNNER_FIXTURE_CREDENTIAL\]$/);
   assert.ok(multiline.message.length <= 16_384);
   assert.ok(multiline.stack.length <= 16_384);
+  for (const kind of ["object", "array", "quoted"]) {
+    const assignment = details.get(`multiline assignment ${kind}`);
+    assert.match(assignment.message, /^ordinary assignment wrapper\n/);
+    assert.match(assignment.message, /ordinary final after assignment$/);
+    assert.ok(assignment.message.length <= 16_384);
+    assert.ok(assignment.stack.length <= 16_384);
+  }
+  assert.doesNotMatch(text, /fictional-context-value/);
+  assert.doesNotMatch(JSON.stringify(summary), /fictional-context-value/);
+  assert.doesNotMatch(result.stderr, /fictional-context-value/);
   assert.match(details.get("multiline key boundary").message, /ordinary final after key$/);
   assert.doesNotMatch(text, /synthetic-pem-body/);
   assert.doesNotMatch(text, /messageCompleteLines|stackCompleteLines/);

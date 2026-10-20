@@ -201,11 +201,26 @@ export function failureSecrets(environments) {
   return [...values].sort(([a], [b]) => b.length - a.length);
 }
 
+// Apply context-dependent rules while their full input is available. Both the
+// reporter's window and the final redactor use these existing shape rules.
+function redactShapes(text) {
+  let result = text;
+  for (const shape of secretShapes) {
+    result =
+      shape === authSchemeShape
+        ? result.replace(shape, (_, quote) => `${quote}[redacted]`)
+        : result.replace(shape, "[redacted]");
+  }
+  return redactSecretAssignments(result).replace(urlCredential, "://[redacted]@");
+}
+
 // Capture keeps bounded complete lines from both ends. Normalize controls and
-// whole multiline key shapes before windowing, so a window cannot orphan a body.
+// whole context-dependent shapes before windowing, so a window cannot orphan a value.
 // The budget is JavaScript UTF-16 units, including the omission marker.
+// After repeated nested captures, omission counts describe the current input,
+// so they only approximate how much original text was omitted.
 export function captureFailureText(text) {
-  const value = stripControl(text).replace(privateKeyShape, "[redacted]");
+  const value = redactShapes(stripControl(text));
   if (value.length <= failureInputLimit) {
     return value;
   }
@@ -232,15 +247,7 @@ function redactText(text, limit, secrets, root, cut = text?.length >= failureInp
   for (const [value, name] of secrets) {
     result = result.replaceAll(value, `[env:${name}]`);
   }
-  for (const shape of secretShapes) {
-    result =
-      shape === authSchemeShape
-        ? result.replace(shape, (_, quote) => `${quote}[redacted]`)
-        : result.replace(shape, "[redacted]");
-  }
-  result = redactSecretAssignments(result)
-    .replace(urlCredential, "://[redacted]@")
-    .replace(/[^\P{Cc}\n\t]/gu, "");
+  result = redactShapes(result).replace(/[^\P{Cc}\n\t]/gu, "");
   if (cut) {
     // The reporter's cut can split a value so no rule matches it; drop that tail.
     const longest = secrets[0]?.[0].length ?? 0;
