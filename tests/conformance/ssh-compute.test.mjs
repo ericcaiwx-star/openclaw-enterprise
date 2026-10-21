@@ -1293,6 +1293,62 @@ test("SSH preparation retries after rollback removes the private group", async (
   assert.equal(marker.gid, process.getgid());
 });
 
+for (const userRemains of [false, true]) {
+  const name = userRemains
+    ? "SSH preparation retains a kept claim when only the user remains"
+    : "SSH preparation resumes a kept claim after rollback removed both entries";
+  test(name, async (t) => {
+    const f = await fixture(t);
+    const rev = revision(f.driver, 1, "agent-ssh-rollback-stale-claim");
+    const account = runtimeAccountName(tenant, rev.agentId, f.configured.runtime.user);
+    assert.equal((await f.driver.ensureNamespace(tenant)).namespaceReady, true);
+    bind(f.driver, rev);
+    // Cleanup removes both entries, but its failed lookup must retain the claim.
+    await writeFile(join(f.state, "useradd.lookup-fail"), "once");
+    await writeFile(join(f.state, "userdel.remove-group"), "enabled");
+    await writeFile(join(f.state, "userdel.lookup-fail"), "once");
+    await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+    const userPath = join(f.state, "accounts", "users", account);
+    const groupPath = join(f.state, "accounts", "groups", account);
+    await missing(userPath);
+    await missing(groupPath);
+    const markerPath = join(f.root, "accounts", `${account}.json`);
+    const keptBytes = await readFile(markerPath, "utf8");
+    const kept = JSON.parse(keptBytes);
+    assert.equal(kept.pending, true);
+    assert.equal(kept.groupCreated, true);
+    const logPath = join(f.state, "accounts.log");
+    const beforeRetry = await readFile(logPath, "utf8");
+    // A further lookup error must not reset the retained claim or create accounts.
+    await writeFile(join(f.state, "getent.fail"), "once");
+    await assert.rejects(f.driver.prepareRevision(rev), /failed or timed out/);
+    assert.equal(await readFile(markerPath, "utf8"), keptBytes);
+    assert.equal(await readFile(logPath, "utf8"), beforeRetry);
+    if (userRemains) {
+      // A local user can outlive its named group; that is not confirmed absence.
+      const user = `${process.getuid()}\n${process.getgid()}\n`;
+      await writeFile(userPath, user);
+      await assert.rejects(
+        f.driver.prepareRevision(rev),
+        /failed or timed out|foreign ownership|snapshot/,
+      );
+      assert.equal(await readFile(markerPath, "utf8"), keptBytes);
+      assert.equal(await readFile(userPath, "utf8"), user);
+      assert.equal(await readFile(logPath, "utf8"), beforeRetry);
+      await missing(groupPath);
+      return;
+    }
+    // Confirmed absence permits a fresh attempt instead of reusing the missing group.
+    assert.equal((await f.driver.prepareRevision(rev)).ready, true);
+    const log = await readFile(logPath, "utf8");
+    assert.equal(log.split("\n").filter((line) => line === `groupadd ${account}`).length, 2);
+    const marker = await json(markerPath);
+    assert.equal(marker.pending, undefined);
+    assert.equal(marker.uid, process.getuid());
+    assert.equal(marker.gid, process.getgid());
+  });
+}
+
 test("SSH resume keeps a pending claim when account lookups fail", async (t) => {
   const f = await fixture(t);
   const rev = revision(f.driver, 1, "agent-ssh-lookup-fail");

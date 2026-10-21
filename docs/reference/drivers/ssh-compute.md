@@ -133,7 +133,10 @@ then records the local gid of the group this helper created. An interrupted
 then stores the uid and gid. For a group created during a failed attempt,
 rollback clears the claim only after both local entries are confirmed absent,
 including when `userdel` removed the private group. Remaining entries or failed
-checks retain that claim. If the helper is killed after `groupadd` returns
+checks retain that claim. If a later preparation confirms that both local
+entries are absent, it resets the retained claim to a fresh one and requires
+`groupadd` to create the group again. Failed checks leave the retained claim
+unchanged. If the helper is killed after `groupadd` returns
 and before that gid is recorded, the group exists and the claim does not record
 `groupCreated`. The next preparation refuses the group and does not adopt it.
 Deleting the Namespace or Agent removes the claim and leaves the group. The

@@ -1,7 +1,7 @@
 ---
 created: 2026-09-07
-updated: 2026-10-21
-last_updated_session: authoring-run/a8cd3da0-89d1-42c4-889b-944be56156f2
+updated: 2026-10-22
+last_updated_session: authoring-run/42f58451-fded-4bed-8b34-e0c7217c2665
 ---
 
 <a id="pr-24-ssh-compute-flow"></a>
@@ -136,7 +136,10 @@ and its claim is removed so retry and deletion cannot treat that user as owned. 
 then fails before it returns, the claim stays so that resume can finish. For a
 group created during the failed attempt, rollback clears the claim once both
 local entries are confirmed absent, even if `userdel` removed the private group.
-Remaining entries or failed checks retain that claim. Namespace
+Remaining entries or failed checks retain that claim. If a later preparation
+confirms that both local entries are absent, it resets the retained claim to a
+fresh one and requires `groupadd` to create the group again. Failed checks leave
+the retained claim unchanged. Namespace
 deletion still clears the claim when the recorded group is already gone. A different ServicePrincipal does not
 match the claim and is refused before account commands. An account with no
 marker is not adopted. The
@@ -242,6 +245,8 @@ retire, which frees its gateway port.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-22 00:01: Restart a retained pending claim through fresh group creation after both local entries are confirmed absent; lookup errors leave the claim unchanged. (authoring-run/42f58451-fded-4bed-8b34-e0c7217c2665 - 8aa91ba91fe62a26b4ee4cd9a6d20a216470b3ad)
 
 - 2026-10-21 04:58: Clear a rolled-back preparation claim after both local account entries are confirmed absent, including private-group removal by `userdel`. (authoring-run/a8cd3da0-89d1-42c4-889b-944be56156f2 - 9d64343f63cab523c5841ad6a5c640834f23e753)
 

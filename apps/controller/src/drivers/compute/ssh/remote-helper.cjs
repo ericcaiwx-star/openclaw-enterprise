@@ -415,6 +415,17 @@ async function ensureRuntimeIdentity(input) {
     if (marker.uid !== undefined || (marker.gid !== undefined && marker.groupCreated !== true)) {
       throw new OwnershipFailure("Runtime account ownership marker differs.");
     }
+    // Interrupted or uncertain rollback can leave a claim with no local account.
+    // Drop its recorded creation state only after both entries are absent.
+    if (
+      marker.groupCreated === true &&
+      (await localEntry("group", name)) === undefined &&
+      (await localEntry("passwd", name)) === undefined
+    ) {
+      marker = { ...expected, pending: true };
+      atomicWrite(markerPath, JSON.stringify(marker));
+      claimedThisRun = true;
+    }
   }
 
   let groupCreatedThisRun = false;
