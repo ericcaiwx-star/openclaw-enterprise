@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { connect, createServer } from "node:net";
 import { availableParallelism } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,12 +18,15 @@ import { nodeTestSummary } from "../helpers/node-test-summary.mjs";
 import {
   assertStderrMatch,
   fixture,
+  fixtureCommandServer,
   fixtureImageCommands,
   fixturePreparationMetrics,
+  forwardedEnv,
   immutableImage,
   mutableImage,
   nodeBaseImage,
   spawnResult,
+  writeFixtureCommand,
 } from "../helpers/ci-prepare-fixture.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
@@ -309,6 +313,73 @@ describe("CI preparation", { concurrency }, () => {
       );
     });
   }
+
+  // The fakes' command server listens on loopback, where any local user can connect. It
+  // must run nothing for a request without its client token (the same request with the
+  // token writes the metadata file), and a shim must run nothing from another listener.
+  test("the fake command server and its shims run nothing for each other's impostors", async (t) => {
+    const root = await fixture(t);
+    const server = await fixtureCommandServer(t, root);
+    const metadata = join(root, "metadata.json");
+    const args = [
+      "buildx",
+      "build",
+      "--output",
+      "type=image,push=false,store=false",
+      "--provenance=false",
+      "--metadata-file",
+      metadata,
+      ".",
+    ];
+    // A shim's complete request: its argv, then each forwarded variable ("=" + value if set).
+    const env = forwardedEnv.map((name) => (name === "CI_FIXTURE_SCENARIO" ? "=success" : ""));
+    const request = (token) =>
+      new Promise((resolve, reject) => {
+        const fields = [...token, "docker", root, String(args.length), ...args, ...env];
+        let reply = "";
+        const socket = connect(server.port, "127.0.0.1", () =>
+          socket.write(fields.map((field) => field + "\0").join("")),
+        );
+        socket.setTimeout(30_000, () => {
+          socket.destroy();
+          reject(new Error("the command server neither answered nor closed the connection"));
+        });
+        socket.setEncoding("utf8");
+        socket.on("data", (chunk) => (reply += chunk));
+        // The server may reset the connection it refuses.
+        socket.on("error", (error) => error.code === "ECONNRESET" || reject(error));
+        socket.on("close", () => resolve(reply));
+      });
+    // The protocol without a token, a wrong token, and the server token sent back.
+    for (const token of [[], ["0".repeat(64)], [server.serverToken]]) {
+      assert.equal(await request(token), "", "an unauthenticated client gets no reply");
+    }
+    // Read, not stat: nothing was written, and no check precedes the read below.
+    await assert.rejects(readFile(join(root, "commands.jsonl")), { code: "ENOENT" });
+    await assert.rejects(readFile(metadata), { code: "ENOENT" });
+    const served = await request([server.clientToken]);
+    assert.match(served, new RegExp(`^${server.serverToken}\n[^]*exit 0\n$`));
+    assert.equal(
+      JSON.parse(await readFile(metadata, "utf8"))["containerimage.config.digest"],
+      "sha256:" + "f".repeat(64),
+    );
+
+    // A listener that is not the fixture's server, as if another user took the port.
+    const impostor = createServer((socket) => {
+      socket.on("error", () => {});
+      socket.once("data", () => socket.end("printf impostor-ran\nexit 0\n"));
+    });
+    await new Promise((resolve) => impostor.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => impostor.close(resolve)));
+    const misdirected = join(root, "misdirected-docker");
+    await writeFixtureCommand(misdirected, "docker", server, impostor.address().port);
+    const refused = await spawnResult(misdirected, ["version"], {
+      env: { PATH: "/nonexistent", CI_FIXTURE_SCENARIO: "success" },
+    });
+    assert.equal(refused.status, 125);
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /fixture command server did not authenticate/);
+  });
 
   // A hosted image lane's cache inputs; the token must reach no build argument or output.
   const imageCacheEnv = {
@@ -1038,11 +1109,12 @@ assert.equal(app.host, migrator.host);
 assert.equal(app.pathname, migrator.pathname);
 assert.equal(app.pathname, "/" + selected.env.OCC_TEST_NATIVE_IAM_BARRIER_DATABASE);
 assert.match(app.pathname, /^\\/openclaw_ci_postgres_native_iam_policy_barrier_[a-f0-9]{12}$/);
+const databases = (state) => state.resources.filter((resource) => resource.kind === "postgres-database" && resource.laneTemplate === undefined);
 const prepared = JSON.parse(await readFile(statePath, "utf8"));
-assert.equal(prepared.resources.filter((resource) => resource.kind === "postgres-database").length, 1);
+assert.equal(databases(prepared).length, 1);
 await selected.cleanup();
 const settled = JSON.parse(await readFile(statePath, "utf8"));
-assert.equal(settled.resources.filter((resource) => resource.kind === "postgres-database").length, 0);
+assert.equal(databases(settled).length, 0);
 const other = await prepareFile({
   lane,
   file: "tests/integration/postgres-worker-agent-revision.test.mjs",
@@ -1053,7 +1125,8 @@ assert.equal(other.env.OCC_TEST_NATIVE_IAM_BARRIER_DATABASE, undefined);
 assert.equal(other.env.OCC_TEST_NATIVE_IAM_BARRIER_MIGRATION_DATABASE_URL, undefined);
 await other.cleanup();
 const finalState = JSON.parse(await readFile(statePath, "utf8"));
-assert.equal(finalState.resources.length, 1);
+// The server and its lane template, which lane cleanup drops.
+assert.deepEqual(finalState.resources.map(({ kind, laneTemplate }) => [kind, laneTemplate]), [["compose-postgres", undefined], ["postgres-database", "ci"]]);
 `;
     const fakeEnv = {
       PATH: root,
@@ -1066,10 +1139,13 @@ assert.equal(finalState.resources.length, 1);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "");
     const commandLog = (await readFile(logPath, "utf8")).trim().split("\n");
-    assert.equal(commandLog.length, 8);
+    // One migrated lane template, then a copy per file.
+    assert.equal(commandLog.length, 9);
+    assert.equal(commandLog.filter((line) => line.startsWith("migrate\t")).length, 1);
     const createCommands = commandLog.filter((line) => line.includes("CREATE DATABASE"));
     const dropCommands = commandLog.filter((line) => line.includes("DROP DATABASE"));
-    assert.equal(createCommands.length, 2);
+    assert.equal(createCommands.length, 3);
+    assert.equal(createCommands.filter((line) => line.includes(" TEMPLATE ")).length, 2);
     assert.equal(dropCommands.length, 2);
     assert.ok(createCommands.every((line) => line.startsWith("docker-exec\tCREATE DATABASE ")));
     const githubEnv = join(root, "github.env");
@@ -1096,7 +1172,7 @@ assert.equal(finalState.resources.length, 1);
       assert.match(blocked.stderr, /must be prepared within the test runner/);
       await assert.rejects(() => stat(githubEnv), { code: "ENOENT" });
     }
-    assert.equal((await readFile(logPath, "utf8")).trim().split("\n").length, 8);
+    assert.equal((await readFile(logPath, "utf8")).trim().split("\n").length, 9);
   });
 
   test("prepareFile copies a per-test database from a ready template it owns without migrating", async (t) => {
@@ -1179,7 +1255,8 @@ assert.deepEqual(
 );
 await copy.cleanup();
 await template.cleanup();
-console.error(new URL(template.env.OCC_TEST_DATABASE_URL).pathname.slice(1) + " " + copied.pathname.slice(1));
+const laneTemplate = prepared.resources.find((resource) => resource.laneTemplate === "ci").name;
+console.error(laneTemplate + " " + new URL(template.env.OCC_TEST_DATABASE_URL).pathname.slice(1) + " " + copied.pathname.slice(1));
 `;
     const result = await runProgram(
       program,
@@ -1194,12 +1271,16 @@ console.error(new URL(template.env.OCC_TEST_DATABASE_URL).pathname.slice(1) + " 
       20_000,
     );
     assert.equal(result.status, 0, result.stderr);
-    const [templateName, copyName] = result.stderr.trim().split(" ");
+    const [laneTemplateName, templateName, copyName] = result.stderr.trim().split(" ");
+    assert.match(laneTemplateName, /^openclaw_ci_lane_template_[a-f0-9]{12}$/);
     assert.deepEqual((await readFile(logPath, "utf8")).trim().split("\n"), [
-      `docker-exec\tpostgres\tCREATE DATABASE "${templateName}"`,
-      `docker-exec\t${templateName}\tGRANT CREATE ON DATABASE "${templateName}" TO occ_migrator; CREATE SCHEMA occ AUTHORIZATION occ_migrator; CREATE SCHEMA drizzle AUTHORIZATION occ_migrator; REVOKE CREATE ON SCHEMA public FROM PUBLIC;`,
-      `migrate\t/${templateName}`,
-      // The copy keeps the template's schemas and migrations; only the database grant is new.
+      // The lane's one migration, which each file's database copies.
+      `docker-exec\tpostgres\tCREATE DATABASE "${laneTemplateName}"`,
+      `docker-exec\t${laneTemplateName}\tGRANT CREATE ON DATABASE "${laneTemplateName}" TO occ_migrator; CREATE SCHEMA occ AUTHORIZATION occ_migrator; CREATE SCHEMA drizzle AUTHORIZATION occ_migrator; REVOKE CREATE ON SCHEMA public FROM PUBLIC;`,
+      `migrate\t/${laneTemplateName}`,
+      // A copy keeps the template's schemas and migrations; only the database grant is new.
+      `docker-exec\tpostgres\tCREATE DATABASE "${templateName}" TEMPLATE "${laneTemplateName}"`,
+      `docker-exec\t${templateName}\tGRANT CREATE ON DATABASE "${templateName}" TO occ_migrator;`,
       `docker-exec\tpostgres\tCREATE DATABASE "${copyName}" TEMPLATE "${templateName}"`,
       `docker-exec\t${copyName}\tGRANT CREATE ON DATABASE "${copyName}" TO occ_migrator;`,
       `docker-exec\tpostgres\tDROP DATABASE IF EXISTS "${copyName}" WITH (FORCE)`,
@@ -1251,7 +1332,16 @@ await template.cleanup();
       assert.equal(result.status, 0, result.stderr);
     }
     const settled = JSON.parse(await readFile(statePath, "utf8"));
-    assert.deepEqual(settled.resources, [server]);
+    // Both processes copied one lane template, which stays until lane cleanup.
+    assert.deepEqual(settled.resources[0], server);
+    assert.deepEqual(
+      settled.resources.slice(1).map(({ kind, laneTemplate, status }) => ({
+        kind,
+        laneTemplate,
+        status,
+      })),
+      [{ kind: "postgres-database", laneTemplate: "ci", status: "ready" }],
+    );
     assert.deepEqual((await readdir(root)).sort(), [
       "fake-corepack.mjs",
       "fake-docker.mjs",
