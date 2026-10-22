@@ -6,9 +6,9 @@ This reference owns worker, compose, and postgresql settings. Start with the
 ## PostgreSQL connection authentication
 
 Both PostgreSQL API modes, the worker, shared Installation bootstrap, and
-both migration commands use the same connection pool factory.
-`OCC_DATABASE_AUTH` defaults to `password`, which preserves PostgreSQL URL
-credentials. The other supported mode is `azure-workload-identity`; unknown
+migration commands use the same connection pool factory.
+`OCC_DATABASE_AUTH` defaults to `password`, preserving PostgreSQL URL
+credentials. Its other mode is `azure-workload-identity`; unknown
 modes fail before opening a pool.
 
 | Variable                     | Requirement in Azure workload-identity mode                          |
@@ -27,11 +27,10 @@ application and migrator database roles separate: API, worker, and bootstrap
 use `OCC_DATABASE_URL`; migrations use `OCC_MIGRATION_DATABASE_URL` with the
 migrator identity.
 
-Each new pool connection requests an access token through the Azure SDK's
-`WorkloadIdentityCredential` for
-`https://ossrdbms-aad.database.windows.net/.default`. The SDK owns token caching
+Each new pool connection requests an Azure SDK `WorkloadIdentityCredential` token
+for `https://ossrdbms-aad.database.windows.net/.default`. The SDK handles caching
 and renewal; OCC does not persist tokens or fall back to a developer login.
-Use `pnpm db:migrate` or `pnpm db:migrate:production` for migrations in this mode.
+Use `pnpm db:migrate` or `pnpm db:migrate:production` in this mode.
 
 See [operator setup](../../guides/deploy/production-installation.md#azure-postgresql-workload-identity)
 for deployment-owned identity inputs and chart limits, and
@@ -52,17 +51,8 @@ Classify a database without applying migrations:
 pnpm db:migrate --check
 ```
 
-An exit-0 `migration.checked` record reports one reviewed history shape:
-`empty`, `prePresetsMain`, `main`, `repositoryCredentials`,
-`repositoryRetention`, `workspaceSetup`, `agentProvisioning`,
-`backendCompleted`, `providerCompleted`, `backendTerminology`, `prePluginApprovers`,
-`preBrokerReceipts`, `preAgentDeletion`, `preDeploymentProgress`,
-`preHumanAuthentication`, `preAgentDeletionTakeover`,
-`preNamespaceDeletionTakeover`, `preRepositoryAccess`, `preRestrictionReadLogs`,
-`preOAuth`, `preCredentialWithdrawals`, `preBrokerReceiptFence`,
-`preModelProbeFailureCause`, `preProvisioningConfigurationRelease`, `preAdministratorCredentialSourceGrants`,
-`preCodexPatSources`, `preAgentCredentialSources`,
-`preCredentialWithdrawalRequester`, or `completed`.
+Exit 0 and `migration.checked` identify the recognized history: `empty`, a stage
+below, or `completed`.
 `prePresetsMain` means
 the exact canonical history through `0023_runtime_failure_timestamp_validation`;
 `main` also includes `0024_agent_presets`. `repositoryCredentials` adds
@@ -91,46 +81,51 @@ has 46 through `0046_model_probe_failure_cause`;
 `0047_provisioning_configuration_release`; `preCodexPatSources` has 48 through
 `0048_administrator_credential_source_grants`; `preAgentCredentialSources` has 49
 through `0049_codex_pat_sources`; `preCredentialWithdrawalRequester` has 50
-through `0050_agent_credential_sources`. `completed` is the current canonical
-history with all receipts, including `0051_credential_withdrawal_requester`.
-The source manifest is
-[`migrations/meta/canonical-history.json`](../../../migrations/meta/canonical-history.json).
+through `0050_agent_credential_sources`; later `pre*` shapes add one each, through
+`preCredentialProxy` (59, through `0059_administrator_sandbox_policy_grants`).
+The three credential migrations bring this history to `completed` with 62 receipts.
+The [canonical manifest](../../../migrations/meta/_canonical-history.json) records
+accepted source hashes and catalogs. Intermediate pre-merge preview histories
+are unsupported; do not delete or relabel their receipts.
 Empty schemas may be absent or have only their owner's ordinary `CREATE` and
 `USAGE` privileges, with no objects or unexpected default privileges. An empty
 stock Drizzle ledger left by a rolled-back first migration is also supported.
 
-Run `pnpm db:migrate` for development or `pnpm db:migrate:production` for
-production after a successful check. Both commands validate source hashes,
+After a successful check, confirm the target and authorization. Run `pnpm db:migrate`
+for development or `pnpm db:migrate:production` for production. Both commands validate source hashes,
 receipts, catalog definitions, effective application privileges, and role
 separation under one PostgreSQL advisory lock. Drizzle applies the pending SQL
-and receipts in its normal transaction on that same connection. Existing
-canonical receipts remain unchanged. `--check` is also accepted by the
-production command.
+and receipts in its normal transaction on that connection. Existing canonical
+receipts remain unchanged. The production command also accepts `--check`.
 
-The compatibility migration appends a new receipt instead of rewriting either
-published 31-receipt history. On a Provider terminology database it renames the
-owned relational columns, admitted harness and repository bindings, preset
-templates, retained repository cleanup contexts, accepted provisioning plans,
-validation functions, and trigger definitions to Backend terminology. It
-preserves unrelated Provider terms such as Better Auth `account.provider_id`,
+On first install, Helm adds `--expect-empty`. `MIGRATION_HISTORY_NOT_EMPTY`
+means migration stopped before changing recognized OCE history, not that the
+history is corrupt. Inspect the original attempt and confirm the target.
+`empty` describes OCE schemas, not the whole database or its identity.
+`--check` inspects without migrating; it cannot authorize a retry. Upgrades,
+recovery, and unflagged migrations are unchanged. Older controller images
+reject the unknown option.
+
+Compatibility appends a receipt without rewriting either published 31-receipt
+history. On Provider terminology databases, it renames owned relational columns,
+admitted harness and repository bindings, preset templates, retained repository
+cleanup contexts, accepted provisioning plans, validation functions, and triggers
+to Backend terminology. It preserves unrelated Provider terms: Better Auth `account.provider_id`,
 model Provider catalogs, gateway authentication providers, repository grant
-`providerInstanceId`, and historical audit payloads. Existing terminal
-provisioning rows keep their `request_fingerprint` as historical idempotency
-evidence while the accepted plan JSON is rewritten from `providerId` to
-`backendId`. Replaying the old public Provider-shaped request against the
-renamed API is a distinct request and receives a distinct fingerprint. The
-preflight and migration both refuse a persisted object that contains both old
-and new keys at one of these owned paths.
+`providerInstanceId`, and historical audit payloads. Terminal provisioning rows
+keep `request_fingerprint` as historical idempotency evidence while accepted
+plan JSON changes `providerId` to `backendId`. Replaying an old Provider-shaped
+request against the renamed API is a distinct request with a distinct fingerprint.
+Preflight and migration refuse persisted objects with both keys at an owned path.
 
 `MIGRATION_HISTORY_UNSUPPORTED` means the command refused before migration DDL.
-Mixed Provider and Backend receipt histories, partial manual edits, and the
-earlier development history that installed repository credentials at index 24
-without Agent presets are unsupported, even if all of their own migrations
-completed. They cannot be converted by renaming or rewriting applied receipts.
-Do not edit the ledger, run Drizzle directly to bypass the check, or restore an
-old schema over the canonical one. A failed or disconnected migration is not
-proof of rollback: reconnect, run `--check`, and inspect the retained database
-before deciding whether another attempt is appropriate.
+Mixed Provider/Backend histories, partial manual edits, and the development
+history that installed repository credentials at index 24 without Agent presets
+remain unsupported even if their migrations completed. Renaming or rewriting
+receipts cannot convert them. Do not edit the ledger, bypass the check with
+Drizzle, or restore an old schema over the canonical one. A failed or disconnected
+migration does not prove rollback: reconnect, run `--check`, and inspect the
+retained database before considering another attempt.
 
 ### Clear legacy managed PAT bindings before `0049`
 
@@ -172,14 +167,13 @@ host/port/name, and Installation ID. The database-only
 default project names. `pnpm db:down` stops only its selected database-only
 project and retains its volume.
 
-For an unsupported premerge history, choose either to retain the old
-installation and start a separately configured fresh one, or to discard that
-specific disposable installation. Preserve any needed database/storage archive
-and protected bootstrap output first. An archive is not a supported import into
-the canonical history; a whole-database restore would restore the unsupported
-ledger too. There is no general reset, conversion, or reseed command. Recreate
-selected business data through its owning supported API or import procedure.
-Account for outstanding Agent resources and credential cleanup before disposal;
+For unsupported premerge history, retain the old installation and separately
+configure a fresh one, or discard that specific disposable installation. Preserve
+needed database/storage archives and protected bootstrap output first. Archives
+are not supported imports into canonical history; whole-database restore also
+restores the unsupported ledger. No general reset, conversion, or reseed exists.
+Recreate selected business data through its owning supported API or import
+procedure. Account for Agent resources and credential cleanup before disposal:
 removing control-plane storage does not retire external resources or grants.
 
 For Docker or Podman, copy the exact `Cleanup` command printed by the original
@@ -344,7 +338,7 @@ dedicated role:
 docker compose -f compose.postgres.yaml up -d --wait
 
 export OCC_MIGRATION_DATABASE_URL=postgresql://occ_migrator:occ-migrator-local@127.0.0.1:55432/openclaw_enterprise
-node_modules/.bin/drizzle-kit migrate
+pnpm db:migrate
 ```
 
 Add the application connection URL to the [required development controller environment](development.md#required-development-controller-environment), then initialize before starting the same server manually. Use an
