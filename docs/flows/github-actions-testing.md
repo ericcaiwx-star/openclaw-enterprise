@@ -1,7 +1,7 @@
 ---
 created: 2026-09-04
-updated: 2026-10-21
-last_updated_session: authoring-run/458f4777-70d1-4992-a922-ab387c6a4aba
+updated: 2026-10-23
+last_updated_session: authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d
 ---
 
 # GitHub Actions testing flow
@@ -66,13 +66,9 @@ CI uses the event checkout without external service credentials. Impact and Suit
 
 For a PR, the selector verifies the tested checkout and that the event head is the merge's second parent, then compares the first parent (the current base) and tested trees. Git path decoding preserves a leading UTF-8 BOM as filename data; paths outside the allowlist select full. API reference outputs and Markdown under `docs/reference/api/` select full for `openapi:check`. Only nonempty changes to allowlisted regular Markdown files select docs mode. Registered test files (with documentation and their own lane manifest entries) select tests mode: their `ci` lanes in either tree (`checks-baseline-1` if only the fixture job would run). Other test-tree, code, configuration, workflow or unknown changes and non-PR events select full. Missing or unverifiable policy or source evidence selects full or fails closed. Policy comes from that first parent; a base without it selects full. `CI Required` re-verifies the mode (and tests mode's lane set) and requires impact, audit and every selected job to succeed and the rest skipped. Full and tests modes aggregate same-source results of their lanes; docs mode does not aggregate or invent test artifacts.
 
-The impact summary shows the mode, a fixed reason category, and accepted test
-lanes. Selector failures fail the job; unavailable evidence reports unavailable.
-The summary includes no changed paths or arbitrary selector output.
+The impact summary reports mode, reason category and accepted test lanes. Selector failures fail the job; missing evidence reports unavailable. It excludes paths and arbitrary selector output.
 
-For full-mode PRs, `affected-packages` verifies merge identity and checkout
-cleanliness, then reports declared workspace dependents. It is advisory and does
-not select tests or gate `CI Required`.
+For full-mode PRs, `affected-packages` verifies merge identity and checkout cleanliness, then reports workspace dependents. This advisory neither selects tests nor gates `CI Required`.
 
 A PR can change the workflow loaded from its merge checkout despite base-loaded
 policy. Separately trusted enforcement is a deployment decision, not an
@@ -95,7 +91,7 @@ The application lane gives the native IAM barrier test its own migrated PostgreS
 
 Full CI and Full Integration call the [run-ci-lane action](../../.github/actions/run-ci-lane/action.yml) for setup, selected baseline checks, preparation, execution, unconditional cleanup, and sanitized result upload. Callers own the commit, protected environment, explicit credentials and timeout; tests stop five minutes earlier.
 
-Ordinary PR dependency caches may be restored and saved within GitHub's PR merge-ref scope. Main jobs use main-scoped caches. Test results and credential-bearing state are not dependency caches, and protected jobs do not promote PR build artifacts.
+PR dependency caches stay within GitHub's PR merge-ref scope; main caches stay main-scoped. Results and credential-bearing state are not caches; protected jobs do not promote PR artifacts.
 
 The provider job uses the shared `blacksmith-8vcpu-ubuntu-2404` runner for image-build and k3d-import disk headroom; standard Ubuntu reached `DiskPressure` and evicted the seccomp probe before startup. Preparation copies the archive to each owned k3d node for node-local `ctr image import`; k3d `tools-node` can report success despite logged per-node failures. Imported manifest and CRI checks remain required before tests.
 
@@ -113,7 +109,7 @@ Kubernetes preparation records host snapshots. Failed reads, bounded
 by time and size, save `<state-file>.diagnostics.json` outside the cluster directory.
 These lanes use `--no-rollback`; workflows own teardown after capture, while
 local callers use the failed state file. Observation failures preserve the original error. `nodeLogExcerpt` orders Docker streams
-and retry summaries by full UTC timestamp precision. See the [CI guide](../testing/ci.md).
+and retry summaries by full UTC timestamp precision using locale-independent ASCII comparison ([CI guide](../testing/ci.md)).
 
 Tests delete Agent namespaces and their events before file exit. While each file
 runs, `scripts/ci/run-tests.mjs:runFile` watches Compute-managed Pods and events
@@ -232,6 +228,8 @@ External reconciliation awaits an approved resource ledger.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-23 03:43: Order Docker timestamps and retain twelve latest retry kinds independently of locale. (authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d - 9bca605f5175bb225a522c3d5537a7ee6e1a7751)
 
 - 2026-10-21 04:42: Preserve submillisecond Docker event order. (authoring-run/458f4777-70d1-4992-a922-ab387c6a4aba - e8185dac805b737363c7178d3068b310a53a7c24)
 

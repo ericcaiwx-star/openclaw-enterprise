@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
@@ -807,4 +808,46 @@ test("node log retry summaries retain the latest kinds within one millisecond", 
   assert.doesNotMatch(excerpt, /against 127\.0\.0\.1:2000 /u);
   assert.match(excerpt, /against 127\.0\.0\.1:2012 /u);
   assert.match(excerpt, /omitted 1 earlier kinds of kubectl retry lines/u);
+});
+
+test("node log chronology and retry retention do not depend on the process locale", () => {
+  const moduleUrl = new URL("../../scripts/ci/k3d-diagnostics.mjs", import.meta.url).href;
+  const script = `
+    import { nodeLogExcerpt } from ${JSON.stringify(moduleUrl)};
+    const early = "2026-10-21T00:00:00.020000000Z early stderr";
+    const later = "2026-10-21T00:00:00.100000000Z later stdout";
+    const tied = "2026-10-21T00:00:00.1Z tied stderr";
+    const retries = ["020000000", "100000000", ...Array.from({ length: 11 }, (_, i) => String(i + 20) + "0000000")]
+      .map((fraction, i) => "2026-10-21T00:00:00." + fraction + "Z The connection to the server 127.0.0.1:" + (2000 + i) + " was refused");
+    console.log(JSON.stringify({
+      numeric: new Intl.Collator().resolvedOptions().numeric,
+      events: nodeLogExcerpt(later, early + "\\n" + tied).split("\\n"),
+      retries: nodeLogExcerpt(retries.join("\\n"), ""),
+    }));
+  `;
+  for (const [locale, numeric] of [
+    ["en-US", false],
+    ["en-US-u-kn-true", true],
+  ]) {
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, LANG: locale, LC_ALL: locale },
+      timeout: 10_000,
+    });
+    assert.equal(child.status, 0, child.stderr);
+    const result = JSON.parse(child.stdout);
+    assert.equal(result.numeric, numeric, locale);
+    assert.deepEqual(
+      result.events,
+      [
+        "2026-10-21T00:00:00.020000000Z early stderr",
+        "2026-10-21T00:00:00.100000000Z later stdout",
+        "2026-10-21T00:00:00.1Z tied stderr",
+      ],
+      locale,
+    );
+    assert.doesNotMatch(result.retries, /against 127\.0\.0\.1:2000 /u, locale);
+    assert.match(result.retries, /against 127\.0\.0\.1:2001 /u, locale);
+    assert.match(result.retries, /omitted 1 earlier kinds of kubectl retry lines/u, locale);
+  }
 });

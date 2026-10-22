@@ -126,6 +126,11 @@ function takeWithin(lines, { lines: maxLines = Infinity, chars }, fromEnd = fals
   return fromEnd ? taken.reverse() : taken;
 }
 
+// Canonical UTC keys contain ASCII digits and punctuation, independent of locale.
+function compareTimestamps(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 // Docker returns a container's stdout and stderr separately; --timestamps lets
 // the excerpt restore their order. Unstamped fragments (an output cap can cut a
 // stream mid-line) are dropped unread, and a redacted line keeps only its
@@ -162,7 +167,7 @@ export function nodeLogExcerpt(stdout = "", stderr = "", note) {
       });
     }
   }
-  entries.sort((a, b) => a.at.localeCompare(b.at) || a.stream - b.stream || a.index - b.index);
+  entries.sort((a, b) => compareTimestamps(a.at, b.at) || a.stream - b.stream || a.index - b.index);
   const kept = [];
   const problems = new Set();
   const retries = new Map();
@@ -188,7 +193,7 @@ export function nodeLogExcerpt(stdout = "", stderr = "", note) {
     // the order they first appeared.
     ...[...retries]
       .map((entry, order) => ({ entry, order }))
-      .sort((a, b) => b.entry[1].lastAt.localeCompare(a.entry[1].lastAt))
+      .sort((a, b) => compareTimestamps(b.entry[1].lastAt, a.entry[1].lastAt))
       .slice(0, KUBECTL_RETRY_KINDS)
       .sort((a, b) => a.order - b.order)
       .map(
