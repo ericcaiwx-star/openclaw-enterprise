@@ -1,3 +1,5 @@
+import { Check } from "typebox/value";
+import { ErrorDetail } from "@openclaw-enterprise/contracts";
 import { normalizeLoggingLevel, type LoggingLevel } from "@openclaw-enterprise/contracts";
 import pino, { type Logger } from "pino";
 
@@ -45,15 +47,18 @@ const ALLOWED_FIELDS = new Set([
   "activationMs",
   "agentId",
   "attempt",
+  "candidatePreparationReached",
   "cause",
   "code",
   "computeDriverId",
   "deployPasses",
   "dependency",
+  "details",
   "durationMs",
   "elapsedMs",
   "errorClass",
   "event",
+  "grpcStatus",
   "host",
   "keyHash",
   "lane",
@@ -72,12 +77,14 @@ const ALLOWED_FIELDS = new Set([
   "providerId",
   "readinessWaitMs",
   "reason",
+  "repositoryRef",
   "requestId",
   "restrictionIds",
   "result",
   "revisionId",
   "route",
   "sandboxDriverId",
+  "sandboxId",
   "signal",
   "skippedUserCount",
   "skippedUserIds",
@@ -85,6 +92,7 @@ const ALLOWED_FIELDS = new Set([
   "status",
   "step",
   "stopYields",
+  "validationCategory",
   "workId",
 ]);
 
@@ -215,6 +223,18 @@ function safeScalar(key: string, value: unknown): string | number | boolean | un
   if (key === "stopYields") {
     return typeof value === "number" && value >= 0 ? safeNumber(key, value) : undefined;
   }
+  if (key === "grpcStatus") {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 16
+      ? value
+      : undefined;
+  }
+  if (key === "validationCategory") {
+    return value === "POLICY_SAFETY" ||
+      value === "POLICY_MIDDLEWARE_VALIDATION" ||
+      value === "UNKNOWN"
+      ? value
+      : undefined;
+  }
   if (typeof value === "string") {
     return safeString(value);
   }
@@ -285,6 +305,19 @@ function safeAttempt(
   return Object.keys(result).length === 0 ? undefined : Object.freeze(result);
 }
 
+/** Filter startup diagnostics for logs and operator checks. */
+export function configurationLogDetails(value: readonly unknown[]) {
+  return value
+    .slice(0, 32)
+    .filter(
+      (detail): detail is ErrorDetail =>
+        Check(ErrorDetail, detail) &&
+        !resemblesCredential(`${detail.path} ${detail.message ?? ""}`) &&
+        !/\p{Cc}/u.test(`${detail.path}${detail.message ?? ""}`),
+    )
+    .map((detail) => ({ path: detail.path, code: detail.code, message: detail.message }));
+}
+
 function sanitizedEvent(
   event: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
@@ -296,10 +329,26 @@ function sanitizedEvent(
     if (key === "event" || !ALLOWED_FIELDS.has(key)) {
       continue;
     }
+    if (key === "details") {
+      if (
+        (eventName === "startup-error" || eventName === "worker.startup-error") &&
+        event.code === "DRIVER_CONFIGURATION_INVALID" &&
+        Array.isArray(value)
+      ) {
+        result.details = configurationLogDetails(value);
+      }
+      continue;
+    }
     if (
       key === "message" &&
       eventName !== "compute.preflight-warning" &&
       eventName !== "worker.compute-prepare-failed"
+    ) {
+      continue;
+    }
+    if (
+      key === "candidatePreparationReached" &&
+      (eventName !== "worker.compute-prepare-failed" || typeof value !== "boolean")
     ) {
       continue;
     }

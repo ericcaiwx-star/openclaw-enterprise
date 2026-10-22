@@ -1,7 +1,7 @@
 ---
 created: 2026-08-21
-updated: 2026-10-21
-last_updated_session: authoring-run/9c5e8c34-6292-465b-a82a-7b56e03b535d
+updated: 2026-10-23
+last_updated_session: authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d
 ---
 
 # Harness Execution Topology Flow
@@ -187,9 +187,9 @@ refs preserve native ID namespaces, including `codex/`. OpenClaw separates the
 explicit provider for thread start, resume, and turns; the Harness probe keeps the
 native ID.
 
-Kubelet probes private `/readyz` on runtime-backed workloads. Gates remain:
-Gateway plugin/native status, Codex plugin state and authenticated app-server
-WebSocket, or dedicated OpenClaw identity. Responses are bodyless `200` or `503`.
+Kubelet probes private `/readyz` on runtime-backed workloads. Gates: Gateway
+plugin status and native `/startupz` and `/readyz`, Codex plugin state and
+authenticated app-server WebSocket, or dedicated OpenClaw identity.
 While first-deploy [workspace setup](workspace-files.md) is pending, embedded
 preparation starts the replacement Gateway itself before activation. If the Gateway
 of a version that never served (its Service still selects no Pod) is unready,
@@ -299,6 +299,8 @@ owns claim sizes, mount paths, StorageClass requirements, and final teardown.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-23 07:40: Preserve upstream readiness guidance and execution peer label validation after conflict resolution. (authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d - 13f38c6206926541c354a50e92200502dae52130)
 
 - 2026-10-21 05:00: Validate execution peer label types. (authoring-run/9c5e8c34-6292-465b-a82a-7b56e03b535d - e8185dac805b737363c7178d3068b310a53a7c24)
 
