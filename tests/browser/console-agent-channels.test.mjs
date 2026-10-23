@@ -19,6 +19,7 @@ import {
   setSlackSelection,
   slackSelectionValue,
   statusTone,
+  waitForEnabled,
   waitForInputValue,
 } from "./console-agents-browser-helpers.mjs";
 
@@ -175,7 +176,7 @@ describe("Agent channels", { concurrency: 3 }, () => {
     });
     const allowEveryone = page.getByLabel("Who can use the agent in these channels?");
     assert.equal(await slackSelectionValue(allowedUsers), "UOLD123");
-    assert.equal(await allowedUsers.isDisabled(), false);
+    await waitForEnabled(allowedUsers);
     assert.equal(await allowEveryone.inputValue(), "selected");
     await setSlackSelection(channelIds, "COLD123, CNEW123");
     await setSlackSelection(allowedUsers, "UNEW123");
@@ -314,6 +315,43 @@ describe("Agent channels", { concurrency: 3 }, () => {
       assert.deepEqual(nonAuthWriteRequests(requests), []);
     });
   }
+
+  // Every deployment needs a model authentication source. An Agent with its API key bound was
+  // still told to configure model credentials "before first deploy" (finding 2063).
+  test("Channel drawer asks for model credentials only while the Agent has none", async (t) => {
+    const { fixture, namespace } = await readyNamespace(t, "notice");
+    const NOTICE = "New version. Changes affect future deployments using this Configuration.";
+    const { agent: keyed } = await createSlackAgent(fixture, namespace, {
+      name: "Keyed Agent",
+      slug: "keyed",
+    });
+    assert.equal(keyed.harnessAuth?.method, "api_key");
+    const { agent: unkeyed } = await createSlackAgent(fixture, namespace, {
+      name: "Unkeyed Agent",
+      slug: "unkeyed",
+      harnessAuth: null,
+    });
+    const { page } = await newPage(t, fixture, { browser });
+    await login(
+      page,
+      fixture,
+      detailUrl(fixture, keyed.namespaceId, keyed.id, "draft", "channels"),
+    );
+    const notice = async (agent, heading) => {
+      await page.goto(detailUrl(fixture, agent.namespaceId, agent.id, "draft", "channels").href);
+      await page.getByRole("heading", { name: heading }).waitFor();
+      await page.getByRole("button", { name: "Edit Slack" }).click();
+      const dialog = page.getByRole("dialog", { name: "Edit Slack" });
+      const text = await dialog.locator(".status").first().textContent();
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+      return text;
+    };
+    assert.equal(await notice(keyed, "Keyed Agent"), NOTICE);
+    assert.equal(
+      await notice(unkeyed, "Unkeyed Agent"),
+      `${NOTICE} Configure model credentials in the Credentials tab before deploying.`,
+    );
+  });
 
   test("Channel drawer binds existing Slack Secrets without dropping unsaved channel edits", async (t) => {
     const { fixture, namespace } = await readyNamespace(t, "Unbound Slack credentials");
@@ -588,7 +626,7 @@ describe("Agent channels", { concurrency: 3 }, () => {
     await page.getByRole("button", { name: "Save configuration" }).click();
     await dialog.getByText(/Access denied|permission/i).waitFor();
     assert.equal(await allowEveryone.inputValue(), "everyone");
-    assert.equal(await allowEveryone.isEnabled(), true);
+    await waitForEnabled(allowEveryone);
     assert.equal(await allowedUsers.isVisible(), false);
 
     const configuration = await fixture.request("GET", configurationPath);
@@ -723,9 +761,12 @@ describe("Agent channels", { concurrency: 3 }, () => {
     const dialog = page.getByRole("dialog", { name: "Edit Slack" });
     await selectSecret(dialog, "Slack app token", slackAppSecret);
     await page.getByRole("button", { name: "Save configuration" }).click();
+    // The notice names the refused grant's Request ID for the Namespace administrator it sends
+    // the operator to (finding 2195: #3207 wrapped the error and dropped it).
     await page
       .getByText(
-        "Configuration saved, but Secret access grants could not be confirmed. Reload the draft, inspect saved bindings in Agent Credentials, then ask a Namespace administrator to grant this Agent access to the saved Secret.",
+        "Configuration saved, but Secret access grants could not be confirmed. Reload the draft, inspect saved bindings in Agent Credentials, then ask a Namespace administrator to grant this Agent access to the saved Secret. Request ID: req_00000000-0000-4000-8000-000000000433",
+        { exact: true },
       )
       .waitFor();
     assert.equal(await page.getByRole("button", { name: "Edit Slack" }).isDisabled(), true);
@@ -1018,10 +1059,7 @@ describe("Agent channels", { concurrency: 3 }, () => {
       // The Configuration saved, so the unconfirmed grant is a warning from the start, not a
       // refusal that turns into one when another Secret is picked (finding 2003).
       assert.equal(await grantWarning.getAttribute("data-tone"), "warning");
-      assert.equal(
-        await page.getByRole("button", { name: "Save channel Secrets" }).isDisabled(),
-        false,
-      );
+      await waitForEnabled(page.getByRole("button", { name: "Save channel Secrets" }));
       await page.getByText("Resolve the saved Secret access grant before deploying.").waitFor();
       assert.equal(
         await page.getByRole("button", { name: "Deploy new version" }).isDisabled(),
