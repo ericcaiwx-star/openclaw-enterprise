@@ -192,11 +192,12 @@ test("execution peer label maps reject non-string values before rendering", tool
         "routing.tlsSecretName=agents-tls",
         "--set",
         "routing.controlPlaneCidrs[0]=198.51.100.0/24",
-        option,
-        `${field}=${value}`,
+        ...(field === undefined ? [] : [option, `${field}=${value}`]),
       ],
       { cwd: repository, maxBuffer: 2_000_000 },
     );
+  const defaults = await resources((await renderExecution()).stdout);
+  const defaultPolicy = defaults.find(({ kind }) => kind === "NetworkPolicy");
   for (const [field, peer] of [
     ["dns.podLabels", 0],
     ["routing.envoyGatewayPodLabels", 2],
@@ -225,13 +226,17 @@ test("execution peer label maps reject non-string values before rendering", tool
       const policy = objects.find(({ kind }) => kind === "NetworkPolicy");
       const labels = policy.spec.egress[peer].to[0].podSelector.matchLabels;
       const requested = JSON.parse(value);
-      for (const [key, label] of Object.entries(requested ?? {})) {
-        if (label !== null) {
-          assert.equal(labels[key], label);
-        }
-      }
+      const defaultLabels = defaultPolicy.spec.egress[peer].to[0].podSelector.matchLabels;
+      assert.deepEqual(labels, requested === null ? null : { ...defaultLabels, ...requested });
     }
-    await renderExecution(`${field}.probe`, "true", "--set-string");
+    const quoted = await resources(
+      (await renderExecution(`${field}.probe`, "true", "--set-string")).stdout,
+    );
+    const quotedPolicy = quoted.find(({ kind }) => kind === "NetworkPolicy");
+    assert.deepEqual(quotedPolicy.spec.egress[peer].to[0].podSelector.matchLabels, {
+      ...defaultPolicy.spec.egress[peer].to[0].podSelector.matchLabels,
+      probe: "true",
+    });
   }
 });
 
