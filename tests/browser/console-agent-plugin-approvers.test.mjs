@@ -737,10 +737,23 @@ test("No Slack approvers does not ask the operator to select hidden people", asy
     const none = { hint: helper.textContent, pickerHidden: picker.hidden };
     select.value = "chosen";
     select.dispatchEvent(new Event("change"));
-    return { none, chosen: { hint: helper.textContent, pickerHidden: picker.hidden } };
+    const chosen = { hint: helper.textContent, pickerHidden: picker.hidden };
+    value = [{ channel: "teams", id: "person-1" }];
+    select.value = "none";
+    select.dispatchEvent(new Event("change"));
+    return {
+      none,
+      chosen,
+      preserved: { hint: helper.textContent, pickerHidden: picker.hidden },
+    };
   });
   assert.equal(hints.none.hint, "No Slack user can approve.");
   assert.equal(hints.none.pickerHidden, true);
   assert.equal(hints.chosen.hint, "No Slack user can approve until people are selected.");
   assert.equal(hints.chosen.pickerHidden, false);
+  assert.equal(
+    hints.preserved.hint,
+    "No Slack user can approve. 1 other channel entries are preserved.",
+  );
+  assert.equal(hints.preserved.pickerHidden, true);
 });
