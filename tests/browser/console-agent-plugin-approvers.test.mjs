@@ -730,7 +730,7 @@ test("No Slack approvers does not ask the operator to select hidden people", asy
         value = next;
       },
     });
-    document.body.append(field);
+    globalThis.document.body.append(field);
     const helper = field.querySelector("p.hint");
     const picker = field.querySelector(".slack-directory-field");
     const select = field.querySelector("select");
