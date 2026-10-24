@@ -3208,7 +3208,9 @@ export async function renderAgentDetail(
         latestPermissionsRead.then((permissions) => permissions?.operate),
       );
       state.refresh = workspace.refresh;
-      state.applyOperate = workspace.applyOperate;
+      if (workspace.applyOperate) {
+        state.applyOperate = workspace.applyOperate;
+      }
       content.append(workspace.section);
       state.loading = false;
       content.style.minHeight = "";
