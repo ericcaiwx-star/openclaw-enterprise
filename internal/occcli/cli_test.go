@@ -1290,8 +1290,12 @@ func TestAgentPolicyFacetMustBeNetworkingBeforeAnyRequest(t *testing.T) {
 		command := New(io.Discard, io.Discard)
 		command.SetArgs(append(slices.Clone(connection), args...))
 		err := command.Execute()
-		if err == nil || err.Error() != "--facet must be networking" {
-			t.Errorf("%v: error = %v", args, err)
+		want := "--facet must be networking"
+		if slices.Contains(args, "--facet=") {
+			want = "--facet must name a sandbox policy facet such as networking"
+		}
+		if err == nil || err.Error() != want {
+			t.Errorf("%v: error = %v, want %q", args, err, want)
 		}
 		if requests != 0 {
 			t.Errorf("%v: sent %d requests", args, requests)
