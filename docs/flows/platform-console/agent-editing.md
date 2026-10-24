@@ -281,16 +281,10 @@ when the text differs from that baseline. The comparison uses LF line endings, s
 it does not rewrite an untouched CRLF file. A fresh read checks access before
 restoring a draft, including an empty edit. **Reload** replaces those edits.
 
-The Workspace editor stays mounted when the reader opens another Agent tab, including
-Logs. On return, `renderAgentDetail` applies the newest Agent operate answer the page
-has already read (`applyOperate` on the retained section). Logs can observe a newer
-answer while the editor is parked. A grant makes the files editable and hides the
-operate explanation. A revocation makes them read-only, shows that explanation, and
-leaves the unsaved text in the editors. It does not reload the files.
-`rereadPermissions` keeps the previous answer when the new read fails, so a failed
-reread does not clear a grant or a denial the page already showed. A missing answer
-is not a denial: **Save** stays on its usual path. The controller still authorizes
-each file `PUT`. The editor state is not that authorization boundary.
+Returning to these parked editors applies the newest Agent operate answer the page
+has already read. A grant makes the files editable and hides the explanation. A
+revocation makes them read-only and keeps unsaved text. A failed permission read
+keeps the previous answer. The controller still authorizes the write.
 
 On the first read or an explicit **Reload**, only a `404` with code `NOT_FOUND`
 and message `The requested workspace file was not found.` confirms the file is
@@ -354,11 +348,8 @@ Moved to [Agent stop and deletion](agent-stop-and-deletion.md#8-confirm-deletion
 
 ## Changelog
 
-- 2026-10-24 23:40: Apply a newer Agent operate answer when parked Workspace files return, and keep unsaved text if operate is removed. (workspace-operate-restore)
 - 2026-10-22 13:00: Rebuild after a plugin save from the save response, so a Stop requested on the page stays shown. (bughunt-1022b)
 - 2026-10-22 10:28: Distinguish a missing workspace file from an unavailable Agent, on first read and after an uncertain save. (01a162e5-4303-7a21-81d4-bb51cec37c66 - 596fdb088)
 - 2026-10-22 10:14: Trace plugin save confirmation and recovery when the response is incomplete or identifies different settings. (01a162ec-b748-7c42-9034-1f0a92b05703 - 345d9f63d)
-- 2026-10-20 05:00: Move steps 7 and 8 (stop, deletion) to [their own trace](agent-stop-and-deletion.md). (docs-split-1020)
-- 2026-10-18 20:30: Show each failure's next step; add Deploy again. (ux-a1)
 
 [Console Agent editing documentation history](agent-editing/history.md) preserves the older dated entries.

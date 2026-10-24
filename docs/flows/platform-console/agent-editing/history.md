@@ -8,7 +8,10 @@ This record preserves the dated changes to the Console Agent editing flow. See t
 
 ## Changelog
 
+- 2026-10-24 23:40: Apply a newer Agent operate answer when parked Workspace files return, and keep unsaved text if operate is removed. (workspace-operate-restore)
 - 2026-10-22 01:30: Fill the folded Deployment activity row with a first record read after the page shows; keep the summary note and version record rows. (fix-2163)
+- 2026-10-20 05:00: Move steps 7 and 8 (stop, deletion) to [their own trace](../agent-stop-and-deletion.md). (docs-split-1020)
+- 2026-10-18 20:30: Show each failure's next step; add Deploy again. (ux-a1)
 - 2026-10-18 12:30: Keep open Workspace editors when another version becomes current. (lows-1018h)
 - 2026-10-17 09:01: Keep keyboard focus on the pending Configuration save. (lows-1017k-1646 - 5d82453999)
 - 2026-10-16 22:40: Patch deployment polls in place; reserve pending rows. (ui-jank-code-12)
