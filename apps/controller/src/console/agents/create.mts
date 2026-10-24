@@ -1126,18 +1126,38 @@ function renderAgentForm(
     // OCC requires one primary across the roster. Keep explicit selections in step with
     // the edited primary, without materializing inherited selections or losing local policy.
     const entries = values.agents?.entries;
+    const defaultPrimary = modelPrimary(previous);
+    // Only a shared, qualified primary is a bulk-edit basis. Pending state comes from
+    // clearing this control; a JSON edit below revokes it before reading new selections.
+    const sharedPrimary =
+      typeof previousModel === "string" &&
+      previousModel.includes("/") &&
+      !previousModel.startsWith("/") &&
+      !previousModel.endsWith("/") &&
+      (previous === undefined ||
+        defaultPrimary === previousModel ||
+        (defaultPrimary === undefined && pendingPrimaryModel === previousModel)) &&
+      (entries === undefined ||
+        (isObject(entries) &&
+          Object.values(entries).every(
+            (entry) =>
+              isObject(entry) &&
+              (entry.model === undefined
+                ? defaultPrimary === previousModel || pendingPrimaryModel === previousModel
+                : modelPrimary(entry.model as ModelSelection) === previousModel),
+          )));
     const nextEntries =
-      selectedModel && isObject(entries)
+      selectedModel && sharedPrimary && isObject(entries)
         ? Object.fromEntries(
             Object.entries(entries).map(([id, entry]) => {
               if (!isObject(entry)) {
                 return [id, entry];
               }
               const selection = entry.model as ModelSelection | undefined;
-              const entryPrimary = typeof selection === "string" ? selection : selection?.primary;
-              if (selection !== undefined && entryPrimary !== previousModel) {
-                return [id, entry];
-              }
+              const localPolicy = isObject(entry.models)
+                ? (entry.models[selectedModel] ??
+                  (previousModel ? entry.models[previousModel] : undefined))
+                : undefined;
               return [
                 id,
                 {
@@ -1150,13 +1170,12 @@ function renderAgentForm(
                             ? selectedModel
                             : { ...selection, primary: selectedModel },
                       }),
-                  ...(isObject(entry.models)
+                  ...(isObject(localPolicy)
                     ? {
                         models: {
                           ...entry.models,
                           [selectedModel]: {
-                            ...(entry.models[selectedModel] ??
-                              (previousModel ? entry.models[previousModel] : undefined)),
+                            ...localPolicy,
                             ...next.agents?.defaults.models[selectedModel],
                           },
                         },
@@ -1211,7 +1230,7 @@ function renderAgentForm(
         ? previousModel.slice(previousModel.indexOf("/") + 1)
         : undefined;
     // Keep transport and model metadata while no model is selected.
-    pendingPrimaryModel = selectedModel ? undefined : previousModel;
+    pendingPrimaryModel = !selectedModel && sharedPrimary ? previousModel : undefined;
     if (resetTransport) {
       delete providers.openai;
       delete providers.anthropic;
@@ -1336,13 +1355,15 @@ function renderAgentForm(
     updateControls();
   });
   configuration.addEventListener("input", () => {
+    pendingModelSettings = undefined;
+    pendingPrimaryModel = undefined;
     const previousProvider = nativeProvider.value;
     const previousHarness = harness.value;
     configurationError.clear();
     feedback.textContent = "";
     const values = parseObject(configuration);
-    const selected = values?.agents?.defaults?.model;
-    const ref = typeof selected === "string" ? selected : selected?.primary;
+    const selected = configuredModelSelection(values);
+    const ref = modelPrimary(selected);
     const selectedHarness = values && configuredHarnessId(values);
     if (typeof ref === "string" && selectedHarness) {
       harness.value = selectedHarness;

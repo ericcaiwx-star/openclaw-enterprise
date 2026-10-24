@@ -196,11 +196,10 @@ page exit clears captures, not a failed `/namespaces` read. A known Create refus
 the capture and its saved resources, unless repository policy refused it or an Agent,
 provisioning job or credential registration exists.
 
-`agents/create.mts:updateModelConfiguration` aligns defaults with matching explicit
-roster primaries and local policies. Inherited selections stay omitted. Ordered
-fallbacks and referenced metadata remain; unreferenced replaced primaries retire.
-Clearing and navigation retain prior primaries/policies. The configured-Harness
-resolver checks saved Configuration before model execution.
+`agents/create.mts:updateModelConfiguration` synchronizes qualified shared primaries
+and existing local policies. Empty maps and inherited selections remain. Invalid
+rosters stay for admission validation. JSON edits update selection and clear pending
+state. Clearing/navigation retain policies, fallbacks and referenced metadata.
 
 ### 4. Save an independent draft
 

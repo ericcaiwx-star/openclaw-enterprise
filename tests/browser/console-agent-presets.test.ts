@@ -417,7 +417,12 @@ test("Changing a Preset model keeps explicit and inherited roster selections dep
           main: initialValues.agents.entries.main,
           assistant: initialValues.agents.entries.assistant,
           // Without a default model, every entry must explicitly select its primary.
-          ...(shape === "no-default" ? {} : { inherited: initialValues.agents.entries.inherited }),
+          ...(shape === "no-default"
+            ? {}
+            : {
+                inherited: initialValues.agents.entries.inherited,
+                inheritedEmpty: { models: {} },
+              }),
         },
       },
     };
@@ -497,6 +502,10 @@ test("Changing a Preset model keeps explicit and inherited roster selections dep
             }
           : undefined,
       );
+      assert.deepEqual(
+        selected.agents.entries.inheritedEmpty,
+        shape === "no-default" ? undefined : { models: {} },
+      );
       assert.deepEqual(selected.agents.defaults.models, {
         [reference(id)]: values.agents.defaults.models[reference(original)],
         [reference(fallback)]: values.agents.defaults.models[reference(fallback)],
@@ -525,15 +534,15 @@ test("Main-only Preset models create drafts through the regular Agent APIs", asy
     alias: "Main model",
     params: { temperature: 0.4 },
   };
-  for (const scenario of ["edited-default", "unchanged-entry"] as const) {
-    const expected = scenario === "edited-default" ? replacement : original;
+  for (const scenario of ["edited-default", "unchanged-entry", "advanced-entry"] as const) {
+    const expected = scenario === "unchanged-entry" ? original : replacement;
     t.diagnostic(`Creating ${scenario} main-only draft`);
     const values = {
       ...base,
       agents: {
         ...base.agents,
         defaults:
-          scenario === "unchanged-entry"
+          scenario !== "edited-default"
             ? { models: base.agents.defaults.models }
             : base.agents.defaults,
         entries: { main: { model: original, models: { [original]: localPolicy } } },
@@ -560,6 +569,13 @@ test("Main-only Preset models create drafts through the regular Agent APIs", asy
     if (scenario === "edited-default") {
       await model.fill("replacement-model");
       await model.press("Tab");
+    }
+    if (scenario === "advanced-entry") {
+      await openAdvancedSettings(page);
+      // This is a valid entry-only edit: change both the primary and its catalog references.
+      await page
+        .getByLabel("Configuration JSON", { exact: true })
+        .fill(JSON.stringify(values).replaceAll("primary-model", "replacement-model"));
     }
     await createModelCredentialSecret(page, "synthetic-main-only-model-key");
     await waitForCreateFormReads(page);
@@ -597,7 +613,7 @@ test("Main-only Preset models create drafts through the regular Agent APIs", asy
     assert.equal(saved.status, 200);
     const persisted = saved.data.values as typeof values;
     assert.equal(
-      persisted.agents.defaults.model,
+      "model" in persisted.agents.defaults ? persisted.agents.defaults.model : undefined,
       scenario === "edited-default" ? expected : undefined,
     );
     assert.equal(persisted.agents.entries.main.model, expected);
@@ -621,6 +637,76 @@ test("Main-only Preset models create drafts through the regular Agent APIs", asy
     );
     const unchanged = await presetTemplate(fixture, namespace.id, preset.data.id);
     assert.deepEqual(unchanged, template);
+  }
+});
+
+test("Model edits preserve refusals for divergent and unqualified Advanced JSON primaries", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap("Invalid roster editing");
+  const namespace = await fixture.createNamespace("Invalid roster drafts", { ready: true });
+  const original = "openai/primary-model";
+  const replacement = "openai/replacement-model";
+  const base = nativeValues("invalid-roster", { providerModel: "primary-model" });
+  const values = {
+    ...base,
+    agents: {
+      ...base.agents,
+      ownership: "explicit",
+      entries: { writer: { model: original }, editor: { model: original } },
+    },
+  };
+  assert.equal(resolveConfiguredHarnessId(values), "openclaw");
+  const preset: FixtureResponse<Preset> = await fixture.request(
+    "POST",
+    `/namespaces/${namespace.id}/presets`,
+    {
+      body: {
+        name: "Invalid roster editing control",
+        template: { agent: { executionMode: "embedded" }, configuration: { values } },
+      },
+    },
+  );
+  assert.equal(preset.status, 201);
+  for (const scenario of ["divergent", "unqualified"] as const) {
+    for (const clearFirst of [false, true]) {
+      await t.test(
+        `${scenario}: ${clearFirst ? "clear then select" : "direct select"}`,
+        async (subtest) => {
+          const { page } = await newPage(subtest, fixture);
+          await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+          await page.getByLabel("Preset template").selectOption(preset.data.id);
+          await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+          await openAdvancedSettings(page);
+          const invalid = structuredClone(values);
+          if (scenario === "divergent") {
+            invalid.agents.entries.editor.model = replacement;
+            const provider = invalid.models.providers.openai;
+            assert.ok(provider);
+            const first = provider.models[0];
+            assert.ok(first);
+            provider.models.push({ ...first, id: "replacement-model", name: "replacement-model" });
+          } else {
+            invalid.agents.defaults.model = "bare";
+            invalid.agents.entries.writer.model = "bare";
+            invalid.agents.entries.editor.model = "bare";
+          }
+          const refusal = /same primary model|must name each model as/;
+          assert.throws(() => resolveConfiguredHarnessId(invalid), refusal);
+          const editor = page.getByLabel("Configuration JSON", { exact: true });
+          await editor.fill(JSON.stringify(invalid));
+          const model = page.getByLabel("Model ID", { exact: true });
+          if (clearFirst) {
+            await model.fill("");
+            await model.press("Tab");
+          }
+          await model.fill("replacement-model");
+          await model.press("Tab");
+          // A convenience control must not silently repair an invalid roster's explicit selections.
+          const edited = JSON.parse(await editor.inputValue());
+          assert.throws(() => resolveConfiguredHarnessId(edited), refusal);
+        },
+      );
+    }
   }
 });
 
