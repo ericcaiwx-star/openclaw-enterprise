@@ -294,6 +294,7 @@ test("Selecting an existing fallback keeps the referenced model catalog deployab
       await model.fill(id);
       await model.press("Tab");
       const selected: typeof values = JSON.parse(await editor.inputValue());
+      assert.equal(resolveConfiguredHarnessId(selected), "openclaw");
       assert.equal(selected.agents.defaults.model.primary, reference(id));
       assert.deepEqual(selected.agents.defaults.model.fallbacks, ids.slice(1).map(reference));
       assert.deepEqual(
@@ -333,6 +334,15 @@ test("Selecting an existing fallback keeps the referenced model catalog deployab
     await model.fill("");
     await model.press("Tab");
     await checkSelection("another-model", [...ids.slice(1), "another-model"]);
+    // An unrelated JSON edit during a temporary clear must not orphan the previous primary.
+    await model.fill("");
+    await model.press("Tab");
+    await openAdvancedSettings(page);
+    const pending: typeof values = JSON.parse(await editor.inputValue());
+    pending.models.providers.openai.baseUrl = "https://edited-models.example.test/v1";
+    await editor.fill(JSON.stringify(pending));
+    const edited = await checkSelection("json-replacement", [...ids.slice(1), "json-replacement"]);
+    assert.equal(edited.models.providers.openai.baseUrl, "https://edited-models.example.test/v1");
   }
 });
 

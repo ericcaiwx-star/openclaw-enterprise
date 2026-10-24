@@ -127,6 +127,7 @@ export interface CreateAgentDraft {
   manualModel: boolean;
   pendingModelSettings: ModelSettings | undefined;
   pendingPrimaryModel: string | undefined;
+  pendingModelSelections: Record<string, unknown> | undefined;
   configurationSecretBindings: SecretBindings;
   pluginApprovers: PluginApprovers | undefined;
   oauthLogin: DeviceLogin | null | undefined;
@@ -927,6 +928,27 @@ function renderAgentForm(
   let manualModel = !useModelChoices;
   let pendingModelSettings = draft.pendingModelSettings;
   let pendingPrimaryModel = draft.pendingPrimaryModel;
+  let pendingModelSelections = draft.pendingModelSelections;
+  const modelSelections = (values: LaunchValues) => ({
+    defaults: isObject(values.agents?.defaults)
+      ? { model: values.agents.defaults.model }
+      : values.agents?.defaults,
+    entries: isObject(values.agents?.entries)
+      ? Object.fromEntries(
+          Object.entries(values.agents.entries).map(([id, entry]) => [
+            id,
+            isObject(entry) ? { model: entry.model } : entry,
+          ]),
+        )
+      : values.agents?.entries,
+  });
+  function retainPendingModel(values: LaunchValues) {
+    if (pendingModelSelections && !sameValue(pendingModelSelections, modelSelections(values))) {
+      pendingModelSettings = undefined;
+      pendingPrimaryModel = undefined;
+      pendingModelSelections = undefined;
+    }
+  }
   const modelChoice = element(
     "select",
     { id: "agent-model" },
@@ -1097,6 +1119,7 @@ function renderAgentForm(
     }
     pendingModelSettings = undefined;
     pendingPrimaryModel = undefined;
+    pendingModelSelections = undefined;
     configuration.value = currentTemplate();
     configurationError.clear();
     feedback.textContent = "";
@@ -1107,6 +1130,7 @@ function renderAgentForm(
     if (values === undefined) {
       return;
     }
+    retainPendingModel(values);
     const next = configurationTemplate(harness.value, nativeProvider.value, model.value.trim());
     const previous = values.agents?.defaults?.model;
     const previousModel = modelPrimary(configuredModelSelection(values)) ?? pendingPrimaryModel;
@@ -1128,7 +1152,7 @@ function renderAgentForm(
     const entries = values.agents?.entries;
     const defaultPrimary = modelPrimary(previous);
     // Only a shared, qualified primary is a bulk-edit basis. Pending state comes from
-    // clearing this control; a JSON edit below revokes it before reading new selections.
+    // clearing this control; a JSON selection edit revokes it before reading new selections.
     const sharedPrimary =
       typeof previousModel === "string" &&
       previousModel.includes("/") &&
@@ -1291,6 +1315,12 @@ function renderAgentForm(
       }
     }
     configuration.value = JSON.stringify(values, null, 2);
+    // Snapshot the serialized selections, where an undefined primary is omitted. Unrelated
+    // JSON edits keep catalog provenance; changed selections cannot borrow clear-state trust.
+    pendingModelSelections =
+      !selectedModel && sharedPrimary
+        ? modelSelections(JSON.parse(configuration.value) as LaunchValues)
+        : undefined;
     configuration.setCustomValidity("");
     feedback.textContent = "";
     renderChannelEditor();
@@ -1355,13 +1385,14 @@ function renderAgentForm(
     updateControls();
   });
   configuration.addEventListener("input", () => {
-    pendingModelSettings = undefined;
-    pendingPrimaryModel = undefined;
     const previousProvider = nativeProvider.value;
     const previousHarness = harness.value;
     configurationError.clear();
     feedback.textContent = "";
     const values = parseObject(configuration);
+    if (values) {
+      retainPendingModel(values);
+    }
     const selected = configuredModelSelection(values);
     const ref = modelPrimary(selected);
     const selectedHarness = values && configuredHarnessId(values);
@@ -1951,6 +1982,7 @@ function renderAgentForm(
     edited,
     pendingModelSettings,
     pendingPrimaryModel,
+    pendingModelSelections,
     configurationSecretBindings,
     stagedChannelSecrets,
     modelCredentialSource,
