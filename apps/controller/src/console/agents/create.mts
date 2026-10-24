@@ -2908,8 +2908,8 @@ function renderAgentForm(
         "Choose an available model or enter a model ID before creating the Agent.";
       return;
     }
-    const selected = values.agents?.defaults?.model;
-    const primaryModel = typeof selected === "string" ? selected : selected?.primary;
+    const selected = configuredModelSelection(values);
+    const primaryModel = modelPrimary(selected);
     const fallbackPrefixes =
       harness.value === "codex" ? ["openai/", "codex/"] : [`${nativeProvider.value}/`];
     // Bound Codex Presets may use either supported provider prefix; OpenClaw keeps its provider.

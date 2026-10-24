@@ -513,7 +513,7 @@ test("Changing a Preset model keeps explicit and inherited roster selections dep
   }
 });
 
-test("A changed main-only Preset model creates a draft through the regular Agent APIs", async (t) => {
+test("Main-only Preset models create drafts through the regular Agent APIs", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap("Main-only roster creation");
   const namespace = await fixture.createNamespace("Main-only roster", { ready: true });
@@ -525,77 +525,103 @@ test("A changed main-only Preset model creates a draft through the regular Agent
     alias: "Main model",
     params: { temperature: 0.4 },
   };
-  const values = {
-    ...base,
-    agents: {
-      ...base.agents,
-      entries: { main: { model: original, models: { [original]: localPolicy } } },
-    },
-  };
-  assert.equal(resolveConfiguredHarnessId(values), "openclaw");
-  const template = {
-    agent: { name: "Main-only model draft", executionMode: "embedded" },
-    configuration: { values },
-  };
-  const preset: FixtureResponse<Preset> = await fixture.request(
-    "POST",
-    `/namespaces/${namespace.id}/presets`,
-    { body: { name: "Main-only model", template } },
-  );
-  assert.equal(preset.status, 201, JSON.stringify(preset.body));
-  const { page } = await newPage(t, fixture);
-  const requests = apiRequests(page, fixture.origin);
-  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
-  await page.getByLabel("Preset template").selectOption(preset.data.id);
-  await page.getByRole("button", { name: "Use Preset", exact: true }).click();
-  const model = page.getByLabel("Model ID", { exact: true });
-  await model.fill("replacement-model");
-  await model.press("Tab");
-  await createModelCredentialSecret(page, "synthetic-main-only-model-key");
-  await waitForCreateFormReads(page);
-  const preflight = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      response.url() === `${fixture.origin}/namespaces/${namespace.id}/agents/validate`,
-  );
-  const createdResponse = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      response.url() === `${fixture.origin}/namespaces/${namespace.id}/agents`,
-  );
-  await page.getByRole("button", { name: "Create Agent", exact: true }).click();
-  assert.equal((await preflight).status(), 204);
-  const created = await createdAgent(createdResponse);
-  assert.equal(created.executionMode, "embedded");
-  assert.equal(created.activeRevisionId ?? null, null);
-  const saved: FixtureResponse<ConfigurationWire> = await fixture.request(
-    "GET",
-    `/namespaces/${namespace.id}/configurations/${created.configurationId}`,
-  );
-  assert.equal(saved.status, 200);
-  const persisted = saved.data.values as typeof values;
-  assert.equal(persisted.agents.defaults.model, replacement);
-  assert.equal(persisted.agents.entries.main.model, replacement);
-  assert.deepEqual(persisted.agents.entries.main.models, { [replacement]: localPolicy });
-  assert.equal(resolveConfiguredHarnessId(persisted), "openclaw");
-  assert.equal(
-    pathRequests(requests, "POST", `/namespaces/${namespace.id}/agents/validate`).length,
-    1,
-  );
-  assert.equal(configurationPostRequests(requests, namespace.id).length, 1);
-  assert.equal(agentPostRequests(requests, namespace.id).length, 1);
-  // This workflow saves a draft; it does not dispatch a deployment or provisioning job.
-  assert.equal(
-    pathRequests(requests, "POST", `/namespaces/${namespace.id}/agents/provision`).length,
-    0,
-  );
-  assert.equal(
-    pathRequests(requests, "POST", `/namespaces/${namespace.id}/agents/${created.id}/deploy`)
-      .length,
-    0,
-  );
-  const unchanged = await presetTemplate(fixture, namespace.id, preset.data.id);
-  assert.deepEqual(unchanged, template);
+  for (const scenario of ["edited-default", "unchanged-entry"] as const) {
+    const expected = scenario === "edited-default" ? replacement : original;
+    t.diagnostic(`Creating ${scenario} main-only draft`);
+    const values = {
+      ...base,
+      agents: {
+        ...base.agents,
+        defaults:
+          scenario === "unchanged-entry"
+            ? { models: base.agents.defaults.models }
+            : base.agents.defaults,
+        entries: { main: { model: original, models: { [original]: localPolicy } } },
+      },
+    };
+    assert.equal(resolveConfiguredHarnessId(values), "openclaw");
+    const template = {
+      agent: { name: `Main-only ${scenario}`, executionMode: "embedded" },
+      configuration: { values },
+    };
+    const preset: FixtureResponse<Preset> = await fixture.request(
+      "POST",
+      `/namespaces/${namespace.id}/presets`,
+      { body: { name: `Main-only ${scenario}`, template } },
+    );
+    assert.equal(preset.status, 201, JSON.stringify(preset.body));
+    const { page } = await newPage(t, fixture);
+    const requests = apiRequests(page, fixture.origin);
+    await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+    await page.getByLabel("Preset template").selectOption(preset.data.id);
+    await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+    const model = page.getByLabel("Model ID", { exact: true });
+    assert.equal(await model.inputValue(), "primary-model");
+    if (scenario === "edited-default") {
+      await model.fill("replacement-model");
+      await model.press("Tab");
+    }
+    await createModelCredentialSecret(page, "synthetic-main-only-model-key");
+    await waitForCreateFormReads(page);
+    const preflight = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url() === `${fixture.origin}/namespaces/${namespace.id}/agents/validate`,
+      { timeout: 15_000 },
+    );
+    const createdResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url() === `${fixture.origin}/namespaces/${namespace.id}/agents`,
+      { timeout: 15_000 },
+    );
+    const outcomes = Promise.all([preflight, createdResponse]);
+    await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+    const [validation, agentResponse] = await outcomes.catch(async (error) => {
+      t.diagnostic(
+        `${scenario} visible alerts: ${await page.getByRole("alert").allTextContents()}`,
+      );
+      t.diagnostic(
+        `${scenario} create requests: preflight=${pathRequests(requests, "POST", `/namespaces/${namespace.id}/agents/validate`).length}, configuration=${configurationPostRequests(requests, namespace.id).length}, agent=${agentPostRequests(requests, namespace.id).length}`,
+      );
+      throw error;
+    });
+    assert.equal(validation.status(), 204);
+    const created = await createdAgent(Promise.resolve(agentResponse));
+    assert.equal(created.executionMode, "embedded");
+    assert.equal(created.activeRevisionId ?? null, null);
+    const saved: FixtureResponse<ConfigurationWire> = await fixture.request(
+      "GET",
+      `/namespaces/${namespace.id}/configurations/${created.configurationId}`,
+    );
+    assert.equal(saved.status, 200);
+    const persisted = saved.data.values as typeof values;
+    assert.equal(
+      persisted.agents.defaults.model,
+      scenario === "edited-default" ? expected : undefined,
+    );
+    assert.equal(persisted.agents.entries.main.model, expected);
+    assert.deepEqual(persisted.agents.entries.main.models, { [expected]: localPolicy });
+    assert.equal(resolveConfiguredHarnessId(persisted), "openclaw");
+    assert.equal(
+      pathRequests(requests, "POST", `/namespaces/${namespace.id}/agents/validate`).length,
+      1,
+    );
+    assert.equal(configurationPostRequests(requests, namespace.id).length, 1);
+    assert.equal(agentPostRequests(requests, namespace.id).length, 1);
+    // This workflow saves a draft; it does not dispatch a deployment or provisioning job.
+    assert.equal(
+      pathRequests(requests, "POST", `/namespaces/${namespace.id}/agents/provision`).length,
+      0,
+    );
+    assert.equal(
+      pathRequests(requests, "POST", `/namespaces/${namespace.id}/agents/${created.id}/deploy`)
+        .length,
+      0,
+    );
+    const unchanged = await presetTemplate(fixture, namespace.id, preset.data.id);
+    assert.deepEqual(unchanged, template);
+  }
 });
 
 test("Runtime-auth Presets retain OpenClaw when changing from Anthropic to OpenAI", async (t) => {
