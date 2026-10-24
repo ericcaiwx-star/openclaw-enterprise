@@ -3775,13 +3775,10 @@ export async function renderAgentDetail(
         submitted = true;
       });
       void data.harnessGrantMissing().then((missing) => {
-        if (
-          missing &&
-          !submitted &&
-          !savedAuthentication &&
-          !outcomeUnknown &&
-          context.isCurrent()
-        ) {
+        // The form is retained while another tab is shown. The read can finish then, and
+        // coming back restores these nodes, so the warning has to be written even though
+        // this tab is not current. A submit since the read began still owns the status.
+        if (missing && !submitted && !savedAuthentication && !outcomeUnknown) {
           setStatusTone(feedback, "warning");
           feedback.textContent = grantWarning(
             "missing",

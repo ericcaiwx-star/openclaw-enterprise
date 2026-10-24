@@ -2701,6 +2701,39 @@ test("Agent credentials name the administrator step for a member's harness Secre
   );
 });
 
+// The IAM read can finish after the administrator has left Credentials. Deploy already waits,
+// and the parked form must still explain Save authentication source when they come back.
+test("a harness grant found while Credentials is parked is shown on return", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Parked harness grant", { ready: true });
+  const secret = await fixture.createSecret(namespace.id, "Parked harness Secret", "hidden");
+  const agent = await fixture.createAgent(
+    namespace.id,
+    "Parked Grant Agent",
+    nativeValues("parked-grant"),
+  );
+  await fixture.updateAgent(namespace.id, agent.id, {
+    configurationId: agent.configurationId,
+    harnessAuth: { method: "api_key", source: secret.ref },
+  });
+  const { page } = await newPage(t, fixture);
+  const held = await holdRequests(t, page, `**/namespaces/${namespace.id}/iam/**`);
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "credentials"));
+  await page.getByRole("heading", { name: "Parked Grant Agent" }).waitFor();
+  await held.requested;
+  await page.getByRole("tab", { name: "Configuration", exact: true }).click();
+  await page.getByRole("button", { name: "Edit Configuration" }).waitFor();
+  held.release();
+  await page
+    .getByText("Confirm authentication and Secret access in Credentials before deploying.")
+    .waitFor();
+  assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
+  await page.getByRole("tab", { name: "Credentials", exact: true }).click();
+  await page.getByText(HARNESS_GRANT_MISSING, { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Authentication source").isDisabled(), false);
+});
+
 // The harness grant check reads Namespace IAM; a refused read proves nothing missing, so an
 // administrator's Deploy stays as it was and no warning appears (finding 2260).
 test("A refused harness grant read leaves an administrator's Deploy alone", async (t) => {
