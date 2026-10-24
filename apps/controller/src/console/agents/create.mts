@@ -100,11 +100,23 @@ type LaunchValues = Record<string, unknown> & {
       model?: ModelSelection | undefined;
       models?: Record<string, ModelSettings>;
     };
-    entries?: Record<string, { model?: ModelSelection }>;
+    entries?: Record<string, { model?: ModelSelection; models?: Record<string, ModelSettings> }>;
   };
   models?: { providers?: Record<string, { models?: ProviderModel[] }> };
   plugins?: { entries?: Record<string, unknown>; allow?: string[] };
 };
+
+function modelPrimary(selection: ModelSelection | undefined): string | undefined {
+  return typeof selection === "string" ? selection : selection?.primary;
+}
+
+function configuredModelSelection(values: LaunchValues | undefined): ModelSelection | undefined {
+  const defaults = values?.agents?.defaults?.model;
+  return modelPrimary(defaults)
+    ? defaults
+    : (Object.values(values?.agents?.entries ?? {}).find((entry) => modelPrimary(entry?.model))
+        ?.model ?? defaults);
+}
 
 export interface CreateAgentDraft {
   rendered: PresetLaunchSettings;
@@ -114,7 +126,7 @@ export interface CreateAgentDraft {
   edited: boolean;
   manualModel: boolean;
   pendingModelSettings: ModelSettings | undefined;
-  pendingProviderModel: string | undefined;
+  pendingPrimaryModel: string | undefined;
   configurationSecretBindings: SecretBindings;
   pluginApprovers: PluginApprovers | undefined;
   oauthLogin: DeviceLogin | null | undefined;
@@ -859,9 +871,8 @@ function renderAgentForm(
     "aria-describedby": "configuration-json-hint",
   });
   const configurationError = fieldError(configuration);
-  const primary = (rendered.configuration?.values as LaunchValues | undefined)?.agents?.defaults
-    ?.model;
-  const initialModel = typeof primary === "string" ? primary : primary?.primary;
+  const primary = configuredModelSelection(rendered.configuration?.values);
+  const initialModel = modelPrimary(primary);
   const nativeProvider = element(
     "select",
     { id: "model-provider" },
@@ -915,7 +926,7 @@ function renderAgentForm(
   apiKey.setAttribute("aria-describedby", credentialHelp.id);
   let manualModel = !useModelChoices;
   let pendingModelSettings = draft.pendingModelSettings;
-  let pendingProviderModel = draft.pendingProviderModel;
+  let pendingPrimaryModel = draft.pendingPrimaryModel;
   const modelChoice = element(
     "select",
     { id: "agent-model" },
@@ -1085,7 +1096,7 @@ function renderAgentForm(
       return;
     }
     pendingModelSettings = undefined;
-    pendingProviderModel = undefined;
+    pendingPrimaryModel = undefined;
     configuration.value = currentTemplate();
     configurationError.clear();
     feedback.textContent = "";
@@ -1098,7 +1109,7 @@ function renderAgentForm(
     }
     const next = configurationTemplate(harness.value, nativeProvider.value, model.value.trim());
     const previous = values.agents?.defaults?.model;
-    const previousModel = typeof previous === "string" ? previous : previous?.primary;
+    const previousModel = modelPrimary(configuredModelSelection(values)) ?? pendingPrimaryModel;
     const modelSettings = { ...values.agents?.defaults?.models };
     const selectedModel = next.agents?.defaults.model;
     const selectedSettings = {
@@ -1112,12 +1123,54 @@ function renderAgentForm(
       typeof previous === "object" && previous !== null
         ? { ...previous, primary: selectedModel }
         : selectedModel;
+    // OCC requires one primary across the roster. Keep explicit selections in step with
+    // the edited primary, without materializing inherited selections or losing local policy.
+    const entries = values.agents?.entries;
+    const nextEntries =
+      selectedModel && isObject(entries)
+        ? Object.fromEntries(
+            Object.entries(entries).map(([id, entry]) => {
+              if (!isObject(entry)) {
+                return [id, entry];
+              }
+              const selection = entry.model as ModelSelection | undefined;
+              const entryPrimary = typeof selection === "string" ? selection : selection?.primary;
+              if (selection !== undefined && entryPrimary !== previousModel) {
+                return [id, entry];
+              }
+              return [
+                id,
+                {
+                  ...entry,
+                  ...(selection === undefined
+                    ? {}
+                    : {
+                        model:
+                          typeof selection === "string"
+                            ? selectedModel
+                            : { ...selection, primary: selectedModel },
+                      }),
+                  ...(isObject(entry.models)
+                    ? {
+                        models: {
+                          ...entry.models,
+                          [selectedModel]: {
+                            ...(entry.models[selectedModel] ??
+                              (previousModel ? entry.models[previousModel] : undefined)),
+                            ...next.agents?.defaults.models[selectedModel],
+                          },
+                        },
+                      }
+                    : {}),
+                },
+              ];
+            }),
+          )
+        : entries;
     const selections = [
       nextModel,
-      ...(values.agents?.entries &&
-      typeof values.agents.entries === "object" &&
-      !Array.isArray(values.agents.entries)
-        ? Object.values(values.agents.entries).map((entry) => entry?.model)
+      ...(nextEntries && typeof nextEntries === "object" && !Array.isArray(nextEntries)
+        ? Object.values(nextEntries).map((entry) => entry?.model)
         : []),
     ];
     const referencedModels = new Set(
@@ -1132,9 +1185,17 @@ function renderAgentForm(
     );
     if (previousModel && !referencedModels.has(previousModel)) {
       delete modelSettings[previousModel];
+      if (nextEntries !== entries) {
+        for (const entry of Object.values(nextEntries ?? {})) {
+          if (isObject(entry?.models)) {
+            delete entry.models[previousModel];
+          }
+        }
+      }
     }
     values.agents = {
       ...values.agents,
+      ...(nextEntries === undefined ? {} : { entries: nextEntries }),
       defaults: {
         ...values.agents?.defaults,
         model: nextModel,
@@ -1148,9 +1209,9 @@ function renderAgentForm(
     const previousId =
       typeof previousModel === "string"
         ? previousModel.slice(previousModel.indexOf("/") + 1)
-        : pendingProviderModel;
+        : undefined;
     // Keep transport and model metadata while no model is selected.
-    pendingProviderModel = selectedModel || resetTransport ? undefined : previousId;
+    pendingPrimaryModel = selectedModel ? undefined : previousModel;
     if (resetTransport) {
       delete providers.openai;
       delete providers.anthropic;
@@ -1868,7 +1929,7 @@ function renderAgentForm(
     pluginApprovers,
     edited,
     pendingModelSettings,
-    pendingProviderModel,
+    pendingPrimaryModel,
     configurationSecretBindings,
     stagedChannelSecrets,
     modelCredentialSource,

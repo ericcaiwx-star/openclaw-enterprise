@@ -336,6 +336,183 @@ test("Selecting an existing fallback keeps the referenced model catalog deployab
   }
 });
 
+test("Changing a Preset model keeps explicit and inherited roster selections deployable", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap("Roster model selection");
+  const namespace = await fixture.createNamespace("Roster model choices", { ready: true });
+  const reference = (id: string) => `openai/${id}`;
+  const original = "primary-model";
+  const fallback = "fallback-model";
+  const replacement = "replacement-model";
+  const policy = (alias: string, temperature: number) => ({
+    agentRuntime: { id: "openclaw" },
+    alias,
+    params: { temperature },
+  });
+  const initialValues = {
+    agents: {
+      ownership: "explicit",
+      defaults: {
+        model: { primary: reference(original), fallbacks: [reference(fallback)] },
+        models: {
+          [reference(original)]: policy("Default primary", 0.2),
+          [reference(fallback)]: policy("Default fallback", 0.3),
+        },
+      },
+      entries: {
+        main: {
+          model: reference(original),
+          models: {
+            [reference(original)]: policy("Main primary", 0.4),
+            [reference(replacement)]: policy("Main replacement", 0.7),
+          },
+        },
+        assistant: {
+          model: { primary: reference(original), fallbacks: [reference(fallback)] },
+          models: {
+            [reference(original)]: policy("Assistant primary", 0.5),
+            [reference(fallback)]: policy("Assistant fallback", 0.6),
+            [reference(replacement)]: policy("Assistant replacement", 0.8),
+          },
+          workspace: "/workspace/synthetic-assistant",
+        },
+        inherited: {
+          models: {
+            [reference(original)]: policy("Inherited primary", 0.9),
+            [reference(fallback)]: policy("Inherited fallback", 1),
+          },
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://models.example.test/v1",
+          api: "openai-responses",
+          models: [original, fallback].map((id) => ({
+            id,
+            name: id,
+            contextWindow: 128000,
+            maxTokens: 8192,
+            reasoning: true,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          })),
+        },
+      },
+    },
+  };
+  const { model: originalModel, ...defaultSettings } = initialValues.agents.defaults;
+  for (const shape of ["default-object", "default-string", "no-default"] as const) {
+    const values = {
+      ...initialValues,
+      agents: {
+        ...initialValues.agents,
+        defaults: {
+          ...defaultSettings,
+          ...(shape === "no-default"
+            ? {}
+            : { model: shape === "default-object" ? originalModel : reference(original) }),
+        },
+        entries: {
+          main: initialValues.agents.entries.main,
+          assistant: initialValues.agents.entries.assistant,
+          // Without a default model, every entry must explicitly select its primary.
+          ...(shape === "no-default" ? {} : { inherited: initialValues.agents.entries.inherited }),
+        },
+      },
+    };
+    // All explicit entries share the primary; an entry without a model inherits it.
+    const baseline = await fixture.createConfiguration(namespace.id, values);
+    assert.equal(resolveConfiguredHarnessId(baseline.values), "openclaw");
+    const preset: FixtureResponse<Preset> = await fixture.request(
+      "POST",
+      `/namespaces/${namespace.id}/presets`,
+      {
+        body: {
+          name: `Roster models ${shape}`,
+          template: { configuration: { values }, agent: { executionMode: "embedded" } },
+        },
+      },
+    );
+    assert.equal(preset.status, 201, JSON.stringify(preset.body));
+    const { page } = await newPage(t, fixture);
+    await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+    await page.getByLabel("Preset template").selectOption(preset.data.id);
+    await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+    const model = page.getByLabel("Model ID", { exact: true });
+    const editor = page.locator("#configuration-json");
+    for (const id of [replacement, "another-model"]) {
+      t.diagnostic(`Selecting ${shape} roster primary ${id}`);
+      if (id !== replacement) {
+        // Clearing is a temporary edit: it must not discard explicit or inherited local policy.
+        await model.fill("");
+        await model.press("Tab");
+        const cleared: typeof values = JSON.parse(await editor.inputValue());
+        assert.equal(cleared.agents.entries.main.model, reference(replacement));
+        if (values.agents.entries.inherited) {
+          assert.deepEqual(cleared.agents.entries.inherited?.models, {
+            [reference(replacement)]: values.agents.entries.inherited.models[reference(original)],
+            [reference(fallback)]: values.agents.entries.inherited.models[reference(fallback)],
+          });
+        }
+      }
+      await model.fill(id);
+      await model.press("Tab");
+      const selected: typeof values = JSON.parse(await editor.inputValue());
+      const configuration = await fixture.createConfiguration(namespace.id, selected);
+      const reread: FixtureResponse<ConfigurationWire> = await fixture.request(
+        "GET",
+        `/namespaces/${namespace.id}/configurations/${configuration.id}`,
+      );
+      assert.equal(reread.status, 200);
+      assert.deepEqual(reread.data.values, selected);
+      // Saving the form's output must retain the common primary required by deployment admission.
+      assert.equal(resolveConfiguredHarnessId(reread.data.values), "openclaw");
+      assert.deepEqual(
+        selected.agents.defaults.model,
+        shape === "default-object"
+          ? { primary: reference(id), fallbacks: [reference(fallback)] }
+          : reference(id),
+      );
+      assert.equal(selected.agents.entries.main.model, reference(id));
+      assert.deepEqual(selected.agents.entries.main.models, {
+        [reference(id)]: values.agents.entries.main.models[reference(replacement)],
+      });
+      assert.deepEqual(selected.agents.entries.assistant, {
+        ...values.agents.entries.assistant,
+        model: { primary: reference(id), fallbacks: [reference(fallback)] },
+        models: {
+          [reference(id)]: values.agents.entries.assistant.models[reference(replacement)],
+          [reference(fallback)]: values.agents.entries.assistant.models[reference(fallback)],
+        },
+      });
+      assert.deepEqual(
+        selected.agents.entries.inherited,
+        values.agents.entries.inherited
+          ? {
+              models: {
+                [reference(id)]: values.agents.entries.inherited.models[reference(original)],
+                [reference(fallback)]: values.agents.entries.inherited.models[reference(fallback)],
+              },
+            }
+          : undefined,
+      );
+      assert.deepEqual(selected.agents.defaults.models, {
+        [reference(id)]: values.agents.defaults.models[reference(original)],
+        [reference(fallback)]: values.agents.defaults.models[reference(fallback)],
+      });
+      const provider = selected.models.providers.openai;
+      assert.deepEqual(
+        provider.models.map((entry) => entry.id),
+        [id, fallback],
+      );
+      assert.deepEqual(provider.models[1], values.models.providers.openai.models[1]);
+      assert.equal(provider.baseUrl, values.models.providers.openai.baseUrl);
+      assert.equal(provider.api, values.models.providers.openai.api);
+    }
+  }
+});
+
 test("Runtime-auth Presets retain OpenClaw when changing from Anthropic to OpenAI", async (t) => {
   const { fixture, namespace } = await createRuntimeAuthFixture(t, "Runtime Preset providers", {
     defaultPresets: [defaultCodexPreset],
