@@ -317,6 +317,28 @@ test("import refuses overlapping tenant destinations before changing the map or 
     [],
   );
 
+  // A not-yet-existing target must not be partly created before the second source conflicts.
+  await assert.rejects(
+    importTenants(
+      fixture.api,
+      bundle,
+      {},
+      {
+        ...options,
+        names: { "source-a": "not-created", "source-b": "not-created" },
+      },
+    ),
+    /Namespaces source-a and source-b both target not-created/u,
+  );
+  assert.equal(
+    (await fixture.api.expect("GET", "/namespaces")).data.some(
+      ({ name }) => name === "not-created",
+    ),
+    false,
+  );
+  assert.deepEqual(state, { ids: {}, deployed: [] });
+  assert.equal(saves, 0);
+
   // A map saved by an older import can carry the same conflict even after renames change.
   const overlapping = {
     ids: Object.fromEntries(sources.map(({ id }) => [id, target.id])),
@@ -334,7 +356,7 @@ test("import refuses overlapping tenant destinations before changing the map or 
     [],
   );
 
-  // A skipped source does not reserve a destination or prevent a normal one-tenant import.
+  // A skipped source without a saved destination does not prevent a normal one-tenant import.
   const imported = await importTenants(fixture.api, bundle, {}, { ...options, skip: ["source-b"] });
   assert.equal(imported.complete, true);
   assert.equal(state.ids[sources[0].id], target.id);
@@ -368,6 +390,47 @@ test("import refuses overlapping tenant destinations before changing the map or 
       ({ name }) => name,
     ),
     ["source-a readers"],
+  );
+
+  // A previously imported source retains its destination when the skip selection changes.
+  const swappedTarget = await created(fixture, "/namespaces", { name: "swapped" });
+  await markReady(fixture, swappedTarget.id);
+  const swappedState = { ids: {}, deployed: [] };
+  const firstPass = await importTenants(
+    fixture.api,
+    bundle,
+    {},
+    {
+      ...options,
+      state: swappedState,
+      names: { "source-b": "swapped" },
+      skip: ["source-a"],
+    },
+  );
+  assert.equal(firstPass.complete, true);
+  const swappedBefore = structuredClone(swappedState);
+  const savedBeforeSwap = saves;
+  await assert.rejects(
+    importTenants(
+      fixture.api,
+      bundle,
+      {},
+      {
+        ...options,
+        state: swappedState,
+        names: { "source-a": "swapped" },
+        skip: ["source-b"],
+      },
+    ),
+    /both resolve to Namespace.*swapped/u,
+  );
+  assert.deepEqual(swappedState, swappedBefore);
+  assert.equal(saves, savedBeforeSwap);
+  assert.deepEqual(
+    (await fixture.api.expect("GET", `/namespaces/${swappedTarget.id}/iam/roles`)).data.map(
+      ({ name }) => name,
+    ),
+    ["source-b readers"],
   );
 });
 

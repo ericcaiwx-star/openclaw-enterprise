@@ -380,16 +380,26 @@ export async function importTenants(
   // Namespaces first: each needs its tenant RoleBindings before it becomes ready.
   const existing = await list(api, "/namespaces");
   const destinations = new Map();
-  for (const namespace of namespaces) {
-    const destination =
-      ids.get(namespace.id) ?? existing.find(({ name }) => name === targetName(namespace))?.id;
+  const resolved = [
+    // A saved destination remains owned even when its source is skipped on this run.
+    ...bundle.namespaces.map((namespace) => [namespace, ids.get(namespace.id)]),
+    ...namespaces
+      .filter((namespace) => !ids.has(namespace.id))
+      .map((namespace) => [
+        namespace,
+        existing.find(({ name }) => name === targetName(namespace))?.id,
+      ]),
+  ];
+  for (const [namespace, destination] of resolved) {
     if (destination === undefined) {
       continue;
     }
     if (destinations.has(destination)) {
+      const name = existing.find(({ id }) => id === destination)?.name;
       throw new SplitLayoutError(
         `Namespaces ${destinations.get(destination)} and ${namespace.name} both resolve to ` +
-          `Namespace ${destination}; choose separate destinations and review the saved ID map`,
+          `Namespace ${destination}${name === undefined ? "" : ` (${name})`}; ` +
+          "choose separate destinations and review the saved ID map",
       );
     }
     destinations.set(destination, namespace.name);
