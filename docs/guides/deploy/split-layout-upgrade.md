@@ -177,6 +177,13 @@ Configurations, workspace files, transcripts and Secret values.
      --rename team-a=team-a-2 --skip default
    ```
 
+   Give each selected source Namespace a distinct target name. Import refuses
+   overlapping `--rename` targets or two selected sources that resolve to one
+   Namespace through saved IDs or existing names, before it changes the target
+   or saves the map.
+   Choose separate targets or skip a source; review an old conflicting map and
+   any already imported resources before retrying.
+
    It creates the Namespaces and exits `3` until they are `ready`.
    [Grant tenant RoleBindings](production-agents.md#grant-tenant-rolebindings)
    for each one, then run the same command again. The ID map records every old

@@ -280,6 +280,97 @@ test("import re-creates tenants under new IDs, waits for readiness, and resumes"
   );
 });
 
+test("import refuses overlapping tenant destinations before changing the map or target", async () => {
+  const fixture = await createFixture();
+  const sources = [];
+  for (const name of ["source-a", "source-b"]) {
+    const namespace = await created(fixture, "/namespaces", { name });
+    await markReady(fixture, namespace.id);
+    await created(fixture, `/namespaces/${namespace.id}/iam/roles`, {
+      name: `${name} readers`,
+      permissions: [{ action: "read", resourceKind: "configuration" }],
+    });
+    sources.push(namespace);
+  }
+  const target = await created(fixture, "/namespaces", { name: "restored" });
+  await markReady(fixture, target.id);
+  const bundle = await exportTenants(fixture.api);
+  bundle.namespaces = bundle.namespaces.filter(({ id }) =>
+    sources.some((source) => source.id === id),
+  );
+  const state = { ids: {}, deployed: [] };
+  let saves = 0;
+  const options = {
+    state,
+    save: () => saves++,
+    names: { "source-a": "restored", "source-b": "restored" },
+    deploy: false,
+  };
+  await assert.rejects(
+    importTenants(fixture.api, bundle, {}, options),
+    /Namespaces source-a and source-b both target restored/u,
+  );
+  assert.deepEqual(state, { ids: {}, deployed: [] });
+  assert.equal(saves, 0);
+  assert.deepEqual(
+    (await fixture.api.expect("GET", `/namespaces/${target.id}/iam/roles`)).data,
+    [],
+  );
+
+  // A map saved by an older import can carry the same conflict even after renames change.
+  const overlapping = {
+    ids: Object.fromEntries(sources.map(({ id }) => [id, target.id])),
+    deployed: [],
+  };
+  const before = structuredClone(overlapping);
+  await assert.rejects(
+    importTenants(fixture.api, bundle, {}, { ...options, state: overlapping, names: {} }),
+    /Namespaces source-a and source-b both resolve to Namespace/u,
+  );
+  assert.deepEqual(overlapping, before);
+  assert.equal(saves, 0);
+  assert.deepEqual(
+    (await fixture.api.expect("GET", `/namespaces/${target.id}/iam/roles`)).data,
+    [],
+  );
+
+  // A skipped source does not reserve a destination or prevent a normal one-tenant import.
+  const imported = await importTenants(fixture.api, bundle, {}, { ...options, skip: ["source-b"] });
+  assert.equal(imported.complete, true);
+  assert.equal(state.ids[sources[0].id], target.id);
+  assert.equal(state.ids[sources[1].id], undefined);
+  assert.deepEqual(
+    (await fixture.api.expect("GET", `/namespaces/${target.id}/iam/roles`)).data.map(
+      ({ name }) => name,
+    ),
+    ["source-a readers"],
+  );
+
+  // A partial resume must compare saved IDs with targets resolved by live names, too.
+  const partial = structuredClone(state);
+  const savesBeforeResume = saves;
+  await assert.rejects(
+    importTenants(
+      fixture.api,
+      bundle,
+      {},
+      {
+        ...options,
+        names: { "source-b": "restored" },
+      },
+    ),
+    /Namespaces source-a and source-b both resolve to Namespace/u,
+  );
+  assert.deepEqual(state, partial);
+  assert.equal(saves, savesBeforeResume);
+  assert.deepEqual(
+    (await fixture.api.expect("GET", `/namespaces/${target.id}/iam/roles`)).data.map(
+      ({ name }) => name,
+    ),
+    ["source-a readers"],
+  );
+});
+
 test("discard refuses a stale bundle or one missing workspace files, before deleting", async () => {
   const fixture = await createFixture();
   const seeded = await seedTenant(fixture);

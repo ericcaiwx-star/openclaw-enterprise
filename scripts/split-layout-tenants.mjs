@@ -355,6 +355,19 @@ export async function importTenants(
     throw new SplitLayoutError(problems.join("\n"));
   }
   const ids = new Map(Object.entries(state.ids));
+  // Each source tenant must keep a separate destination, including on a resumed import.
+  // Otherwise adopting an empty Namespace can silently merge tenants before any API conflict.
+  const targets = new Map();
+  for (const namespace of namespaces) {
+    const name = targetName(namespace);
+    if (targets.has(name)) {
+      throw new SplitLayoutError(
+        `Namespaces ${targets.get(name)} and ${namespace.name} both target ${name}; ` +
+          "use distinct --rename targets or --skip one Namespace",
+      );
+    }
+    targets.set(name, namespace.name);
+  }
   const record = (oldId, newId) => {
     ids.set(oldId, newId);
     state.ids = Object.fromEntries(ids);
@@ -366,6 +379,21 @@ export async function importTenants(
 
   // Namespaces first: each needs its tenant RoleBindings before it becomes ready.
   const existing = await list(api, "/namespaces");
+  const destinations = new Map();
+  for (const namespace of namespaces) {
+    const destination =
+      ids.get(namespace.id) ?? existing.find(({ name }) => name === targetName(namespace))?.id;
+    if (destination === undefined) {
+      continue;
+    }
+    if (destinations.has(destination)) {
+      throw new SplitLayoutError(
+        `Namespaces ${destinations.get(destination)} and ${namespace.name} both resolve to ` +
+          `Namespace ${destination}; choose separate destinations and review the saved ID map`,
+      );
+    }
+    destinations.set(destination, namespace.name);
+  }
   for (const namespace of namespaces) {
     if (ids.has(namespace.id)) {
       continue;
