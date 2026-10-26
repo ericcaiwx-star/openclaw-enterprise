@@ -1,7 +1,7 @@
 ---
 created: 2026-08-31
-updated: 2026-10-26
-last_updated_session: Codex/01a13654-be66-7741-b54f-f8ae80f2d496
+updated: 2026-10-27
+last_updated_session: Codex/01a16ff3-354f-7873-a064-92d0ff2bcf0f
 ---
 
 # Agent Workspace Files Flow
@@ -83,6 +83,11 @@ creates a stopped Agent and, when keys were supplied, a private `workspaceSetups
 record keyed by exact Namespace/Agent. No AgentRevision is created. Inputs do
 not enter the Agent, Configuration, Agent revision snapshot, public response, or
 metadata-only create audit. API strings are preserved; Console textareas use LF newlines.
+
+`packages/occ/src/index.ts:updateAgent` keeps an omitted Configuration ID.
+Completed setup is rechecked when the resolved Configuration ID or execution
+mode changes. Saving Gateway managed mode alone keeps both. Pending setup is
+checked on each update; deployment checks completed setup too.
 
 ### 2. Deployment initializes storage before execution
 
@@ -362,6 +367,8 @@ replays it. Cleanup closes the native client.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-27 07:45: Resolve omitted Configuration IDs before checking Agent update topology. (Codex/01a16ff3-354f-7873-a064-92d0ff2bcf0f - 46f6f41f4763335da2512d5127e7082987df77f8)
 
 - 2026-10-26: An Agent with no running version answers `409` instead of `503`. (fix-dogfood-r51)
 
