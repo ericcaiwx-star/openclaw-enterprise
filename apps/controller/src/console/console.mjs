@@ -1,5 +1,5 @@
 import { renderInstallationConfigurations } from "./driver-configurations.mjs";
-import { element, button, statusBlock, trackVisualViewport } from "./dom.mjs";
+import { element, button, requestIdDisclosure, statusBlock, trackVisualViewport } from "./dom.mjs";
 import {
   agentPageReadRefusal,
   clearResolvedSecretNames,
@@ -50,6 +50,10 @@ let observabilityOwner = null;
 let installationAccessProbe = null;
 // Whether that owner administers the Installation: true, false, or null when unknown.
 let installationAdmin = null;
+// Set once this page load knows that answer is still true; see administrationRead.
+let administrationConfirmed = false;
+// The Installation-administration read this page load is waiting on, while it runs.
+let administrationCheck = null;
 const installationAccessStorageKey = "occ.console.installationAccess";
 const deniedReadsStorageKey = "occ.console.deniedReads";
 // Set once this tab has a session, until it signs out; see rememberSignedIn.
@@ -205,18 +209,18 @@ function providerFailure(label) {
   return (password) =>
     password
       ? `Could not sign in with ${label}. Try again or use your password.`
-      : `Could not sign in with ${label}. Try again, or ask an administrator to attach your ${label} identity to your account.`;
+      : `Could not sign in with ${label}. Try again, or ask an Installation administrator to attach your ${label} identity to your account.`;
 }
 
 // GitHub sign-in refused by the organization and team allowlist (RFC-0061). The controller
 // sends only these reasons; anything else keeps the generic provider message.
 const githubMembershipFailures = {
   membership: (password) =>
-    `Your GitHub account is not a member of an organization or team allowed to sign in here. If you were invited, accept the invitation on GitHub and try again; otherwise ask an administrator for access${password ? " or use your password" : ""}.`,
+    `Your GitHub account is not a member of an organization or team allowed to sign in here. If you were invited, accept the invitation on GitHub and try again; otherwise ask an Installation administrator for access${password ? " or use your password" : ""}.`,
   "membership-unavailable": (password) =>
     password
       ? "Could not check your GitHub organization membership. Try again later or use your password."
-      : "Could not check your GitHub organization membership. Try again later; if this keeps happening, ask an administrator.",
+      : "Could not check your GitHub organization membership. Try again later; if this keeps happening, ask an Installation administrator.",
 };
 
 // The provider could not answer, or refused this Installation's client: an outage or a
@@ -226,7 +230,7 @@ function providerUnavailableFailure(label) {
   return (password) =>
     password
       ? `${label} sign-in is unavailable right now. Try again later or use your password.`
-      : `${label} sign-in is unavailable right now. Try again later. If you are an administrator, use Recovery sign-in.`;
+      : `${label} sign-in is unavailable right now. Try again later. If you are an Installation administrator, use Recovery sign-in.`;
 }
 
 // The callback failed inside OCE (its database or audit store), so no sign-in can finish.
@@ -277,7 +281,7 @@ function providerExchangeFailure(error, label) {
   // configures the provider (it was removed after the start), which the provider list shows
   // anyway. Starting again would fail the same way (finding 2555).
   if (error.status === 403) {
-    return `Could not finish signing in with ${label}. ${label} sign-in is no longer available on this Installation. Use another sign-in method, or ask an administrator.`;
+    return `Could not finish signing in with ${label}. ${label} sign-in is no longer available on this Installation. Use another sign-in method, or ask an Installation administrator.`;
   }
   return `Could not finish signing in with ${label}. The sign-in in this tab did not complete in time, or another sign-in replaced it. Select Continue with ${label} to start again.`;
 }
@@ -412,25 +416,39 @@ function probeInstallationAccess(owner) {
 // 2622). An administrator is probed for the destination URL, which the API allows. Gating
 // only: the API still authorizes every request. With no readable Namespace, or no answer, the
 // console probes.
-function installationAccess(owner, selectedRead, selectedPath) {
-  const readableId = namespaces.some((item) => item.id === namespaceId)
-    ? namespaceId
-    : (namespaces[0]?.id ?? null);
+function installationAccess(owner, selectedRead) {
+  const readableId = readableNamespaceId();
   const permissions =
-    readableId === null
-      ? Promise.resolve(null)
-      : selectedRead && readableId === namespaceId
-        ? selectedRead
-        : request(
-            readableId === namespaceId
-              ? selectedPath
-              : `/namespaces/${encodeURIComponent(readableId)}/permissions`,
-          ).catch(() => null);
+    selectedRead && readableId !== null && readableId === namespaceId
+      ? selectedRead
+      : readableNamespacePermissions();
   return permissions.then((answer) =>
     answer?.installation?.administer === false
       ? { url: null, admin: false, settled: true }
       : probeInstallationAccess(owner),
   );
+}
+
+// The selected Namespace when readable, else the first readable one, else null.
+function readableNamespaceId() {
+  return namespaces.some((item) => item.id === namespaceId)
+    ? namespaceId
+    : (namespaces[0]?.id ?? null);
+}
+
+// A readable Namespace's permission answer, or null without one or when the read fails. Reading
+// it audits nothing.
+function readableNamespacePermissions(options = {}) {
+  return namespacePermissionsRead(options).catch(() => null);
+}
+
+// The same answer, rejecting when the read fails, for a caller that must tell a failure (an
+// unknown answer) from no readable Namespace.
+function namespacePermissionsRead(options) {
+  const readableId = readableNamespaceId();
+  return readableId === null
+    ? Promise.resolve(null)
+    : request(`/namespaces/${encodeURIComponent(readableId)}/permissions`, options);
 }
 
 function forgetInstallationAccess() {
@@ -439,6 +457,96 @@ function forgetInstallationAccess() {
   } catch {
     // Nothing to clear without tab storage.
   }
+}
+
+// The caller does not administer the Installation: true for this tab, not kept across reloads,
+// which ask the permission answer again at no audited cost. The Observability link goes away.
+function settleNotAdministrator() {
+  forgetInstallationAccess();
+  observabilityUrl = null;
+  installationAdmin = false;
+  observabilityOwner = sessionOwnerKey(session);
+  shellUI.dropObservabilityLink();
+}
+
+// The refusal of a read only Installation administration may make, refused here without sending
+// it: this tab already knows the caller does not administer the Installation.
+function administrationRefusal() {
+  return Object.assign(new Error("Your access does not include Installation administration."), {
+    status: 403,
+    code: "FORBIDDEN",
+    notAdministrator: true,
+  });
+}
+
+// Reads the console makes because it takes the caller for an Installation administrator (IAM
+// policy lists and Driver configuration schemas, which need that administration; a Secret's
+// metadata read by ID, which other grants may allow too), on an answer this tab settled earlier.
+// An administrator revoked while signed in keeps that answer until one of them is refused, and the
+// API audits each refusal: the Access tab, a bound Secret and Settings added six to the one
+// Backends refusal (finding D760). So a page load sends them one at a time until one that needs
+// administration succeeds. A refusal asks a readable Namespace's permission answer, which audits
+// nothing, because a Restriction can refuse one read to an administrator; unless it confirms
+// administration, the refusal settles "not an administrator" for this tab, as a Backends refusal
+// does (finding 2627), and the reads still waiting are refused here, unsent. A failed answer
+// settles nothing (finding 2637). A probe answered in this page load already confirms the answer.
+// Gating only: the API still authorizes every read.
+function administrationRead(path, options) {
+  if (installationAdmin === false) {
+    return Promise.reject(administrationRefusal());
+  }
+  if (administrationConfirmed) {
+    return sendRequest(path, options);
+  }
+  if (administrationCheck) {
+    // A read waiting behind the check belongs to this page: leaving it or signing out aborts the
+    // check's read, which settles nothing, so the waiter is aborted too instead of being sent
+    // under the next page (finding 2643).
+    const pageReads = lifetime.signal;
+    return administrationCheck.then(() => {
+      pageReads.throwIfAborted();
+      return administrationRead(path, options);
+    });
+  }
+  const owner = sessionOwnerKey(session);
+  const read = sendRequest(path, options);
+  const check = read.then(
+    () => {
+      if (options.installationAdministration === "required") {
+        administrationConfirmed = true;
+      }
+    },
+    async (error) => {
+      if (error?.status !== 403) {
+        return;
+      }
+      let answer;
+      try {
+        answer = await namespacePermissionsRead({ outlivesView: true });
+      } catch {
+        // No answer (a network failure or a 5xx) is unknown, not a refusal: an administrator
+        // whose read a Restriction refused keeps that answer, and the next page load asks again
+        // (finding 2637).
+        return;
+      }
+      if (owner === null || owner !== sessionOwnerKey(session)) {
+        return;
+      }
+      if (answer?.installation?.administer === true) {
+        administrationConfirmed = true;
+      } else {
+        settleNotAdministrator();
+        error.notAdministrator = true;
+      }
+    },
+  );
+  administrationCheck = check;
+  void check.then(() => {
+    if (administrationCheck === check) {
+      administrationCheck = null;
+    }
+  });
+  return check.then(() => read);
 }
 
 // Agent detail reads that the viewer's grants may not allow (saved settings, native admin
@@ -599,16 +707,35 @@ function takeNativeFragment(current) {
 }
 
 // An Agent page's Secret link (finding D757) opens that Secret on the Secrets page once. Drop the
-// parameter in place before the page loads, so the header's Refresh does not reopen it.
-function takeLinkedSecret() {
+// parameter in place before the page loads, so the header's Refresh does not reopen it, and keep
+// the Secret until the Secrets page shows it or says it is unlisted: a load that ends at sign-in,
+// an expired session or a failed load's Retry still opens it (finding 2645). Another navigation
+// forgets it.
+let linkedSecret = null;
+
+function takeLinkedSecret(fromNavigation) {
   const { url } = route();
   const secretId = url.searchParams.get("secret");
-  if (url.pathname !== "/console/secrets" || secretId === null) {
-    return null;
+  const namespace = url.searchParams.get("namespace");
+  if (url.pathname !== "/console/secrets") {
+    linkedSecret = null;
+  } else if (secretId !== null) {
+    url.searchParams.delete("secret");
+    replaceUrl(url.pathname + url.search);
+    linkedSecret = { id: secretId, namespace };
+  } else if (fromNavigation || linkedSecret?.namespace !== namespace) {
+    linkedSecret = null;
   }
-  url.searchParams.delete("secret");
-  replaceUrl(url.pathname + url.search);
-  return secretId;
+  return linkedSecret?.id ?? null;
+}
+
+// The sign-in destination for a page: its route, with a Secrets page link's Secret not yet shown.
+function loginDestination(current) {
+  const url = new URL(pageUrl(current.target, current.namespace), location.origin);
+  if (current.feature === "secrets" && linkedSecret?.namespace === current.namespace) {
+    url.searchParams.set("secret", linkedSecret.id);
+  }
+  return captureIntent(url.pathname + url.search);
 }
 
 const shellUI = createShell({ app, pages, route, pageUrl, navigate, loadPage, logout });
@@ -647,12 +774,18 @@ function namespaceAccessPanel(view, title, description) {
   view.querySelector(".state-panel > p")?.setAttribute("id", NAMESPACE_ACCESS_REASON_ID);
   shellUI.describeNamespaceSelector();
 }
-const request = createApiClient({
+const sendRequest = createApiClient({
   lifetime,
   hasSession: () => session !== null,
   onExpired: () => showExpiredLogin(),
   sessionKey: () => pinnedSessionKey,
 });
+
+function request(path, options = {}) {
+  return options.installationAdministration
+    ? administrationRead(path, options)
+    : sendRequest(path, options);
+}
 const retainedViews = new Map();
 // Other first visits that settle sooner swap pages without showing loading (finding 1407).
 const loadingDelayMs = 250;
@@ -949,6 +1082,9 @@ function resetReads({ retainView = false, returnLink = null } = {}) {
   leaveGuard = null;
   writeInFlight = null;
   mountedAgent = null;
+  // Each page load confirms Installation administration again before its reads that need it.
+  administrationConfirmed = false;
+  administrationCheck = null;
   clearPasswordInputs();
   shellUI.reset();
   if (retainView) {
@@ -1031,7 +1167,7 @@ function clearDrafts() {
 function showExpiredLogin() {
   const current = route();
   // Keep only a validated read destination; reset private views and drafts in showLogin.
-  const destination = pendingIntent ?? captureIntent(pageUrl(current.target, current.namespace));
+  const destination = pendingIntent ?? loginDestination(current);
   showLogin("Your session has expired.", destination);
 }
 
@@ -1319,7 +1455,7 @@ async function loadPage({
   }
   // A refocus or visibility recheck of the shown page, as opposed to a navigation.
   const resumingView = reuseView && !fromNavigation;
-  const linkedSecretId = takeLinkedSecret();
+  const linkedSecretId = takeLinkedSecret(fromNavigation);
   const current = route();
   const nativeIntent = takeNativeFragment(current);
   if (fromNavigation && nativeIntent === null) {
@@ -1604,7 +1740,7 @@ async function loadPage({
       const destination =
         providerError !== null || current.feature === "login"
           ? null
-          : (pendingIntent ?? captureIntent(pageUrl(current.target, current.namespace)));
+          : (pendingIntent ?? loginDestination(current));
       showLogin(
         providerError !== null
           ? (reasonFailure ?? providerFailure(providerError.label))
@@ -1744,9 +1880,7 @@ async function loadPage({
         ? request(permissionsPath).catch(() => null)
         : null;
     const accessRead =
-      owner && observabilityOwner === owner
-        ? null
-        : installationAccess(owner, permissionsRead, permissionsPath);
+      owner && observabilityOwner === owner ? null : installationAccess(owner, permissionsRead);
     // Awaited after the first reads; a first read that fails first leaves it unawaited.
     accessRead?.catch(() => {});
     let firstPermissions = null;
@@ -1768,6 +1902,7 @@ async function loadPage({
             observabilityUrl = access.url;
             installationAdmin = access.admin;
             observabilityOwner = access.settled ? owner : null;
+            administrationConfirmed = access.admin === true;
           }
           if (installationAdmin === false) {
             throw Object.assign(new Error("Access denied."), { status: 403, code: "FORBIDDEN" });
@@ -1796,6 +1931,7 @@ async function loadPage({
       observabilityUrl = access.url;
       installationAdmin = access.admin;
       observabilityOwner = access.settled ? owner : null;
+      administrationConfirmed = access.admin === true;
     }
     const retainedState = retainedView?.state;
     let unchanged = false;
@@ -1825,10 +1961,15 @@ async function loadPage({
             refused.set(path, 403);
             return;
           }
+          // An administration read keeps its gate: once this tab knows the caller does not
+          // administer the Installation, it is refused here, unsent (finding 2636).
           try {
             fresh.set(
               path,
-              await request(path, { includeMeta: retainedState.metaReads.has(path) }),
+              await request(path, {
+                includeMeta: retainedState.metaReads.has(path),
+                installationAdministration: retainedState.administrationReads.get(path),
+              }),
             );
           } catch (error) {
             if (!settledRefusal(error)) {
@@ -1945,6 +2086,9 @@ async function loadPage({
       mutations: 0,
       reads: new Map(),
       metaReads: new Set(),
+      // Each read's Installation-administration option, so a return replays it gated (finding
+      // 2636).
+      administrationReads: new Map(),
       resumeHandlers: new Set(),
       revalidators: new Set(),
       user: session.user,
@@ -1965,12 +2109,19 @@ async function loadPage({
         viewState.mutations += 1;
         retainedViews.clear();
       }
+      // Records a read's answer, and its administration option, for a return to replay.
+      const recordRead = (signature) => {
+        viewState.reads.set(path, signature);
+        if (options.installationAdministration) {
+          viewState.administrationReads.set(path, options.installationAdministration);
+        }
+      };
       try {
         const result = await request(path, options);
         // Live reads (runtime status, log pages) differ on every call; replaying them to
         // revalidate a cached view would only spend the reader's rate limit.
         if ((options.method ?? "GET") === "GET" && options.revalidate !== false) {
-          viewState.reads.set(path, readSignature(result, options.includeMeta));
+          recordRead(readSignature(result, options.includeMeta));
           if (options.includeMeta) {
             viewState.metaReads.add(path);
           }
@@ -1986,7 +2137,7 @@ async function loadPage({
             viewState.reusable = false;
           }
           if (options.revalidate !== false) {
-            viewState.reads.set(path, refusedRead(error.status));
+            recordRead(refusedRead(error.status));
           }
         } else if (counted) {
           // A reread on resume replaces what an unfinished or failed one showed, including a
@@ -2316,6 +2467,8 @@ async function loadPage({
         permissions: firstPermissions,
         openSecretId: linkedSecretId,
       });
+      // Shown (its dialog opened or the unlisted note), so a later load does not reopen it.
+      linkedSecret = null;
     } else {
       if (current.feature === "backends" && backendsDenied) {
         backendsDenied = false;
@@ -2367,10 +2520,7 @@ async function loadPage({
       // Observability link stayed (finding 2627). Now the shell below drops the link, the
       // refusal's Refresh asks the permission answer again, and a reload, without the tab's
       // stored answer, asks it too. Neither is audited.
-      forgetInstallationAccess();
-      observabilityUrl = null;
-      installationAdmin = false;
-      observabilityOwner = sessionOwnerKey(session);
+      settleNotAdministrator();
     }
     shell = renderShell(current.feature);
     if (current.agentId && error.status === 404 && current.namespace === null) {
@@ -2454,11 +2604,15 @@ async function loadPage({
             ? `Your account does not have access to this page in this Namespace. Choose another Namespace, or ${ASK_INSTALLATION_ADMINISTRATOR} for access.`
             : "The read could not be completed. Retry to check current access and saved state.",
       // Retrying a permission refusal gives the same answer; the header's Refresh checks access
-      // again after a grant (finding 2549). The Request ID stays for whoever traces the denial.
+      // again after a grant (finding 2549). The Request ID stays for whoever traces the denial,
+      // behind a disclosure (finding D770).
       error.status === 403 ? undefined : "Retry",
       error.status === 403 ? undefined : () => void loadPage(),
-      error.requestId,
+      error.status === 403 ? null : error.requestId,
     );
+    if (error.status === 403 && error.requestId) {
+      shell.view.querySelector(".state-panel").append(requestIdDisclosure(error.requestId));
+    }
   } finally {
     stopLoadingTimer();
     if (openingAgentLoad === active) {

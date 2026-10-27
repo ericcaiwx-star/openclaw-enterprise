@@ -11,10 +11,13 @@ import {
   authorizationDenials,
   denyRevisionRead,
   detailUrl,
+  expireSessions,
   hasFocus,
   holdRequests,
   grantInstallationAdministration,
+  grantMember,
   login,
+  loginThroughForm,
   nativeValues,
   newPage,
   nonAuthWriteRequests,
@@ -36,13 +39,20 @@ import {
 import { agentDeleteRequests, agentStopRequests } from "./console-agents-test-support.mjs";
 import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
 import {
+  ACCESS_TAB_UNAVAILABLE,
+  AGENT_CREATE_RESTRICTED,
   AGENT_DELETE_DENIED,
   AGENT_STOP_AND_DELETE_DENIED,
   AGENT_STOP_DENIED,
   askForGrant,
   BACKENDS_DENIED,
+  BOUND_SECRET_METADATA,
+  BOUND_SECRET_READ_REFUSED,
   BOUND_SECRET_UNLISTED,
+  DIAGNOSTICS_RUNTIME_UNAVAILABLE,
+  diagnosticsRecordedFailure,
   MALFORMED_REQUEST,
+  NO_PERSISTED_STARTUP_FAILURE,
   RESOURCE_CONFLICT,
   requestedVersionUnavailable,
   stopRefused,
@@ -103,6 +113,7 @@ test("Refresh deployment also refreshes the viewed version's deployment record",
   await page.getByRole("heading", { name: "Version v1" }).waitFor();
   const activity = await expectDeploymentOutcome(page, "In progress");
   const record = await expectVersionRecord(page, "In progress");
+  await record.getByText(NO_PERSISTED_STARTUP_FAILURE, { exact: true }).waitFor();
   // A new failure must become visible even if the reader folded the pending progress: its card
   // leads the page, and the details stay folded under it.
   await activity.getByText("Deployment details", { exact: true }).press("Enter");
@@ -123,7 +134,7 @@ test("Refresh deployment also refreshes the viewed version's deployment record",
     .getByText("The error and its next step are at the top of this page.", { exact: true })
     .waitFor();
   assert.equal(await record.getByText(authenticationFailure.message, { exact: false }).count(), 0);
-  assert.equal(await record.getByText("No persisted startup failure.").count(), 0);
+  assert.equal(await record.getByText(NO_PERSISTED_STARTUP_FAILURE, { exact: true }).count(), 0);
 });
 
 test("Deployment activity follows pending work until it records a result", async (t) => {
@@ -385,9 +396,9 @@ test("Diagnostics explain UNAVAILABLE checks and point at the recorded failure",
   const observations = page.locator(".version-diagnostics");
   await observations.getByRole("button", { name: "Run diagnostics for this version" }).click();
   await observations.getByText("gateway / authentication").waitFor();
-  await observations.getByText(/UNAVAILABLE means the runtime did not answer/).waitFor();
+  await observations.getByText(DIAGNOSTICS_RUNTIME_UNAVAILABLE).waitFor();
   await observations
-    .getByText(/recorded deployment failed with RUNTIME_AUTHENTICATION_FAILED/)
+    .getByText(diagnosticsRecordedFailure("RUNTIME_AUTHENTICATION_FAILED"))
     .waitFor();
   // The failed record does not make the selected version a "Failed version": it is current.
   assert.equal(
@@ -608,9 +619,9 @@ test("Diagnostics explain a missing Slack channel and keep the recorded failure 
   );
   assert.equal(await observations.getByText(/NOT_CONFIGURED/).count(), 0);
   await observations
-    .getByText(/recorded deployment failed with RUNTIME_AUTHENTICATION_FAILED/)
+    .getByText(diagnosticsRecordedFailure("RUNTIME_AUTHENTICATION_FAILED"))
     .waitFor();
-  assert.equal(await observations.getByText(/UNAVAILABLE means the runtime/).count(), 0);
+  assert.equal(await observations.getByText(DIAGNOSTICS_RUNTIME_UNAVAILABLE).count(), 0);
 });
 
 test("Agent detail returns to the Agents list once background deletion finishes", async (t) => {
@@ -813,8 +824,29 @@ test("Credentials links a readable bound Secret to the Secrets page and explains
   await hint.getByText(BOUND_SECRET_UNLISTED, { exact: true }).waitFor();
   await waitForIdleFetches(member);
   assert.equal(await metadataLink(member).count(), 0);
-  assert.equal(await member.getByText("Secret metadata is bound.").count(), 0);
+  assert.equal(await member.getByText(BOUND_SECRET_METADATA, { exact: true }).count(), 0);
   assert.deepEqual(authorizationDenials(auditSink, /^openclaw\.secrets\./), []);
+  // With Secret read, the same member's disabled field names the bound metadata and links it.
+  grantMember(fixture, "link-reader", [["read", "secret"]]);
+  await member.reload();
+  await hint.getByText(BOUND_SECRET_METADATA, { exact: true }).waitFor();
+  await metadataLink(member).waitFor();
+
+  // A member who may update the Agent and operate the Secret, but not read it, can edit the
+  // field. Its hint still says why the bound Secret has no name, before how to choose another.
+  const editor = await fixture.createNamespaceMember("link-editor", namespace.id, [
+    ...AGENT_READ,
+    ["update", "agent"],
+    ["operate", "secret"],
+  ]);
+  const { page: editing } = await newPage(t, fixture);
+  await trackSettledFetches(editing);
+  await login(editing, fixture, url, editor.credentials);
+  await waitForEnabled(editing.getByLabel("API key Secret", { exact: true }));
+  await waitForIdleFetches(editing);
+  const editorHint = await editing.locator("#harness-auth-secret-status").textContent();
+  assert.ok(editorHint.startsWith(`${BOUND_SECRET_UNLISTED} `), editorHint);
+  assert.equal(await metadataLink(editing).count(), 0);
 
   const { page: admin } = await newPage(t, fixture);
   await login(admin, fixture, url);
@@ -832,7 +864,7 @@ test("Credentials links a readable bound Secret to the Secrets page and explains
   const [opened] = await Promise.all([admin.waitForEvent("popup"), named.click()]);
   const dialog = opened.getByRole("dialog", { name: "Linked model key" });
   await dialog.getByText(secret.id, { exact: true }).waitFor();
-  await dialog.getByRole("link", { name: agent.id, exact: true }).waitFor();
+  await dialog.getByRole("link", { name: "Linked Agent", exact: true }).waitFor();
   assert.equal(await opened.locator("pre").count(), 0);
   // The link opens the Secret once: the header's Refresh reloads the list without opening it
   // again, because the page dropped the parameter from its URL.
@@ -847,6 +879,40 @@ test("Credentials links a readable bound Secret to the Secrets page and explains
   // The Secrets page opens a linked Secret in the same task that draws the list.
   assert.equal(await opened.getByRole("dialog").count(), 0);
   assert.equal(new URL(opened.url()).search, `?namespace=${namespace.id}`);
+
+  // Finding 2645. The link keeps its Secret until the Secrets page shows it: through sign-in when
+  // it opens signed out, through a failed first load's Retry, and through a session that expires
+  // during the load. Each time the dialog opens and the parameter leaves the URL.
+  const expectLinkedDialog = async (page) => {
+    const linked = page.getByRole("dialog", { name: "Linked model key" });
+    await linked.getByText(secret.id, { exact: true }).waitFor();
+    assert.equal(new URL(page.url()).search, `?namespace=${namespace.id}`);
+    await linked.getByRole("button", { name: "Close", exact: true }).click();
+  };
+  const { page: signedOut } = await newPage(t, fixture);
+  await loginThroughForm(signedOut, fixture, secretPage, reader.credentials);
+  await expectLinkedDialog(signedOut);
+
+  const secretList = `${fixture.origin}/namespaces/${namespace.id}/secrets`;
+  await member.route(
+    secretList,
+    (route) => route.fulfill(apiErrorResponse(503, "DEPENDENCY_UNAVAILABLE", "Try again.")),
+    { times: 1 },
+  );
+  await member.goto(`${fixture.origin}${secretPage}`);
+  await member.getByRole("button", { name: "Retry", exact: true }).click();
+  await expectLinkedDialog(member);
+
+  const expiring = await holdRequests(t, member, secretList, { once: true });
+  await member.goto(`${fixture.origin}${secretPage}`);
+  await expiring.requested;
+  expireSessions(fixture);
+  expiring.release();
+  await member.getByText("Your session has expired").waitFor();
+  await member.getByLabel("Email", { exact: true }).fill(reader.credentials.email);
+  await member.getByLabel("Password").fill(reader.credentials.password);
+  await member.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expectLinkedDialog(member);
 });
 
 // Finding 2619. Backends need Installation administration. A member's Backends page shows the
@@ -937,6 +1003,19 @@ test("A Restriction on Agent create leaves an administrator's Installation pages
   await page.goto(String(detailUrl(fixture, namespace.id, agent.id, "draft", "configuration")));
   await page.getByRole("heading", { name: "Restricted Agent" }).waitFor();
   await page.getByRole("tab", { name: "Access", exact: true }).waitFor();
+  // The Agents list and Create Agent name the Restriction and who lifts it, not an administrator
+  // to ask: she is one (finding D759).
+  await page.goto(`${fixture.origin}/console/agents?namespace=${namespace.id}`);
+  const create = page.getByRole("button", {
+    name: "Create Agent",
+    exact: true,
+    description: AGENT_CREATE_RESTRICTED,
+  });
+  await create.waitFor();
+  assert.equal(await create.isDisabled(), true);
+  await page.goto(`${fixture.origin}/console/agents/new?namespace=${namespace.id}`);
+  await page.getByRole("heading", { name: "Creating Agents is not available" }).waitFor();
+  await page.getByRole("status").getByText(AGENT_CREATE_RESTRICTED, { exact: true }).waitFor();
   assert.deepEqual(
     authorizationDenials(auditSink, /^openclaw\.(observability|backends|iam)\./),
     [],
@@ -1077,6 +1156,378 @@ test("A Backends refusal after administration is revoked is read and audited onc
     ),
     ["openclaw.backends.list", "openclaw.backends.list"],
   );
+});
+
+// Settings shows the Installation Driver configuration heading while its schemas read is still in
+// flight. An administrator's Settings page has settled once the schemas are listed; a revoke
+// before then reaches that read and the API refuses and audits it (finding 2654).
+async function waitForDriverSchemas(page) {
+  await page.getByText(/^Inspect startup settings accepted by the selected Drivers\./).waitFor();
+}
+
+// Finding D760. An administrator revoked while signed in keeps the tab's settled answer, so the
+// first page she opens afterwards sends reads only Installation administration may make: sharing
+// policy, a bound Secret by ID, the Installation's Driver schemas. The API audits each refusal.
+// The first one is read and audited once and settles "not an administrator" for the tab; the
+// reads still waiting are refused unsent. The page takes the member path: the Access tab gives way
+// to Configuration and says why, the bound Secret's name is unavailable, Settings leaves out the
+// Driver schemas, and the Observability link goes away. The other pages read none of them again.
+// Each round starts on another page, opened right after the revoke, so it recalls the stale
+// answer. Then she may read the bound Secret herself. Last, a Restriction on Secret read refuses
+// one such read to an administrator: the permission answer, which audits nothing, still says she
+// administers, so nothing settles.
+test("Installation-administration reads after a revoke are refused and audited once", async (t) => {
+  const auditSink = new InMemoryAuditSink();
+  const url = "https://metrics.example.test/d/operations";
+  const fixture = await createConsoleAppFixture(t, { auditSink, observabilityUrl: url });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Revoked mid-session", { ready: true });
+  const secret = await fixture.createSecret(namespace.id, "Revoked model key", "hidden-model");
+  const agent = await fixture.createAgent(namespace.id, "Revoked Agent", nativeValues("x"), {
+    harnessAuth: { method: "api_key", source: secret.ref },
+  });
+  // Agent and Configuration read, no Secret read: a member once administration goes.
+  const account = await fixture.createNamespaceMember("revoked-walker", namespace.id, AGENT_READ);
+  const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
+  const requests = apiRequests(page, fixture.origin);
+  const reads = (path) => requests.filter((request) => request.path === path).length;
+  const observability = page.getByRole("link", { name: "Observability", exact: true });
+  const driverSchemas = page.getByRole("heading", { name: "Installation Driver configuration" });
+  const unlisted = page.getByText(BOUND_SECRET_UNLISTED, { exact: true });
+  const adminDenials = () =>
+    authorizationDenials(
+      auditSink,
+      /^openclaw\.(observability|backends|iam|secrets|installation)\./,
+    );
+  const settingsUrl = `${fixture.origin}/console/settings?namespace=${namespace.id}`;
+  const agentUrl = String(detailUrl(fixture, namespace.id, agent.id, "draft", "configuration"));
+  const pages = {
+    access: async () => {
+      await page.goto(String(detailUrl(fixture, namespace.id, agent.id, "draft", "access")));
+      await page.getByRole("tab", { name: "Configuration", selected: true }).waitFor();
+      await page.getByText(ACCESS_TAB_UNAVAILABLE, { exact: true }).waitFor();
+      await unlisted.waitFor();
+      await waitForIdleFetches(page);
+      assert.equal(await page.getByRole("tab", { name: "Access" }).count(), 0);
+    },
+    agent: async () => {
+      await page.goto(agentUrl);
+      await unlisted.waitFor();
+      await waitForIdleFetches(page);
+    },
+    settings: async () => {
+      await page.goto(settingsUrl);
+      await page.getByRole("heading", { name: "Signed-in account" }).waitFor();
+      await waitForIdleFetches(page);
+      assert.equal(await driverSchemas.count(), 0);
+      assert.equal(await page.getByRole("alert").count(), 0);
+    },
+    backends: async () => {
+      const refused = reads("/backends");
+      await page.goto(`${fixture.origin}/console/backends?namespace=${namespace.id}`);
+      await page.locator(".state-panel").getByText(BACKENDS_DENIED, { exact: true }).waitFor();
+      await waitForIdleFetches(page);
+      assert.equal(reads("/backends"), refused);
+    },
+  };
+
+  let revoke = grantInstallationAdministration(fixture, account.principal);
+  await login(page, fixture, settingsUrl, account.credentials);
+  for (const [round, first] of ["access", "agent", "settings"].entries()) {
+    if (round > 0) {
+      // Administration again: a page load asks the permission answer, then the probe.
+      revoke = grantInstallationAdministration(fixture, account.principal);
+      await page.goto(settingsUrl);
+    }
+    await waitForDriverSchemas(page);
+    assert.equal(await observability.getAttribute("href"), url, first);
+    revoke();
+    await pages[first]();
+    assert.equal(await observability.count(), 0, first);
+    assert.equal(adminDenials().length, round + 1, first);
+    for (const other of ["access", "agent", "settings", "backends"]) {
+      await pages[other]();
+    }
+    assert.equal(adminDenials().length, round + 1, first);
+  }
+
+  // One who may read the bound Secret herself reads it as before: her own grant allows it, so it
+  // proves nothing about administration. The sharing reads on the same page still go one at a
+  // time, and the first refusal settles her answer.
+  grantMember(fixture, "revoked-walker", [["read", "secret"]]);
+  const named = page.getByRole("link", { name: "Revoked model key", exact: true });
+  revoke = grantInstallationAdministration(fixture, account.principal);
+  await page.goto(settingsUrl);
+  await waitForDriverSchemas(page);
+  revoke();
+  await page.goto(agentUrl);
+  await named.waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(adminDenials().length, 3);
+  await page.getByRole("tab", { name: "Access", exact: true }).click();
+  await page.getByText(ACCESS_TAB_UNAVAILABLE, { exact: true }).waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(await observability.count(), 0);
+  assert.equal(adminDenials().length, 4);
+  // Opened on the Access tab, her Secret read waits behind the sharing reads and is refused
+  // unsent when the first one settles her answer. It then takes the member path, which lists
+  // the Secret, so she still sees its name.
+  revoke = grantInstallationAdministration(fixture, account.principal);
+  await page.goto(settingsUrl);
+  await waitForDriverSchemas(page);
+  revoke();
+  await page.goto(String(detailUrl(fixture, namespace.id, agent.id, "draft", "access")));
+  await page.getByText(ACCESS_TAB_UNAVAILABLE, { exact: true }).waitFor();
+  await named.waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(await observability.count(), 0);
+  assert.equal(adminDenials().length, 5);
+
+  grantInstallationAdministration(fixture, account.principal);
+  await page.goto(agentUrl);
+  await named.waitFor();
+  assert.equal(await observability.getAttribute("href"), url);
+  fixture.policy.restrictions.push({
+    id: "deny-secret-read-here",
+    namespaceId: namespace.id,
+    resourceKind: "secret",
+    action: "read",
+    effect: "deny",
+  });
+  await page.reload();
+  await page.getByText(BOUND_SECRET_READ_REFUSED, { exact: true }).waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(await observability.getAttribute("href"), url);
+  assert.equal(await page.getByRole("tab", { name: "Access", exact: true }).count(), 1);
+  assert.deepEqual(
+    adminDenials()
+      .slice(5)
+      .map((event) => event.action),
+    ["openclaw.secrets.read"],
+  );
+});
+
+// Finding 2636. A page kept for Back replays its reads to check it is unchanged. The reads only
+// Installation administration may make keep that gate on replay. First the Access tab is opened
+// as an administrator: after a revoke, the first Back to it sends one of them, the API refuses and
+// audits it, and that refusal settles "not an administrator" for the tab. The other replays, and
+// every later Back, are refused unsent. Then the Access tab is opened after a revoke: its
+// first administration read is audited and the rest are refused unsent, and Back sends none of
+// them again.
+test("Back to a kept Agent page after a revoke sends no more audited administration reads", async (t) => {
+  const auditSink = new InMemoryAuditSink();
+  const url = "https://metrics.example.test/d/operations";
+  const fixture = await createConsoleAppFixture(t, { auditSink, observabilityUrl: url });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Revoked before Back", { ready: true });
+  const secret = await fixture.createSecret(namespace.id, "Kept model key", "hidden-model");
+  const agent = await fixture.createAgent(namespace.id, "Kept Agent", nativeValues("x"), {
+    harnessAuth: { method: "api_key", source: secret.ref },
+  });
+  const account = await fixture.createNamespaceMember("revoked-reader", namespace.id, AGENT_READ);
+  const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
+  const observability = page.getByRole("link", { name: "Observability", exact: true });
+  const adminDenials = () =>
+    authorizationDenials(
+      auditSink,
+      /^openclaw\.(observability|backends|iam|secrets|installation)\./,
+    );
+  const accessUrl = String(detailUrl(fixture, namespace.id, agent.id, "draft", "access"));
+  const settingsUrl = `/console/settings?namespace=${namespace.id}`;
+  // In-app navigation keeps the Agent page for Back.
+  const leaveForAgents = async () => {
+    await page.locator("nav").getByRole("link", { name: "Agents", exact: true }).first().click();
+    await page.waitForURL(/\/console\/agents\?/);
+    await waitForIdleFetches(page);
+  };
+  const backThreeTimes = async (denials) => {
+    for (let step = 0; step < 3; step += 1) {
+      await page.goBack();
+      await page.waitForURL(new RegExp(`/console/agents/${agent.id}\\?`));
+      await waitForIdleFetches(page);
+      assert.equal(await observability.count(), 0, `Back ${step}`);
+      assert.equal(adminDenials().length, denials, `Back ${step}`);
+      await page.goForward();
+      await page.waitForURL(/\/console\/agents\?/);
+      await waitForIdleFetches(page);
+    }
+  };
+
+  let revoke = grantInstallationAdministration(fixture, account.principal);
+  await login(page, fixture, accessUrl.replace(fixture.origin, ""), account.credentials);
+  await page.getByRole("tab", { name: "Access", selected: true }).waitFor();
+  await waitForIdleFetches(page);
+  await leaveForAgents();
+  assert.equal(adminDenials().length, 0);
+  revoke();
+  await backThreeTimes(1);
+
+  // Administration again: a page load asks the permission answer, then the probe.
+  revoke = grantInstallationAdministration(fixture, account.principal);
+  await page.goto(`${fixture.origin}${settingsUrl}`);
+  await waitForDriverSchemas(page);
+  revoke();
+  await page.goto(accessUrl);
+  await page.getByText(ACCESS_TAB_UNAVAILABLE, { exact: true }).waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(adminDenials().length, 2);
+  await leaveForAgents();
+  await backThreeTimes(2);
+});
+
+// Finding 2637. A Restriction refuses an administrator's bound Secret read, and the permission
+// answer that would confirm her administration fails (here a 503). A failed answer is unknown, not
+// a refusal: she keeps the Observability link and the Access tab, and the next page load asks again.
+test("A failed permission answer after a Restriction refusal keeps an administrator's answer", async (t) => {
+  const auditSink = new InMemoryAuditSink();
+  const url = "https://metrics.example.test/d/operations";
+  const fixture = await createConsoleAppFixture(t, { auditSink, observabilityUrl: url });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Permission outage", { ready: true });
+  const secret = await fixture.createSecret(namespace.id, "Restricted model key", "hidden-model");
+  const agent = await fixture.createAgent(namespace.id, "Restricted Agent", nativeValues("x"), {
+    harnessAuth: { method: "api_key", source: secret.ref },
+  });
+  const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
+  const observability = page.getByRole("link", { name: "Observability", exact: true });
+  await login(page, fixture, `/console/settings?namespace=${namespace.id}`);
+  await page.getByRole("heading", { name: "Installation Driver configuration" }).waitFor();
+  assert.equal(await observability.getAttribute("href"), url);
+
+  fixture.policy.restrictions.push({
+    id: "deny-secret-read-outage",
+    namespaceId: namespace.id,
+    resourceKind: "secret",
+    action: "read",
+    effect: "deny",
+  });
+  const permissionsPath = `/namespaces/${namespace.id}/permissions`;
+  const isPermissions = (address) => new URL(address).pathname === permissionsPath;
+  await page.route(isPermissions, (route) =>
+    route.fulfill(apiErrorResponse(503, "DEPENDENCY_UNAVAILABLE", "Try again.")),
+  );
+  // The page load asks the permission answer first; the Restriction refusal asks it again.
+  const failedAnswers = [];
+  page.on("response", (response) => {
+    if (isPermissions(response.url()) && response.status() === 503) {
+      failedAnswers.push(response.url());
+    }
+  });
+  const refusal = page.waitForResponse(
+    (response) => /\/secrets\//.test(new URL(response.url()).pathname) && response.status() === 403,
+  );
+  await page.goto(String(detailUrl(fixture, namespace.id, agent.id, "draft", "configuration")));
+  await refusal;
+  await page.getByText(BOUND_SECRET_READ_REFUSED, { exact: true }).waitFor();
+  await waitForIdleFetches(page);
+  assert.ok(failedAnswers.length >= 1, "the permission answer failed");
+  assert.equal(await observability.getAttribute("href"), url);
+  assert.equal(await page.getByRole("tab", { name: "Access", exact: true }).count(), 1);
+  assert.deepEqual(
+    authorizationDenials(
+      auditSink,
+      /^openclaw\.(observability|backends|iam|secrets|installation)\./,
+    ).map((event) => event.action),
+    ["openclaw.secrets.read"],
+  );
+});
+
+// Finding 2643. The reads that wait behind the first administration read belong to its page.
+// A revoked administrator opens the Access tab; its first read reaches the API, which refuses and
+// audits it, and she leaves before the answer reaches the page. Leaving aborts that read, so
+// nothing settles, and the reads waiting behind it are dropped with their page instead of being
+// sent from the next one: one audited refusal, as when she stays. Signing out at the same point
+// sends nothing either.
+test("Reads waiting behind a pending administration read end with their page", async (t) => {
+  const auditSink = new InMemoryAuditSink();
+  const fixture = await createConsoleAppFixture(t, {
+    auditSink,
+    observabilityUrl: "https://metrics.example.test/d/operations",
+  });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Left mid-check", { ready: true });
+  const secret = await fixture.createSecret(namespace.id, "Mid-check key", "hidden-model");
+  const agent = await fixture.createAgent(namespace.id, "Mid-check Agent", nativeValues("x"), {
+    harnessAuth: { method: "api_key", source: secret.ref },
+  });
+  const account = await fixture.createNamespaceMember("mid-check", namespace.id, AGENT_READ);
+  const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
+  const requests = apiRequests(page, fixture.origin);
+  // Sharing policy and a bound Secret by ID: the reads only an administrator's page sends.
+  const administrationPath = (path) => /\/iam\/|\/secrets\/sec_/.test(path);
+  const adminDenials = () =>
+    authorizationDenials(auditSink, /^openclaw\.(observability|backends|iam|secrets)\./);
+  const accessUrl = String(detailUrl(fixture, namespace.id, agent.id, "draft", "access"));
+  const sidebarLink = (name) => page.locator("nav").getByRole("link", { name, exact: true });
+
+  const revoke = grantInstallationAdministration(fixture, account.principal);
+  await login(page, fixture, `/console/settings?namespace=${namespace.id}`, account.credentials);
+  await page.getByRole("heading", { name: "Installation Driver configuration" }).waitFor();
+  await waitForIdleFetches(page);
+  revoke();
+
+  for (const [round, leave] of [
+    async () => {
+      await sidebarLink("Agents").first().click();
+      await page.getByRole("link", { name: "Mid-check Agent", exact: true }).first().waitFor();
+    },
+    async () => {
+      await page.locator(".account-toggle").click();
+      await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+      await page.getByRole("heading", { name: "Sign in", exact: true }).waitFor();
+    },
+  ].entries()) {
+    // The tab still takes her for an administrator, so the Access tab sends its reads.
+    const first = await holdRequests(
+      t,
+      page,
+      (address) => administrationPath(new URL(address).pathname),
+      { once: true, afterServer: true },
+    );
+    await page.goto(accessUrl);
+    assert.equal((await first.requested).status(), 403);
+    assert.equal(adminDenials().length, round + 1);
+    const sent = requests.length;
+    await leave();
+    first.release();
+    await waitForIdleFetches(page);
+    assert.deepEqual(
+      requests.slice(sent).filter(({ path }) => administrationPath(path)),
+      [],
+      `round ${round}`,
+    );
+    assert.equal(adminDenials().length, round + 1);
+  }
+});
+
+// Only a Backends refusal settles Installation administration as false (finding 2627). A read that
+// fails for another reason, here an unavailable dependency, says nothing about it: the
+// administrator keeps the Observability link.
+test("A Backends failure other than a refusal keeps an administrator's answer", async (t) => {
+  const url = "https://metrics.example.test/d/operations";
+  const fixture = await createConsoleAppFixture(t, { observabilityUrl: url });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Backends outage", { ready: true });
+  const { page } = await newPage(t, fixture);
+  await trackSettledFetches(page);
+  const observability = page.getByRole("link", { name: "Observability", exact: true });
+  const isBackends = (address) => new URL(address).pathname === "/backends";
+  await page.route(isBackends, (route) =>
+    route.fulfill(apiErrorResponse(503, "DEPENDENCY_UNAVAILABLE", "Try again.")),
+  );
+
+  const read = page.waitForResponse(
+    (response) => isBackends(response.url()) && response.status() === 503,
+  );
+  await login(page, fixture, `/console/backends?namespace=${namespace.id}`);
+  await read;
+  await waitForIdleFetches(page);
+  assert.equal(await page.getByText(BACKENDS_DENIED, { exact: true }).count(), 0);
+  assert.equal(await observability.getAttribute("href"), url);
 });
 
 const FORBIDDEN = {
@@ -1716,7 +2167,7 @@ test("Agent detail and list show superseded and stopped deployments as neutral, 
     await observations
       .getByText(/Check this version's recorded outcome and its Logs tab/)
       .waitFor();
-    assert.equal(await observations.getByText(/recorded deployment failed with/).count(), 0);
+    assert.equal(await observations.getByText(diagnosticsRecordedFailure(c.error.code)).count(), 0);
 
     errors.set(c.agent, c.failure);
     await activity.getByRole("button", { name: "Refresh deployment" }).click();
