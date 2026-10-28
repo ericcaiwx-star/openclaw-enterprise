@@ -943,19 +943,19 @@ function withGitHubSignIn(input, github) {
   };
 }
 
-test("preflight refuses Backend ID collisions only when both Backends are configured", (t) => {
+test("preflight refuses Backend ID collisions only when both Backends are configured", async (t) => {
   const repository = { ...repositoryConfiguration(), backendId: "chatgpt-primary" };
-  assertPreflightFailure(
+  await assertPreflightFailure(
     "codex",
     managedCodexInput({ repository }),
     /Generated Backend IDs must be unique; repository\.backendId .*chatgpt-primary.* is already used/,
   );
 
   // The name is not reserved: it is valid when no ChatGPT Backend is generated.
-  const repositoryOnly = render("codex", codexInput({ repository }));
+  const repositoryOnly = await render("codex", codexInput({ repository }));
   assert.equal(repositoryOnly.summary.ok, true);
   assert.match(repositoryOnly.installation, /id: chatgpt-primary\n {4}type: github/);
-  const distinct = render("codex", managedCodexInput({ repository: repositoryConfiguration() }));
+  const distinct = await render("codex", managedCodexInput({ repository: repositoryConfiguration() }));
   assert.equal(distinct.summary.ok, true);
   assert.match(distinct.installation, /id: chatgpt-primary\n {4}type: chatgpt/);
   assert.match(distinct.installation, /id: github-primary\n {4}type: github/);
