@@ -955,7 +955,10 @@ test("preflight refuses Backend ID collisions only when both Backends are config
   const repositoryOnly = await render("codex", codexInput({ repository }));
   assert.equal(repositoryOnly.summary.ok, true);
   assert.match(repositoryOnly.installation, /id: chatgpt-primary\n {4}type: github/);
-  const distinct = await render("codex", managedCodexInput({ repository: repositoryConfiguration() }));
+  const distinct = await render(
+    "codex",
+    managedCodexInput({ repository: repositoryConfiguration() }),
+  );
   assert.equal(distinct.summary.ok, true);
   assert.match(distinct.installation, /id: chatgpt-primary\n {4}type: chatgpt/);
   assert.match(distinct.installation, /id: github-primary\n {4}type: github/);
