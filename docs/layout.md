@@ -23,7 +23,7 @@ with its own manifest and lockfile. See [Console Storybook](contributing/console
 
 Within `internal/occcli/`, `cli.go` assembles the command tree and resource
 commands. `iam.go` owns IAM policy, ServicePrincipal, and service-key commands.
-`agent_runtime.go` owns runtime inspection, revision selection for runtime reads,
+`agent_runtime.go` owns runtime inspection, version selection for runtime reads,
 and log polling. `agent_runtime_output.go` owns runtime log text, notices, and Pod
 diagnostics. `output.go` owns resource tables, structured output, and shared
 formatting helpers.
@@ -36,6 +36,7 @@ owns their deployment, workspace resource rendering, and image import.
 
 | Path                                                      | Responsibility                                                                                               |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `apps/controller/plugins/`                                | Checked-in managed plugin marketplace, portable packages, skills and OCE deployment rules.                   |
 | `apps/controller/src/`                                    | HTTP API, console serving, and API/worker entrypoints. `server.mjs` and `worker.mjs` start the processes.    |
 | `apps/controller/src/admission/`                          | Request admission and resource validation at the API boundary.                                               |
 | `apps/controller/src/http/`                               | Resource HTTP handlers and response projection, grouped by platform primitive.                               |
@@ -91,7 +92,8 @@ uses `RepoDriver` in `packages/contracts/src/repo.ts` and the bundled
 OCC owns immutable Agent bindings and safe session State; worker helpers connect
 those records to Compute delivery. Public status omits private cleanup diagnostics.
 The common engine's `RepositoryBackend` protocol is separate from `RepoDriver`.
-Only the dedicated service process initializes signing and provider-token custody.
+The worker Token Service owns GitHub App signing and provider-token custody.
+The native sender consumes prepared material without an App key.
 See the [Agent repository flow](flows/agent-repository-credentials.md).
 
 ## Deployment, tooling, and checks
@@ -121,6 +123,8 @@ selected emitted modules and minimal manifests in
 the standalone service/client images do not include the controller dependency
 graph. The full `deploy/runtime/Dockerfile` uses the repository root as its build
 context to include the emitted client router in the Agent image.
+`deploy/runtime/openclaw-source.json` owns the OpenClaw source commit, archive
+checksum, and fixed build timestamp used by that runtime recipe and its callers.
 
 Chart-owned startup scripts live under `deploy/helm/openclaw-enterprise/files/`
 and are embedded in rendered container commands; they ship with the chart.
@@ -175,7 +179,7 @@ documents with supporting material use `<number>-<topic>/index.md`, with
 companions in the same directory. Keep completed and superseded documents in
 place. Preserve historical names and content when grouping companions. This
 first phase does not reorganize `specs/.archive/`; removed image assets remain
-accessible through links to a preserved Git revision.
+accessible through links to a preserved Git commit.
 Update affected current references, guides, and flows with behavior changes;
 shipped specifications remain historical records. Keep Manual Notes unchanged.
 Put detailed contracts in their owning reference rather than expanding
@@ -184,8 +188,7 @@ architecture pages for every feature.
 Put contributor workflows for documentation in `docs/contributing/`, starting
 with the [writing guide](contributing/documentation.md). Existing site-tooling
 guides and inventories may remain directly under `docs/`; `docs/testing/` owns
-code verification and test setup. Reusable writing templates belong to the local
-technical-writing skill.
+code verification and test setup. The [documentation taxonomy](taxonomy.md) maps page kinds to their templates.
 
 The [documentation map](README.md) has six menus. **Getting Started**, **Topics**,
 **Integrations**, **Operate**, and **Reference** serve product users and operators;
