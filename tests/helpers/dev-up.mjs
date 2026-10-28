@@ -1,16 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
-import {
-  chmod,
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +9,8 @@ import { after } from "node:test";
 
 import { commandPath, composeConfigurationProvider } from "./compose.mjs";
 import { bashString, commandShim, startCommandServer } from "./fixture-command-server.mjs";
+import { readJsonLines as readJsonLinesFile } from "./json-lines.mjs";
+import { temporaryDirectory } from "./temporary-directory.mjs";
 
 const repository = fileURLToPath(new URL("../..", import.meta.url));
 const serviceKey = "sk-test-secret-value";
@@ -579,15 +572,15 @@ function lifecycleCommand(fake, invocation, io) {
             ["openclaw-development/import-b9b4e5950649:occ-dev-owned", "c".repeat(64)],
             [
               "openclaw-development/openshell-gateway:occ-dev-owned",
-              "bdb4fe248070032c88be78f029dad9325cb698480e90486e1413a674a5d8edc8",
+              "ca0bc15a045017ee20bfab682f1a561eca6e6c6ed7d021d20641da24aaa6dfb6",
             ],
             [
               "openclaw-development/openshell-sandbox:occ-dev-owned",
-              "ca00c094aeaa60681b8196cda18ab3c5dd5f7d782d4c36798256427b67599070",
+              "e9adf9ecde328122414ad2ee8c6fc5d5b389e4cf168daf4357c46f5a77d55851",
             ],
             [
               "openclaw-development/openshell-supervisor:occ-dev-owned",
-              "aa681d8264af6ee860e38349ed3c76609a51778eb6d0f02743df03787b80a290",
+              "fabcd01f656e9d23df4386f82e80b4f48b90f3452d7d5c58889007643a069161",
             ],
           ]
             .map(
@@ -806,12 +799,16 @@ async function writeFakeCommand(fake, path, command) {
 }
 
 async function createFixture(t, options = {}) {
-  const directory = await mkdtemp(join(tmpdir(), "openclaw-dev-up-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await temporaryDirectory(t, "openclaw-dev-up-");
 
   const fixtureRepository = join(directory, "repository");
   await mkdir(join(fixtureRepository, "scripts"), { recursive: true });
   await mkdir(join(fixtureRepository, "bin"), { recursive: true });
+  await mkdir(join(fixtureRepository, "deploy/runtime"), { recursive: true });
+  await copyFile(
+    join(repository, "deploy/runtime/openclaw-source.json"),
+    join(fixtureRepository, "deploy/runtime/openclaw-source.json"),
+  );
   for (const script of ["dev-up", "dev-down"]) {
     const destination = join(fixtureRepository, "scripts", script);
     await copyFile(join(repository, "scripts", script), destination);
@@ -1072,20 +1069,10 @@ function runDevDown(env) {
   });
 }
 
-async function readJsonLines(path) {
-  try {
-    const content = await readFile(path, "utf8");
-    return content
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  }
+// A dev-up log the fixture may not have written yet: a missing file is no records, and blank
+// lines are skipped.
+function readJsonLines(path) {
+  return readJsonLinesFile(path, { missingOk: true, skipBlank: true });
 }
 
 function composeInvocations(logs) {

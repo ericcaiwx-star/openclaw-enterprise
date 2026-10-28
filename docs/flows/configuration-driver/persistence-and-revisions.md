@@ -2,7 +2,7 @@
 
 # Configuration persistence and Agent revision snapshots
 
-Follow Configuration storage transactions into immutable Agent revision admission. See the [parent flow](../configuration-driver.md) for its context and overall sequence.
+Trace how OCC reads a Configuration and saves its values in an Agent revision. See the [parent flow](../configuration-driver.md) for its context and overall sequence.
 
 ## Execution trace
 
@@ -18,8 +18,10 @@ OCC owns API-level native Configuration validation before it calls the selected
 bundled or installed Configuration Driver: model provider settings,
 `requireDeployableRoster` in
 [the roster rules](../../../packages/occ/src/openclaw-roster.ts), which refuses
-an `agents` roster or a model fallback on another provider than its primary's
-that every deployment refuses with deployment's own text, and
+an `agents` roster, a model or fallback that is not `<provider>/<model>`
+(OpenClaw's `openrouter:auto` included), or a fallback on another provider than
+its primary's, all of which every deployment refuses, with deployment's own
+text, and
 [the settings rules](../../../packages/occ/src/configuration-settings.ts), which
 refuse a Codex approval policy the Gateway refuses and a literal
 `gateway.auth.password`, and the selected Compute Driver's optional
@@ -96,7 +98,9 @@ prerequisites.
 
 <span id="5-resolve-the-agent-reference-and-freeze-an-immutable-revision" class="anchor-alias"></span>
 
-### 5. Resolve the Agent reference and freeze an immutable Agent revision
+<span id="5-resolve-the-agent-reference-and-freeze-an-immutable-agent-revision" class="anchor-alias"></span>
+
+### 5. Resolve the Agent reference and save the deployment configuration
 
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
@@ -127,8 +131,8 @@ checks the Harness authentication binding (Kubernetes Compute also runs the shar
 preparation and the Gateway entrypoint apply after a dedicated deployment stops its
 predecessors: enabled channels need a dedicated workload and `runtime.channels`, and a
 Gateway hosting a workspace node needs the file-transfer plugin) and, through optional
-`validateGatewaySettings`, the native gateway settings: Kubernetes Compute refuses
-a setting every preparation would refuse with `409`, naming the setting and never
+`validateGatewaySettings`, the native gateway settings: Kubernetes and Docker Compute
+refuse a setting every preparation would refuse with `409`, naming the setting and never
 its value, before an Agent revision exists. Kubernetes and Docker Compute also refuse
 listeners that routed traffic cannot reach, which the local readiness check would
 pass: a `gateway.bind` other than `auto`, `lan` or `custom`, `custom` unless
@@ -140,8 +144,12 @@ a Codex approval policy outside `never`, `on-request` and `on-failure` this way;
 Kubernetes also refuses a `gateway.auth.password` other than the
 `OPENCLAW_GATEWAY_PASSWORD` reference. The selected PluginDriver's
 optional `validateAgentConfiguration` then checks plugin selections against the
-admitted values. OCC freezes
-the admitted values, including any remaining inline unresolved SecretRefs, into
+admitted values. OCC then applies
+[`withAgentIdentityName`](../../../packages/occ/src/openclaw-roster.ts), which
+sets the Agent name as the sole roster entry's `identity.name` unless the
+Configuration names it ([rules](../../reference/agents/deployment.md#versions-and-deployment)).
+No check above reads that setting. OCC freezes
+the result, including any remaining inline unresolved SecretRefs, into
 `AgentRevision.configuration`; separate `configurationId`, `configurationKind`,
 and `configurationGeneration` fields pin the selected Configuration metadata.
 The Agent revision also pins the selected OpenClaw or Codex Harness descriptor,
@@ -152,7 +160,7 @@ Configuration edits increment its generation but affect only later explicit
 deployments; historical Agent revisions and their admitted snapshots remain unchanged.
 PostgreSQL enforces the supported kind, positive generation, exact admitted
 snapshot shape, ownership, and Agent revision immutability. OCC records an
-attributable sanitized admission event and hands the immutable Agent revision to
+attributable sanitized admission event and hands the Agent revision to
 Compute-owned reconciliation without resolving credential bytes or starting a
 gateway during HTTP admission. A development worker can subsequently create or
 reuse exactly one gateway for the owning Agent during Agent revision preparation.
