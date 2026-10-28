@@ -286,14 +286,13 @@ remain reserved even when their sources are skipped. It combines those IDs with
 selected unsaved sources resolved from live names, and rejects shared destinations
 before any mutation or ID-map save. The operator
 chooses distinct `--rename` targets, skips a source, or corrects a conflicting
-saved map before retrying. A one-to-one mapping can still reuse an empty target
-and resume. A skipped source without a saved destination reserves nothing.
+saved map before retrying. Saved mappings resume after these checks. A skipped
+source without a saved destination reserves nothing.
 The check does not separate resources an older import already merged.
 
-`--rename` keys are literal. Without an explicit rename, even `constructor` and
-`__proto__` keep their names. Without a saved mapping, exact-name reuse requires
-a Namespace with no Agents or Secrets. Saved mappings resume subject to the
-distinct-destination checks above.
+`--rename` keys are literal: `constructor` and `__proto__` remain unchanged unless
+renamed. Without a saved mapping, exact-name reuse requires a Namespace without
+Agents or Secrets.
 
 ## Debugging and Verification
 
