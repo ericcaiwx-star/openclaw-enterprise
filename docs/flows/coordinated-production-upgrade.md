@@ -290,12 +290,10 @@ saved map before retrying. A one-to-one mapping can still reuse an empty target
 and resume. A skipped source without a saved destination reserves nothing.
 The check does not separate resources an older import already merged.
 
-During restore, `importTenants` uses only explicit own entries in the rename map;
-otherwise it preserves the exported Namespace name, including `constructor` and
-`__proto__`. The CLI treats `--rename` keys literally. For a source without a
-saved destination, an exact-name match can be reused only if it holds no Agents
-or Secrets; a populated match is rejected. Saved mappings remain resumable,
-subject to the distinct-destination checks above.
+`--rename` keys are literal. Without an explicit rename, even `constructor` and
+`__proto__` keep their names. Without a saved mapping, exact-name reuse requires
+a Namespace with no Agents or Secrets. Saved mappings resume subject to the
+distinct-destination checks above.
 
 ## Debugging and Verification
 
