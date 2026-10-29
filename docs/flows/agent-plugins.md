@@ -369,6 +369,6 @@ establish starvation.
 
 ## Changelog
 
-- 2026-10-29: Release deferred catalog loading when its tab is no longer current. (authoring-run/7a2bb516-4223-4156-b1a8-1d89f60a54d4)
+- 2026-10-29 22:19: Release deferred catalog loading when its tab is no longer current. (authoring-run/7a2bb516-4223-4156-b1a8-1d89f60a54d4)
 
 [Agent plugin deployment documentation history](agent-plugins/history.md) preserves the older dated entries.
