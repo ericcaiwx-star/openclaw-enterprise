@@ -962,10 +962,15 @@ test("plugin prefetch remains usable after leaving during its debounce", async (
     { executionMode: "dedicated", harnessAuth: null },
   );
   const agentPath = `/namespaces/${namespace.id}/agents/${agent.id}`;
-  const initialSelections = (await fixture.request("GET", agentPath)).data.plugins;
+  const initialSelections = { "occ-plugin:google@1.0.0": { enabled: false } };
+  const saved = await fixture.request("PATCH", agentPath, {
+    body: { configurationId: agent.configurationId, plugins: initialSelections },
+  });
+  assert.equal(saved.status, 200);
   const { page } = await newPage(t, fixture);
   await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "configuration"));
   await page.getByRole("tab", { name: "Configuration", exact: true }).waitFor();
+  // Leave after capabilities arrive but before the deferred read, then expire it while hidden.
   await page.clock.install();
   await page.clock.pauseAt(Date.now() + 1000);
   const capabilities = page.waitForResponse((r) => r.url().endsWith("/plugins/capabilities"));
