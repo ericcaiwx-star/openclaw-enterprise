@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { cp, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -477,13 +477,21 @@ test(
       directory,
       `first-agent-${createHash("sha256").update("state-contract-test").digest("hex").slice(0, 32)}.json`,
     );
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
-    const saved = await readFile(path, "utf8");
+    const readRecord = async () => {
+      const file = await open(path, "r");
+      try {
+        return { mode: (await file.stat()).mode & 0o777, content: await file.readFile("utf8") };
+      } finally {
+        await file.close();
+      }
+    };
+    const saved = await readRecord();
+    assert.equal(saved.mode, 0o600);
     await writeFile(engineLog, "", { mode: 0o600 });
     const retry = await runFirstAgentAsync(env);
     assert.match(retry, /kubectl did not complete successfully \(exit 23\)/);
     assert.match(await readFile(engineLog, "utf8"), /exec -i statefulset\/postgres/);
-    assert.equal(await readFile(path, "utf8"), saved);
+    assert.deepEqual(await readRecord(), saved);
   },
 );
 
