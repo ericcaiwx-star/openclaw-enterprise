@@ -943,3 +943,45 @@ test("No Slack approvers does not ask the operator to select hidden people", asy
   );
   assert.equal(hints.preserved.pickerHidden, true);
 });
+
+test("plugin prefetch remains usable after leaving during its debounce", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Plugin return", { ready: true });
+  for (const driver of [
+    new OCCPluginDriver(),
+    createTestKubernetesComputeDriver("compute-plugin-return"),
+  ]) {
+    fixture.controller.registerDriver(driver);
+    fixture.controller.selectDriver(driver.capability, driver.id);
+  }
+  const agent = await fixture.createAgent(
+    namespace.id,
+    "Plugin return Agent",
+    nativeValues("package"),
+    { executionMode: "dedicated", harnessAuth: null },
+  );
+  const agentPath = `/namespaces/${namespace.id}/agents/${agent.id}`;
+  const initialSelections = (await fixture.request("GET", agentPath)).data.plugins;
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "configuration"));
+  await page.getByRole("tab", { name: "Configuration", exact: true }).waitFor();
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 1000);
+  const capabilities = page.waitForResponse((r) => r.url().endsWith("/plugins/capabilities"));
+  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+  await (await capabilities).finished();
+  await page.getByRole("button", { name: "Configure plugins", exact: true }).waitFor();
+  await page.getByRole("tab", { name: "Configuration", exact: true }).click();
+  await page.clock.runFor(400);
+  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+  await page.getByRole("button", { name: "Configure plugins", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Configure plugins" });
+  await page.clock.runFor(1000);
+  await dialog.getByRole("button", { name: "Google Workspace", exact: true }).waitFor();
+  assert.equal(
+    await dialog.getByRole("button", { name: "Loading plugins…", exact: true }).count(),
+    0,
+  );
+  assert.deepEqual((await fixture.request("GET", agentPath)).data.plugins, initialSelections);
+});
